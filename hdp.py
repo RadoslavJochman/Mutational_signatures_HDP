@@ -7,7 +7,7 @@ import phylox
 import networkx as nx
 from networkx.drawing.nx_pydot import graphviz_layout
 import matplotlib.pyplot as plt
-
+import pandas as pd
 
 class Measure(ABC):
     """
@@ -233,7 +233,7 @@ class HDP:
             arrowsize=max(10, 25 - (N // 2))
         )
 
-        edge_labels = (((i,j),self.graph.nodes('mutations')[j]) for i, j in self.graph.edges())
+        edge_labels = (((i,j),self.graph.nodes('mutations')[j][:6]) for i, j in self.graph.edges())
 
         nx.draw_networkx_edge_labels(
             self.graph, pos,
@@ -254,3 +254,36 @@ class HDP:
             return self.graph.nodes[self.graph.label_to_node_dict[node_label]]
         else:
             return self.graph.nodes[self.graph.label_to_node_dict[node_label]][data_type]
+
+    def get_mutation_count_matrix(self) -> pd.DataFrame:
+        """
+        Aggregates the raw list of mutations into an N x 96 count matrix.
+        Rows are node labels, columns are the 96 trinucleotide mutation channels.
+        Skips nodes that have 0 mutations.
+
+        Returns:
+            pd.DataFrame: A formatted count matrix.
+        """
+
+        node_labels = []
+        count_rows = []
+
+        for node in self.graph.nodes():
+            # Get the actual name of the node
+            label = self.graph.nodes[node].get('label', str(node))
+            mutations = self.graph.nodes[node].get('mutations', [])
+
+            # If a node has no mutations, we skip it
+            if not mutations:
+                continue
+
+            counts = np.bincount(mutations, minlength=96)
+
+            node_labels.append(label)
+            count_rows.append(counts)
+
+        # Build the final DataFrame
+        column_names = [f"Channel_{i}" for i in range(96)]
+        df = pd.DataFrame(count_rows, index=node_labels, columns=column_names)
+
+        return df
