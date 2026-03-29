@@ -5,6 +5,8 @@ from typing import List, Dict, Optional
 from scipy.stats import dirichlet, uniform, beta, multinomial
 import phylox
 import networkx as nx
+from networkx.drawing.nx_pydot import graphviz_layout
+import matplotlib.pyplot as plt
 
 RANDOM_SEED = 42
 rng = np.random.default_rng(RANDOM_SEED)
@@ -186,3 +188,62 @@ class HDP:
             results[self.graph.nodes[node]['label']] = mutations_list
 
         return results
+
+    def plot_tree(self, save_path: str = None):
+        """
+        Calculates a top-down layout using Graphviz and plots the phylogenetic tree.
+
+        Args:
+            save_path: Optional. File path to save the high-resolution image.
+        """
+        N = len(self.graph.nodes())
+
+        # Create a temporary graph with graphviz safe names
+        safe_mapping = {n: f"Node_{str(n).replace('-', 'M')}" for n in self.graph.nodes()}
+        reverse_mapping = {v: k for k, v in safe_mapping.items()}
+
+        layout_graph = nx.DiGraph()
+        layout_graph.add_nodes_from(safe_mapping.values())
+        for u, v in self.graph.edges():
+            layout_graph.add_edge(safe_mapping[u], safe_mapping[v])
+
+        # Calculate positions and map them back to the original raw IDs
+        safe_pos = graphviz_layout(layout_graph, prog="dot")
+        pos = {reverse_mapping[safe_node]: coords for safe_node, coords in safe_pos.items()}
+
+        # Dynamic Scaling
+        dynamic_node_size = max(400, 150000 // max(1, N))
+        dynamic_node_font = max(6, dynamic_node_size//500)
+        dynamic_edge_font = max(5, dynamic_node_size//500)
+        fig_width = max(10, N * 0.6)
+        fig_height = max(8, N * 0.4)
+
+        plt.figure(figsize=(fig_width, fig_height))
+
+        nx.draw(
+            self.graph, pos,
+            labels=dict(self.graph.nodes(data='label')),
+            node_color='lightblue',
+            node_size=dynamic_node_size,
+            font_size=dynamic_node_font,
+            font_weight='bold',
+            edge_color='gray',
+            arrows=True,
+            arrowsize=max(10, 25 - (N // 2))
+        )
+
+        edge_labels = (((i,j),self.graph.nodes('mutations')[j]) for i, j in self.graph.edges())
+
+        nx.draw_networkx_edge_labels(
+            self.graph, pos,
+            edge_labels=dict(edge_labels),
+            font_color='red',
+            font_size=dynamic_edge_font,
+            font_weight='bold'
+        )
+
+        if save_path:
+            plt.savefig(save_path, dpi=600)
+            print(f"Saved high-resolution plot to '{save_path}'")
+
+        plt.show()
