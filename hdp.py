@@ -8,8 +8,6 @@ import networkx as nx
 from networkx.drawing.nx_pydot import graphviz_layout
 import matplotlib.pyplot as plt
 
-RANDOM_SEED = 42
-rng = np.random.default_rng(RANDOM_SEED)
 
 class Measure(ABC):
     """
@@ -17,6 +15,7 @@ class Measure(ABC):
     Both the Global Prior (H) and any Dirichlet Process (G) are measures
     that can be sampled from.
     """
+    seed_generator = None
 
     @abstractmethod
     def sample(self) -> np.ndarray:
@@ -34,7 +33,7 @@ class DirichletPrior(Measure):
     Represents the base measure H at the very top of the hierarchy.
     """
 
-    def __init__(self, dimensions: int = 96):
+    def __init__(self, dimensions: int = 96, seed_generator=None):
         """
         Initializes the symmetric prior for the mutational signatures.
 
@@ -43,6 +42,7 @@ class DirichletPrior(Measure):
         """
         self.dimensions = dimensions
         self.prior_alpha = np.ones(self.dimensions) / self.dimensions
+        self.seed_generator = seed_generator if seed_generator is not None else np.random.default_rng()
 
     def sample(self) -> np.ndarray:
         """
@@ -52,7 +52,7 @@ class DirichletPrior(Measure):
         Returns:
             np.ndarray: A 'self.dimensions'-dimensional probability vector.
         """
-        return dirichlet.rvs(self.prior_alpha, random_state=rng)[0]
+        return dirichlet.rvs(self.prior_alpha, random_state=self.seed_generator)[0]
 
 
 class DirichletProcess(Measure):
@@ -71,6 +71,7 @@ class DirichletProcess(Measure):
         """
         self.alpha = alpha
         self.base_measure = base_measure
+        self.seed_generator = self.base_measure.seed_generator
 
         # State tracking for the stick-breaking process (e ~ Stick(alpha))
         self.mut_activities: List[float] = []  # Stores the lengths of the broken stick pieces (e_i)
@@ -84,7 +85,7 @@ class DirichletProcess(Measure):
         Draws a new signature from `self.base_measure.sample()`.
         Appends the new activity and signature to the state trackers.
         """
-        fraction = beta.rvs(1, self.alpha, random_state=rng)
+        fraction = beta.rvs(1, self.alpha, random_state=self.seed_generator)
         e_i = fraction * self.remaining_stick
         self.remaining_stick -= e_i
         self.mut_activities.append(e_i)
@@ -105,7 +106,7 @@ class DirichletProcess(Measure):
         Returns:
             np.ndarray: The selected 96-dimensional probability vector.
         """
-        a = uniform.rvs(0, 1, random_state=rng)
+        a = uniform.rvs(0, 1, random_state=self.seed_generator)
         while 1 - self.remaining_stick <= a:
             self._break_new_stick_piece()
         index = bisect.bisect(self._cumsums, a)-1
@@ -131,7 +132,7 @@ class HDP:
         self.alpha_0 = alpha_0
         self.alpha_dict = alpha_dict if alpha_dict is not None else {}
         self.default_alpha_j = default_alpha_j
-
+        self.seed_generator = self.global_prior.seed_generator
         # Parse the Newick string
         self.graph = phylox.DiNetwork.from_newick(newick_string)
 
@@ -182,7 +183,7 @@ class HDP:
 
             for _ in range(num_mutations):
                 theta_ji = dp_model.sample()
-                x_ji = np.argmax(multinomial.rvs(1, theta_ji, random_state=rng))
+                x_ji = np.argmax(multinomial.rvs(1, theta_ji, random_state=self.seed_generator))
                 mutations_list.append(int(x_ji))
 
             results[self.graph.nodes[node]['label']] = mutations_list
