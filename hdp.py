@@ -116,10 +116,19 @@ class HDP:
     and orchestrates the HDP.
     """
 
-    def __init__(self, newick_string: str, global_prior: Measure, alpha_0: float, alpha_j: float):
+    def __init__(self, newick_string: str, global_prior: Measure, alpha_0: float, alpha_dict: Dict[str, float] = None, default_alpha_j: float = 2.0):
+        """
+        Args:
+            newick_string: The tree topology in Newick format.
+            global_prior: The base measure H.
+            alpha_0: Concentration parameter for the root G_0.
+            alpha_dict: A dictionary mapping specific node names to their unique alpha_j.
+            default_alpha_j: The fallback alpha_j if a node is not in alpha_dict.
+        """
         self.global_prior = global_prior
         self.alpha_0 = alpha_0
-        self.alpha_j = alpha_j
+        self.alpha_dict = alpha_dict if alpha_dict is not None else {}
+        self.default_alpha_j = default_alpha_j
 
         # Parse the Newick string
         self.graph = phylox.DiNetwork.from_newick(newick_string)
@@ -141,7 +150,8 @@ class HDP:
             else:
                 # Child node: G_j ~ DP(alpha_j, G_s)
                 parent_dp = self.graph.nodes[parents[0]]['dp_model']
-                dp = DirichletProcess(alpha=self.alpha_j, base_measure=parent_dp)
+                node_alpha = self.alpha_dict.get(node, self.default_alpha_j)
+                dp = DirichletProcess(alpha=node_alpha, base_measure=parent_dp)
 
             # Store the model and initialize the mutations list
             self.graph.nodes[node]['dp_model'] = dp
