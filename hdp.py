@@ -248,3 +248,9 @@ class HDP:
             print(f"Saved high-resolution plot to '{save_path}'")
 
         plt.show()
+
+    def get_data(self, node_label: str, data_type=None):
+        if data_type is None:
+            return self.graph.nodes[self.graph.label_to_node_dict[node_label]]
+        else:
+            return self.graph.nodes[self.graph.label_to_node_dict[node_label]][data_type]
