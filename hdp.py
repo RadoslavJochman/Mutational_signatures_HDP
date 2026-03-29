@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 import bisect
 import numpy as np
-from typing import List
-from scipy.stats import dirichlet
-from scipy.stats import beta
-from scipy.stats import uniform
+from typing import List, Dict, Optional
+from scipy.stats import dirichlet, uniform, beta, multinomial
+import phylox
+import networkx as nx
 
 RANDOM_SEED = 42
 rng = np.random.default_rng(RANDOM_SEED)
@@ -108,3 +108,71 @@ class DirichletProcess(Measure):
             self._break_new_stick_piece()
         index = bisect.bisect(self._cumsums, a)-1
         return self.signatures[index]
+
+
+class HDP:
+    """
+    Manages the tree topology using PhyloX,
+    and orchestrates the HDP.
+    """
+
+    def __init__(self, newick_string: str, global_prior: Measure, alpha_0: float, alpha_j: float):
+        self.global_prior = global_prior
+        self.alpha_0 = alpha_0
+        self.alpha_j = alpha_j
+
+        # Parse the Newick string
+        self.graph = phylox.DiNetwork.from_newick(newick_string)
+
+        # Populate the graph with Dirichlet processes
+        self._initialize_dp_models()
+
+    def _initialize_dp_models(self):
+        """
+        Traverses the DAG in topological order to instantiate the DPs.
+        This guarantees parents are fully initialized before children.
+        """
+        for node in nx.topological_sort(self.graph):
+            parents = list(self.graph.predecessors(node))
+
+            if not parents:
+                # Root node: G_0 ~ DP(alpha_0, H)
+                dp = DirichletProcess(alpha=self.alpha_0, base_measure=self.global_prior)
+            else:
+                # Child node: G_j ~ DP(alpha_j, G_s)
+                parent_dp = self.graph.nodes[parents[0]]['dp_model']
+                dp = DirichletProcess(alpha=self.alpha_j, base_measure=parent_dp)
+
+            # Store the model and initialize the mutations list
+            self.graph.nodes[node]['dp_model'] = dp
+            self.graph.nodes[node]['mutations'] = []
+
+            # Extract branch length from edge data to use as num_mutations
+            # Assuming the root has 0 mutations, and children inherit branch length from their incoming edge
+            if parents:
+                edge_data = self.graph.get_edge_data(parents[0], node)
+                # Fallback to 0 if length isn't specified
+                branch_length = edge_data.get('length', 0.0)
+            else:
+                branch_length = 0.0
+
+            self.graph.nodes[node]['num_mutations'] = int(branch_length)
+
+    def generate_all_data(self) -> Dict[str, List[int]]:
+        """
+        Iterates through the graph, samples from the DPs, and generates mutations.
+        """
+        results = {}
+        for node in self.graph.nodes():
+            dp_model = self.graph.nodes[node]['dp_model']
+            num_mutations = self.graph.nodes[node]['num_mutations']
+            mutations_list = self.graph.nodes[node]['mutations']
+
+            for _ in range(num_mutations):
+                theta_ji = dp_model.sample()
+                x_ji = multinomial.rvs(1, theta_ji, random_state=rng)
+                mutations_list.append(x_ji)
+
+            results[node] = mutations_list
+
+        return results
