@@ -181,7 +181,7 @@ class HDP:
             for _ in range(num_mutations):
                 theta_ji = dp_model.sample()
                 x_ji = np.argmax(multinomial.rvs(1, theta_ji, random_state=rng))
-                mutations_list.append(x_ji)
+                mutations_list.append(int(x_ji))
 
             results[node] = mutations_list
 
