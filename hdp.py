@@ -150,7 +150,7 @@ class HDP:
             else:
                 # Child node: G_j ~ DP(alpha_j, G_s)
                 parent_dp = self.graph.nodes[parents[0]]['dp_model']
-                node_alpha = self.alpha_dict.get(node, self.default_alpha_j)
+                node_alpha = self.alpha_dict.get(self.graph.nodes[node]['label'], self.default_alpha_j)
                 dp = DirichletProcess(alpha=node_alpha, base_measure=parent_dp)
 
             # Store the model and initialize the mutations list
@@ -183,6 +183,6 @@ class HDP:
                 x_ji = np.argmax(multinomial.rvs(1, theta_ji, random_state=rng))
                 mutations_list.append(int(x_ji))
 
-            results[node] = mutations_list
+            results[self.graph.nodes[node]['label']] = mutations_list
 
         return results
