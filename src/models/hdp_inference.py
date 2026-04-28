@@ -420,7 +420,7 @@ class UnknownSigHDP(_BaseTreeHDP):
             for root in nodes_by_depth.get(0, []):
                 e_root = pm.Dirichlet(
                     f"e_{root}",
-                    a=(shared_alpha * e_0),
+                    a=(shared_alpha * e_0) + 1.01,
                 )
                 node_es[root] = e_root
                 self.node_index_map[root] = (f"e_{root}", None)
@@ -435,7 +435,7 @@ class UnknownSigHDP(_BaseTreeHDP):
                     list(self.graph.predecessors(n))[0] for n in current_nodes
                 ]
                 parent_e_stack = pt.stack([node_es[p] for p in parent_nodes])
-                a_matrix = shared_alpha * parent_e_stack  # (N_current, K_max)
+                a_matrix = shared_alpha * parent_e_stack + 1.01  # (N_current, K_max)
 
                 e_name = f"e_level_{depth}"
 
