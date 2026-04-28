@@ -1,0 +1,47 @@
+# Configuration for the experiment Tree-HDP simulation study.
+
+experiment_name: experiment
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  num_signatures: 10          # K
+  signature_alpha: 1/96
+  alpha: 15.0                 # shared concentration parameter
+  results_dir: ../data/   # All the generation results are saved here in <result_path>/<experiment_name>
+
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500
+    max_branch_length: 5000
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  # Directory with data
+  data:
+    count_matrix: ../data/experiment/mutation_count_matrix.csv
+    newick_string: ../data/experiment/newick_string.nwk
+    # Optional if known
+    fixed_signatures: ../data/experiment/fixed_signatures.csv
+    true_activities: ../data/experiment/true_activities.csv
+    ground_truth_params: ../data/experiment/ground_truth_params.json
+
+  priors:
+    sig_alpha_prior: Dir
+    sig_alpha_prior_parm:
+      a: 1/96
+    alpha_prior: LogNorm
+    alpha_prior_parm:
+      mu: 2.5
+      sigma: 1.0
+
+  # NUTS sampler settings
+  draws: 1500
+  tune: 5000
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+
+  results_dir: ../results/
