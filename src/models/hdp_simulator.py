@@ -237,6 +237,7 @@ class Forward_HDP_Generator:
     The generative process is:
         e_0  ~ Dir(alpha/K * 1_K)            # global cohort baseline
         e_j  ~ Dir(alpha * e_parent)          # per-node activities
+        M_j  ~ Poisson(lam)                     # mutation count per node
         x_ji ~ Categorical(e_j @ signatures)  # observed mutations
 
     Parameters
@@ -248,6 +249,8 @@ class Forward_HDP_Generator:
         Shared concentration parameter used at every node.
     fixed_signatures : np.ndarray
         Shape (K, 96).  The fixed mutational signature matrix.
+    lam : float
+        Mean of the Poisson distribution for the number of mutations per node.
     seed : int
         Random seed for reproducibility.
     """
@@ -256,10 +259,12 @@ class Forward_HDP_Generator:
         self,
         newick_string: str,
         alpha: float,
+        lam: float,
         fixed_signatures: np.ndarray,
         seed: int = 42,
     ):
         self.alpha = alpha
+        self.lam = lam
         self.fixed_signatures = fixed_signatures
         self.K = fixed_signatures.shape[0]
         self.rng = np.random.default_rng(seed)
@@ -277,8 +282,9 @@ class Forward_HDP_Generator:
 
     def _initialize_node_activities(self) -> None:
         """
-        Traverse every tree in topological order, drawing activity vectors
-        e_j ~ Dir(alpha * e_parent) for each node.
+        Traverse every tree in topological order, drawing:
+          - e_j   ~ Dir(alpha * e_parent)  for every node including roots
+          - M_j   ~ Poisson(lam)           for every node including roots
         """
         for graph in self.graphs:
             for node in nx.topological_sort(graph):
@@ -291,15 +297,7 @@ class Forward_HDP_Generator:
 
                 a_vector = np.clip(self.alpha * parent_e, 1e-9, None)
                 graph.nodes[node]["e_vector"] = self.rng.dirichlet(a_vector)
-
-                if parents:
-                    edge_data = graph.get_edge_data(parents[0], node)
-                    branch_length = edge_data.get("length", 0.0)
-                else:
-                    branch_length = 0.0
-
-                graph.nodes[node]["num_mutations"] = int(branch_length)
-
+                graph.nodes[node]["num_mutations"] = int(self.rng.poisson(self.lam))
 
     def get_mutation_count_matrix(self) -> pd.DataFrame:
         """
@@ -317,8 +315,7 @@ class Forward_HDP_Generator:
         for graph in self.graphs:
             for node in graph.nodes():
                 num_mut = graph.nodes[node]["num_mutations"]
-                # We skip roots which don't have any mutations
-                if num_mut <= 0:
+                if num_mut == 0:
                     continue
                 e_vector = graph.nodes[node]["e_vector"]
                 expected_probs = np.dot(e_vector, self.fixed_signatures)

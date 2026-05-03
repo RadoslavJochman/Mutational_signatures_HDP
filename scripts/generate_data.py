@@ -79,12 +79,14 @@ def run_fixed_sig(cfg: dict) -> None:
 
     # Forward simulation
     alpha = sim["alpha"]
+    lam = sim["lam"]
     generator_seed = int(rng.integers(0, 2**31))
     generator = Forward_HDP_Generator(
         newick_string=newick_string,
         alpha=alpha,
         fixed_signatures=signatures,
         seed=generator_seed,
+        lam=lam,
     )
 
     count_matrix = generator.get_mutation_count_matrix()
