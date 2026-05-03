@@ -259,12 +259,12 @@ class Forward_HDP_Generator:
         self,
         newick_string: str,
         alpha: float,
-        lam: float,
+        lam_root: float,
         fixed_signatures: np.ndarray,
         seed: int = 42,
     ):
         self.alpha = alpha
-        self.lam = lam
+        self.lam_root = lam_root
         self.fixed_signatures = fixed_signatures
         self.K = fixed_signatures.shape[0]
         self.rng = np.random.default_rng(seed)
@@ -290,6 +290,12 @@ class Forward_HDP_Generator:
             for node in nx.topological_sort(graph):
                 parents = list(graph.predecessors(node))
 
+                if not parents:
+                    lam = self.lam_root
+                else:
+                    edge_data = graph.get_edge_data(parents[0], node)
+                    lam = edge_data.get("length", self.lam_root)
+
                 parent_e = (
                     self.e_0 if not parents
                     else graph.nodes[parents[0]]["e_vector"]
@@ -297,7 +303,7 @@ class Forward_HDP_Generator:
 
                 a_vector = np.clip(self.alpha * parent_e, 1e-9, None)
                 graph.nodes[node]["e_vector"] = self.rng.dirichlet(a_vector)
-                graph.nodes[node]["num_mutations"] = int(self.rng.poisson(self.lam))
+                graph.nodes[node]["num_mutations"] = int(self.rng.poisson(lam))
 
     def get_mutation_count_matrix(self) -> pd.DataFrame:
         """

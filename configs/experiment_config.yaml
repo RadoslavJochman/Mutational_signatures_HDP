@@ -8,7 +8,7 @@ simulation:
   num_signatures: 10          # K
   signature_alpha: 1/96
   alpha: 15.0                 # shared concentration parameter
-  lam: 3250                   # expected number of mutations per node
+  lam_root: 3250                   # expected number of mutations in the roots
   results_dir: ../data/   # All the generation results are saved here in <result_path>/<experiment_name>
 
   forest:
