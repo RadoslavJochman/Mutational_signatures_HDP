@@ -250,24 +250,21 @@ class FixedSigHDP(_BaseTreeHDP):
 
             node_es: Dict[str, pt.TensorVariable] = {}
 
-            # Depth 0: one named variable per root
-            for root in nodes_by_depth.get(0, []):
-                e_root_values = pm.Dirichlet(f"e_{root}", a=(shared_alpha * e_0_values) + 1.01)
-                node_es[root] = e_root_values
-                self.node_index_map[root] = (f"e_{root}", None)
-
-            # Depth 1+: batched Gamma per depth level
-            for depth in range(1, max_depth + 1):
+            for depth in range(0, max_depth + 1):
                 current_nodes = nodes_by_depth.get(depth, [])
                 if not current_nodes:
                     continue
 
                 parent_nodes = [
-                    list(self.graph.predecessors(n))[0] for n in current_nodes
+                    list(self.graph.predecessors(n))[0] if list(self.graph.predecessors(n)) else None
+                    for n in current_nodes
                 ]
-                parent_e_stack = pt.stack([node_es[p] for p in parent_nodes])
-                a_matrix = (shared_alpha * parent_e_stack) + 1.01
+                if parent_nodes[0] is None:
+                    parent_e_stack = pt.stack([e_0_values] * len(current_nodes))
+                else:
+                    parent_e_stack = pt.stack([node_es[p] for p in parent_nodes])
 
+                a_matrix = (shared_alpha * parent_e_stack) + 1.0
                 e_name = f"e_level_{depth}"
                 e_level_values = pm.Dirichlet(e_name, a=a_matrix,
                                               shape=(len(current_nodes), self.K))
