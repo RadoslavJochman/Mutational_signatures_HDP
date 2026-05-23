@@ -65,7 +65,7 @@
 # ==========================================================================
 
 experiment_name: config_fixed_sig_eps1
-git_tag: fixed-sig-v1-eps1
+git_tag: fixed-sig-v1
 
 # ── Data generation ─────────────────────────────────────────────────────────
 simulation:
