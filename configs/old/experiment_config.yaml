@@ -39,8 +39,8 @@ inference:
       sigma: 1.0
 
   # NUTS sampler settings
-  draws: 1500
-  tune: 5000
+  draws: 5000
+  tune: 1500
   chains: 4
   cores: 4
   target_accept: 0.99

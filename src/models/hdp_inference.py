@@ -17,12 +17,6 @@ FixedSigHDP
     Infers per-node signature *activities* while treating signatures as
     known.
     Parameters recovered: shared_alpha, e_0, e_j for every node.
-
-FullSigHDP
-    Simultaneously infers both signatures and activities.
-    Currently implemented for a *single* tree only —
-    multi-tree support is planned.  Parameters recovered: signatures,
-    alpha_0, alpha_j, e_j for every node.
 """
 
 from __future__ import annotations
@@ -51,20 +45,17 @@ class _BaseTreeHDP(ABC):
     - Parse one or more Newick trees and compose them into a single DiGraph.
     - Compute depth for every node (BFS from each root).
     - Group nodes by depth for vectorised PyMC variable construction.
-    - Provide `get_node_posterior` so analysis code can query any node
-      without knowing the internal variable naming scheme.
-    - Expose a `sample` method with a consistent signature.
+    - Provide ``get_node_activity_posterior`` so analysis code can query any
+      node without knowing the internal variable naming scheme.
+    - Expose a ``sample`` method with a consistent signature.
 
     Subclass contract
     -----------------
-    Implement `_build_pymc_model` to populate `self.model` and
-    `self.node_index_map`.
+    Implement ``_build_pymc_model`` to populate ``self.model`` and
+    ``self.node_index_map``.
 
-    `self.node_index_map` must map every internal node ID to a
-    (pymc_var_name, row_index_or_None) tuple, following the same
-    convention as Fixed_sig_HDP: depth-0 nodes get their own scalar
-    variable (row_index = None), deeper nodes are packed into a batched
-    Dirichlet (row_index = int).
+    ``self.node_index_map`` must map every internal node ID to a
+    (pymc_var_name, row_index_or_None) tuple
     """
 
     def __init__(self, newick_string: str, data_matrix: pd.DataFrame):
@@ -121,7 +112,7 @@ class _BaseTreeHDP(ABC):
         Parameters
         ----------
         node_id : str
-            Internal node ID (key in `node_index_map`).
+            Internal node ID (key in ``node_index_map``).
 
         Returns
         -------
@@ -145,9 +136,6 @@ class _BaseTreeHDP(ABC):
         var_name, row_idx = self.node_index_map[node_id]
         samples = self.trace.posterior[var_name]
 
-        # if it is root we don't have to index, we have variable for each root node
-        if row_idx is None:
-            return samples.values  # (chains, draws, K)
         return samples.values[:, :, row_idx, :]  # (chains, draws, K)
 
     def get_posterior_mean(self, node_id: str) -> np.ndarray:
@@ -162,23 +150,21 @@ class _BaseTreeHDP(ABC):
         return self.get_node_activity_posterior(node_id).mean(axis=(0, 1))
 
     def sample(
-        self,
-        draws: int = 1000,
-        tune: int = 1000,
-        chains: int = 4,
-        cores: int = 4,
-        target_accept: float = 0.95,
+            self,
+            draws: int = 1000,
+            tune: int = 1000,
+            chains: int = 4,
+            cores: int = 4,
+            target_accept: float = 0.95,
+            max_treedepth: int = 10,
     ):
         """
         Run the NUTS sampler.
 
         Parameters
         ----------
-        draws : int
-        tune : int
-        chains : int
-        cores : int
-        target_accept : float
+        draws, tune, chains, cores, target_accept, max_treedepth :
+            standard pm.sample / NUTS args.
 
         Returns
         -------
@@ -194,22 +180,25 @@ class _BaseTreeHDP(ABC):
                 cores=cores,
                 target_accept=target_accept,
                 nuts_sampler="numpyro",
+                nuts={"max_tree_depth": max_treedepth},
             )
         return self.trace
+
 
 class FixedSigHDP(_BaseTreeHDP):
     """
     Tree-HDP inference model with fixed (known) mutational signatures.
 
-    Infers per-node activity vectors e_j and a shared concentration
-    parameter alpha.  Signatures are treated as constants.
+    model_structure: fixed-sig-v1
 
-    Generative model (mirroring Forward_HDP_Generator exactly)
-    ----------------------------------------------------------
-        shared_alpha ~ LogNormal(mu, sigma)
-        e_0          ~ Dir(shared_alpha / K * 1_K)
-        e_root       ~ Dir(shared_alpha * e_0)          for each root
-        e_j          ~ Dir(shared_alpha * e_parent(j))  for each non-root
+    Infers per-node activity vectors e_j and a shared concentration parameter
+    alpha. Signatures are treated as constants.
+
+    Generative model
+    --------------------------------------------------
+        shared_alpha ~ Given by the config parameter 'alpha_prior'
+        e_0          ~ Dir(1_K)                         (global cohort baseline)
+        e_j          ~ Dir(shared_alpha * e_parent)     (per node, plain Dirichlet)
         x_ji         ~ Multinomial(M_j, e_j @ signatures)
 
     Parameters
@@ -217,10 +206,11 @@ class FixedSigHDP(_BaseTreeHDP):
     newick_string : str
         Semicolon-separated Newick trees.
     data_matrix : pd.DataFrame
-        Shape (N_observed, 96).  Index must match node labels.
+        Shape (N_observed, 96). Index must match node labels.
     fixed_signatures : np.ndarray
         Shape (K, 96).
-    priors:
+    priors : dict
+        Prior config dict.
     """
 
     def __init__(
@@ -228,7 +218,7 @@ class FixedSigHDP(_BaseTreeHDP):
         newick_string: str,
         data_matrix: pd.DataFrame,
         fixed_signatures: np.ndarray,
-        priors: dict
+        priors: dict,
     ):
         self.fixed_signatures = fixed_signatures
         self.K = fixed_signatures.shape[0]
@@ -236,6 +226,12 @@ class FixedSigHDP(_BaseTreeHDP):
         super().__init__(newick_string, data_matrix)
 
     def _build_pymc_model(self) -> None:
+        # eps: pseudo-count for the per-node activity prior. Config-driven
+        # via priors["eps"].  eps = 0 recovers the plain (v1) form.
+        # eps is read for interface uniformity but v1 uses no
+        # pseudo-count; eps has no effect here (set eps: 0 in config).
+        eps = float(Fraction(str(self.priors.get("eps", 0.0))))
+
         nodes_by_depth = self._get_nodes_by_depth()
         max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
 
@@ -244,7 +240,6 @@ class FixedSigHDP(_BaseTreeHDP):
 
             # Global parameters
             shared_alpha = get_prior(self.priors, "alpha_prior", dim=1)(name="shared_alpha")
-
 
             e_0_values = pm.Dirichlet("e_0", a=np.ones(self.K))
 
@@ -264,7 +259,7 @@ class FixedSigHDP(_BaseTreeHDP):
                 else:
                     parent_e_stack = pt.stack([node_es[p] for p in parent_nodes])
 
-                a_matrix = (shared_alpha * parent_e_stack) + 1.0
+                a_matrix = shared_alpha * parent_e_stack + eps
                 e_name = f"e_level_{depth}"
                 e_level_values = pm.Dirichlet(e_name, a=a_matrix,
                                               shape=(len(current_nodes), self.K))
@@ -273,7 +268,7 @@ class FixedSigHDP(_BaseTreeHDP):
                     node_es[node] = e_level_values[i]
                     self.node_index_map[node] = (e_name, i)
 
-            # Likelihood — unchanged
+            # Likelihood
             observed_es, obs_counts = [], []
             for node in self.graph.nodes():
                 label = self.graph.nodes[node].get("label", str(node))
@@ -295,202 +290,3 @@ class FixedSigHDP(_BaseTreeHDP):
                     observed=obs_counts_matrix,
                 )
 
-
-class UnknownSigHDP(_BaseTreeHDP):
-    """
-    Tree-HDP inference model that jointly learns mutational signatures and
-    per-node activities.
-
-    The signatures theta_k ~ Dir(eta * 1_96) are inferred from data alongside
-    per-node activity vectors e_j.  You only need to specify K_max, an upper
-    bound on the number of signatures.  Signatures that are not needed by the
-    data will be "switched off" — their corresponding activity components will
-    shrink toward zero — so the effective number of signatures is learned
-    automatically, as long as K_max is large enough.
-
-    This mirrors FixedSigHDP exactly in the activity part of the model.
-    The only addition is the signature layer above it:
-
-        theta_k  ~ Dir(eta * 1_96)              k = 1, …, K_max   (signature prior)
-        shared_alpha ~ LogNormal(mu, sigma)                        (concentration prior)
-        e_0      ~ Dir(1_K)                                        (global baseline)
-        e_root   ~ Dir(shared_alpha * e_0)                         (per root node)
-        e_j      ~ Dir(shared_alpha * e_parent)                    (per non-root node)
-        x_ji     ~ Multinomial(M_j,  e_j @ theta)                 (observed mutations)
-
-    Parameters
-    ----------
-    newick_string : str
-        Semicolon-separated Newick trees (same format as FixedSigHDP).
-    data_matrix : pd.DataFrame
-        Shape (N_observed, 96).  Index must match node labels in the tree.
-    K_max : int
-        Maximum number of signatures.  In practice 2–3× the number you
-        expect to be active is a reasonable choice.
-    priors : dict
-        Same prior config dict used by FixedSigHDP.  The following keys
-        are read:
-          - ``"alpha_prior"``  (required) — prior on shared_alpha, passed
-            to ``get_prior`` exactly as in FixedSigHDP.
-          - ``"signatures_eta"`` (optional, default 0.1) — symmetric
-            Dirichlet concentration for each signature theta_k.  Values
-            below 1 encourage sparse, peaked signatures; values above 1
-            push signatures toward uniform.  (Also accepted as ``"eta"``
-            for backwards compatibility.)
-
-    Attributes
-    ----------
-    K_max : int
-    signature_var_name : str
-        Name of the signature variable in the PyMC model (``"signatures"``).
-        Use this when calling ``model.trace.posterior["signatures"]``.
-
-    Notes
-    -----
-    Posterior access
-    ~~~~~~~~~~~~~~~~
-    Activities are accessed exactly as in FixedSigHDP::
-
-        model.get_node_activity_posterior(node_id)   # (chains, draws, K_max)
-        model.get_posterior_mean(node_id)            # (K_max,)
-
-    The inferred signatures live in the trace under ``"signatures"``::
-
-        sigs = model.trace.posterior["signatures"].mean(("chain", "draw"))
-        # shape: (K_max, 96)
-
-    A convenience accessor is provided::
-
-        sigs = model.get_posterior_signatures()      # (K_max, 96) posterior mean
-        sigs = model.get_posterior_signatures(mean=False)  # (chains, draws, K_max, 96)
-
-    Identifiability
-    ~~~~~~~~~~~~~~~
-    Signatures and activities are only jointly identified up to permutation
-    of the K_max components.  If you compare runs, align signatures by cosine
-    similarity before comparing.  The ``evaluate_inference`` function in
-    ``evaluation.py`` handles this correctly because it matches on node
-    labels, not on signature indices.
-    """
-
-    # Name under which inferred signatures are stored in the PyMC model/trace.
-    signature_var_name: str = "signatures"
-
-    def __init__(
-            self,
-            newick_string: str,
-            data_matrix: pd.DataFrame,
-            K_max: int,
-            priors: dict,
-    ):
-        self.K_max = K_max
-        self.priors = priors
-        super().__init__(newick_string, data_matrix)
-
-    def _build_pymc_model(self) -> None:
-        nodes_by_depth = self._get_nodes_by_depth()
-        max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
-
-        # Concentration for the signature prior.
-        eta = float(Fraction(self.priors.get("signatures_eta", 0.1)))
-
-        with pm.Model() as self.model:
-
-            signatures = pm.Dirichlet(
-                self.signature_var_name,
-                a=np.full(96, eta),  # 1-D: broadcast to every row
-                shape=(self.K_max, 96),  # K_max independent 96-dim Dirichlets
-            )
-
-            shared_alpha = get_prior(self.priors, "alpha_prior", dim=1)(
-                name="shared_alpha"
-            )
-
-            e_0 = pm.Dirichlet(
-                "e_0",
-                a=np.ones(self.K_max),
-            )
-
-            node_es: Dict[str, pt.TensorVariable] = {}
-
-            # ── Depth 0: one variable per root node ───────────────────────
-            for root in nodes_by_depth.get(0, []):
-                e_root = pm.Dirichlet(
-                    f"e_{root}",
-                    a=(shared_alpha * e_0) + 1.01,
-                )
-                node_es[root] = e_root
-                self.node_index_map[root] = (f"e_{root}", None)
-
-            # ── Depth 1+: batched Dirichlet per depth level ───────────────
-            for depth in range(1, max_depth + 1):
-                current_nodes = nodes_by_depth.get(depth, [])
-                if not current_nodes:
-                    continue
-
-                parent_nodes = [
-                    list(self.graph.predecessors(n))[0] for n in current_nodes
-                ]
-                parent_e_stack = pt.stack([node_es[p] for p in parent_nodes])
-                a_matrix = shared_alpha * parent_e_stack + 1.01  # (N_current, K_max)
-
-                e_name = f"e_level_{depth}"
-
-                e_level = pm.Dirichlet(
-                    e_name,
-                    a=a_matrix,
-                    shape=(len(current_nodes), self.K_max),
-                )
-
-                for i, node in enumerate(current_nodes):
-                    node_es[node] = e_level[i]
-                    self.node_index_map[node] = (e_name, i)
-
-            observed_es, obs_counts = [], []
-            for node in self.graph.nodes():
-                label = self.graph.nodes[node].get("label", str(node))
-                if label in self.data_matrix.index:
-                    counts = self.data_matrix.loc[label].values
-                    if counts.sum() > 0:
-                        observed_es.append(node_es[node])
-                        obs_counts.append(counts)
-
-            if observed_es:
-                obs_counts_matrix = np.array(obs_counts, dtype=np.int32)
-                n_mutations = obs_counts_matrix.sum(axis=1)
-                e_matrix = pt.stack(observed_es)  # (N_obs, K_max)
-                expected_probs = pt.dot(e_matrix, signatures)  # (N_obs, 96)
-                pm.Multinomial(
-                    "observations",
-                    n=n_mutations,
-                    p=expected_probs,
-                    observed=obs_counts_matrix,
-                )
-
-    def get_posterior_signatures(self, mean: bool = True) -> np.ndarray:
-        """
-        Return posterior samples (or their mean) for the inferred signatures.
-
-        Parameters
-        ----------
-        mean : bool
-            If True (default) return the posterior mean over all chains and
-            draws, shape (K_max, 96).
-            If False return the full posterior array, shape
-            (chains, draws, K_max, 96).
-
-        Returns
-        -------
-        np.ndarray
-
-        Raises
-        ------
-        ValueError
-            If ``sample()`` has not been called yet.
-        """
-        if self.trace is None:
-            raise ValueError("No trace found.  Run `sample()` first.")
-        sigs = self.trace.posterior[self.signature_var_name]
-        if mean:
-            return sigs.mean(("chain", "draw")).values  # (K_max, 96)
-        return sigs.values  # (chains, draws, K_max, 96)

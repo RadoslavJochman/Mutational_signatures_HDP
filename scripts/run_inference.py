@@ -27,8 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_config, make_output_dir
 from src.models.hdp_inference import FixedSigHDP
-from src.analysis.evaluation import evaluate_inference
-from src.plotting.plots import plot_recovery_distributions
 
 def run_fixed_sig(cfg: dict) -> None:
     inf_cfg = cfg["inference"]
@@ -73,11 +71,12 @@ def run_fixed_sig(cfg: dict) -> None:
         chains=inf_cfg["chains"],
         cores=inf_cfg["cores"],
         target_accept=inf_cfg["target_accept"],
+        max_treedepth=int(inf_cfg.get("max_treedepth", 10)),
     )
 
     # Persist trace
     trace_path = out_dir / "trace.nc"
-    az.to_netcdf(trace, str(trace_path))
+    trace.to_netcdf(str(trace_path))
     print(f"Saved trace to '{trace_path}'")
 
     # Summary statistics

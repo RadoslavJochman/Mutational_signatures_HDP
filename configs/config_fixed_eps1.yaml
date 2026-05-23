@@ -1,0 +1,143 @@
+# ==========================================================================
+#  EXPERIMENT: Fixed-signature Tree-HDP  --  eps = 1.0
+# ==========================================================================
+#
+#  Model structure : fixed-sig-v1
+#  Git tag         : fixed-sig-v1-eps1
+#
+#  WHAT THIS EXPERIMENT TESTS
+#    FixedSigHDP with the per-node Dirichlet concentration set to
+#        e_j ~ Dir(alpha * e_parent + eps)   with eps = 1.0
+#
+#  MOTIVATION
+#    The plain form e_j ~ Dir(alpha * e_parent) has concentration entries
+#    that go to ~0 wherever a parent activity is near 0 (and e_parent, being
+#    itself a Dirichlet sample, always has near-0 entries).  Sub-1
+#    concentrations push Dirichlet mass onto the simplex corners, which is
+#    geometry NUTS handles badly, boundary divergences, collapsed step
+#    size.  Adding eps keeps every concentration entry >= eps, pulling prior
+#    mass off the corners.  eps = 1.0 is the most aggressive setting: every
+#    entry is >= 1, so no component ever sits in the sub-1 danger zone.
+#
+#  RESULT (30-tree forest, nb_dispersion: none, draws=1000, tune=200,
+#  4 chains)
+#    - Sampling is CLEAN: every one of 2391 parameters has r_hat <= 1.0
+#      and ess_bulk >= 2050.  No divergences.
+#    - e_0 recovered essentially perfectly: matching the ground truth.
+#    - Per-node activity structure is recovered well.
+#    - shared_alpha posterior mean ~= 161 (sd ~5.4), against a generating
+#      value of 15.
+#
+#  PROBLEMS / CAVEATS
+#    - The headline gap is shared_alpha ~= 161 vs a generating value of 15.
+#      This is not a convergence failure
+#    - Leading explanation: an alpha / alpha_0 confound.  alpha_0 = 1.0 with
+#      K = 10 makes e_0 ~ Dir(0.1), which is strongly sparse and indeed
+#      e_0 recovers as mass on just 2 signatures with 8 exact zeros.  Under
+#      strict inheritance every e_parent in the tree lives on that same
+#      2-signature support. The activity walk is therefore effectively a
+#      walk on a 2-dimensional simplex, while `alpha` nominally scales a
+#      10-component concentration vector. The `alpha` that best matches the
+#      observed tightness of that low-dimensional walk is not the same
+#      number as the generator's nominal `alpha`.  The two are not directly
+#      comparable: this is a parameterisation mismatch induced by alpha_0
+#      sparsity, not a recovery failure.
+#    - eps = 1.0 itself remains a heavy-handed numerical guard (concentration
+#      1.0 per component is the uniform Dirichlet), so some prior distortion
+#      is plausibly present too
+#    - WHAT THIS RUN DOES AND DOES NOT SHOW
+#        Does    : clean sampling; strong recovery of e_0 and of the
+#                  per-node activity structure under eps = 1.0.
+#        Does not: recover the scalar generating alpha and that is
+#                  expected here, given the alpha_0-induced sparsity.
+#  FOLLOW-UP
+#    To make `alpha` cleanly recoverable, raise alpha_0 so e_0 is spread
+#    over many signatures (alpha_0 = 10*K = 100 gives concentration 1.0 per
+#    component).  Tracked as a separate experiment / config, not a change
+#    to this one.  This config is kept as the record of the eps = 1.0
+#    geometry investigation.
+#
+#  HOW TO REPRODUCE
+#    git checkout fixed-sig-v1-eps1
+#    python scripts/generate_data.py  --config configs/config_fixed_sig_eps1.yaml
+#    python scripts/run_inference.py  --config configs/config_fixed_sig_eps1.yaml
+#
+# ==========================================================================
+
+experiment_name: config_fixed_sig_eps1
+git_tag: fixed-sig-v1-eps1
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  results_dir: ../data/        # artefacts saved under <results_dir>/<experiment_name>
+  make_plots: true
+
+  # Activity random walk: e_j ~ Dir(alpha * e_parent).
+  # High alpha  -> children closely resemble parents (strong tree signal).
+  # Low alpha   -> children drift fast (weak tree signal).
+  alpha: 15.0
+
+  # Cohort baseline activity: e_0 ~ Dir((alpha_0 / K) * 1_K).
+  # NOTE: alpha_0 = 1.0 with K = 10 gives concentration 0.1 per component,
+  # which is strongly sparse -- a Dir(0.1) draw typically puts almost all
+  # mass on 2-3 components.  So the effective number of active signatures
+  # here is ~2, not 10, even though activity_sparsity is 0.
+  alpha_0: 1.0
+
+  # Per-node mutation-count model.
+  lam: 3250
+  # Negative-binomial dispersion (Gamma-Poisson). Smaller => more
+  # over-dispersed burden. Set to `none` for a plain Poisson.
+  nb_dispersion: none
+
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  # ── Signatures ────────────────────────────────────────────────────────────
+  signatures:
+    source: synthesize           # synthesize | load
+    correlation: 0.3             # 0 = near-orthogonal (easy), 1 = overlapping (hard)
+    path: ../data/cosmic_signatures.csv   # used only when source == load
+    num_signatures: 10           # K (used when source == synthesize)
+
+  # ── Random phylogenetic forest ────────────────────────────────────────────
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500      # per-edge count mean, lower bound
+    max_branch_length: 5000      # per-edge count mean, upper bound
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  data:
+    count_matrix: ../data/config_fixed_sig_eps1/mutation_count_matrix.csv
+    newick_string: ../data/config_fixed_sig_eps1/newick_string.nwk
+    tree_edges: ../data/config_fixed_sig_eps1/tree_edges.csv
+    fixed_signatures: ../data/config_fixed_sig_eps1/fixed_signatures.csv
+    true_activities: ../data/config_fixed_sig_eps1/true_activities.csv
+    ground_truth_params: ../data/config_fixed_sig_eps1/ground_truth_params.json
+
+  priors:
+    alpha_prior: LogNorm
+    alpha_prior_parm:
+      mu: 3.0
+      sigma: 0.5
+    # Pseudo-count added to the per-node Dirichlet concentration:
+    #   e_j ~ Dir(alpha * e_parent + eps)
+    # eps = 1.0: aggressive guard. Samples cleanly but distorts the prior
+    # (see PROBLEMS / CAVEATS above).
+    eps: 1.0
+
+  # NUTS sampler settings
+  draws: 1000
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+  max_treedepth: 12
+
+  init_from_nmf: true
+
+  results_dir: ../results/

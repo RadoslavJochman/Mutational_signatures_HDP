@@ -21,6 +21,7 @@ import pymc as pm
 import yaml
 from fractions import Fraction
 from functools import partial
+import pytensor.tensor as pt
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
     """
@@ -98,6 +99,7 @@ def get_prior(config: dict, prior_name: str, dim: int=None):
         "Exp": pm.Exponential,
         "Beta": pm.Beta,
         "Gamma": pm.Gamma,
+        "Fixed": pm.Deterministic,
         }
     dist_type = config.get(prior_name)
     if dist_type not in priors:
@@ -110,8 +112,9 @@ def get_prior(config: dict, prior_name: str, dim: int=None):
         base_val = float(Fraction(str(param_value)))
 
         if dim != 1:
-            parsed_params[param_name] = [base_val] * int(dim)
+            val = [base_val] * int(dim)
         else:
-            parsed_params[param_name] = base_val
+            val = base_val
+        parsed_params[param_name] = pt.as_tensor_variable(val)
 
     return partial(priors[dist_type], **parsed_params)

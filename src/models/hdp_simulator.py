@@ -1,398 +1,431 @@
 """
-hdp_simulator.py
+tree_signature_generator.py
 
-Forward simulation models that generate synthetic mutational data by
-sampling down a phylogenetic tree according to the Tree-HDP generative process.
+Forward simulator for tree-structured mutational signature data.
 
-Classes
--------
-HDP
-    Full generative model using the stick-breaking Dirichlet Process.
-    Mutational signatures are drawn on-the-fly from a DirichletPrior.
-    Useful for exploring the prior, visualising tree structure, and
-    generating synthetic data when signatures are *unknown*.
+This is the data-generating process for simulation studies of the Tree-HDP
+inference model.  It implements a finite-dimensional approximation of the
+nested tree-HDP. Instead of a nested Dirichlet process at every node,
+activities follow a Dirichlet random walk down the tree.
+This keeps the generator simple, neutral with respect to the inference
+model, and compatible with both "signatures known" and "signatures unknown"
+experiments.
 
-Forward_HDP_Generator
-    Simplified generative model that uses a *fixed* set of known signatures.
-    At each node, activities e_j ~ Dir(alpha * e_parent) are sampled, then
-    mutations are drawn from the resulting mixture.  This mirrors exactly the
-    mathematical assumptions of the Fixed_sig_HDP PyMC inference model,
-    making it the correct data-generating process for simulation studies.
+Generative process
+-------------------
+    e_0  ~ Dir( (alpha_0 / K) * 1_K )      # cohort baseline (shared)
+    [zero out a random subset of e_0]
+    e_j  ~ Dir( alpha * e_parent )         # activities flow down each tree
+                                           #   root's parent is e_0
+    M_j  ~ NegBinom(mean=lam_j, ...)       # mutation count per node
+    x_j  ~ Multinomial( M_j, e_j @ S )     # observed 96-channel counts
+
+Key modelling choices
+---------------------
+* Strict inheritance.  The Dirichlet walk is taken only over the active
+  support.  A signature that is zero in a parent stays exactly zero in every
+  descendant, it can never be resurrected.  With cohort-level zeroing this
+  means the active signature set is fixed by e_0 and identical at every node;
+  `alpha` then controls only how activities vary within that fixed set.
+* Zero-mutation nodes are kept.  Connecting nodes with M_j = 0 remain in the
+  tree topology and in the ground-truth activity dict, but are excluded
+  from the observed count matrix.
+* Optional per-node signature dropout.  If enabled, a signature active in a
+  parent may switch fully off in a child, the only mechanism for within
+  tree change of support. Off by default.
+
+Signatures
+----------
+Either supply a fixed (K, 96) matrix (e.g. real COSMIC SBS signatures) via
+`signatures=`, or let the generator synthesize K signatures with a tunable
+pairwise-correlation target via `n_signatures=` and `signature_correlation=`.
 """
 
-from typing import Dict, List, Optional
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
 import pandas as pd
 import phylox
-from networkx.drawing.nx_pydot import graphviz_layout
 from phylox.constants import LABEL_ATTR
-from phylox.generators.randomTC import generate_network_random_tree_child_sequence
-import matplotlib.pyplot as plt
 
-from src.models.dirichlet_process import DirichletPrior, DirichletProcess, Measure
+N_CHANNELS = 96
 
-
-# ---------------------------------------------------------------------------
-# HDP – stick-breaking forward simulation (unknown signatures)
-# ---------------------------------------------------------------------------
-
-class HDP:
+def synthesize_signatures(
+    n_signatures: int,
+    correlation: float,
+    rng: np.random.Generator,
+    n_channels: int = N_CHANNELS,
+) -> np.ndarray:
     """
-    Tree-HDP forward simulator using the stick-breaking Dirichlet Process.
-
-    Parses a Newick string into a directed tree, attaches a DirichletProcess
-    to every node, and generates trinucleotide mutations by sampling down the
-    hierarchy.
+    Generate `n_signatures` synthetic signatures, each a distribution over
+    `n_channels` trinucleotide channels, with a tunable degree of pairwise
+    overlap.
 
     Parameters
     ----------
-    newick_string : str
-        Phylogenetic tree in Newick format.  Branch lengths are interpreted
-        as the number of mutations assigned to that branch.
-    global_prior : Measure
-        The base measure H (typically a DirichletPrior).
-    alpha_0 : float
-        Concentration parameter for the root-level DP G_0 ~ DP(alpha_0, H).
-    alpha_dict : dict, optional
-        Mapping {node_label: alpha_j} for nodes that should have a custom
-        concentration parameter.  Unlisted nodes use `default_alpha_j`.
-    default_alpha_j : float
-        Fallback concentration parameter for nodes not in `alpha_dict`.
+    n_signatures : int
+        Number of signatures K to generate.
+    correlation : float in [0, 1]
+        0.0  -> signatures drawn independently (near-orthogonal, easy to
+                distinguish).
+        1.0  -> all signatures are perturbations of one shared base profile
+                (highly correlated, hard to distinguish -- closer to the
+                real difficulty of COSMIC signature extraction).
+    rng : np.random.Generator
+    n_channels : int
+
+    Returns
+    -------
+    np.ndarray, shape (n_signatures, n_channels)
+        Each row sums to 1.
+    """
+    if not 0.0 <= correlation <= 1.0:
+        raise ValueError("correlation must be in [0, 1]")
+
+    base = rng.dirichlet(np.ones(n_channels))
+
+    sigs = np.empty((n_signatures, n_channels))
+    for k in range(n_signatures):
+        own = rng.dirichlet(np.ones(n_channels))
+        profile = correlation * base + (1.0 - correlation) * own
+
+        # More peaks
+        profile = profile ** 1.5
+
+        # Normalization
+        sigs[k] = profile / profile.sum()
+    return sigs
+
+
+def _validate_signatures(signatures: np.ndarray) -> np.ndarray:
+    """Check shape and that rows are valid probability vectors."""
+    signatures = np.asarray(signatures, dtype=float)
+    if signatures.ndim != 2:
+        raise ValueError("signatures must be a 2-D array of shape (K, 96)")
+    if signatures.shape[1] != N_CHANNELS:
+        raise ValueError(
+            f"signatures must have {N_CHANNELS} columns, got {signatures.shape[1]}"
+        )
+    row_sums = signatures.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, atol=1e-6):
+        raise ValueError("each signature row must sum to 1")
+    if np.any(signatures < 0):
+        raise ValueError("signatures must be non-negative")
+    return signatures
+
+@dataclass
+class _NodeTruth:
+    """Ground-truth record for a single node."""
+    tumour: int
+    label: str
+    e_vector: np.ndarray
+    num_mutations: int
+    is_root: bool
+    parent_label: Optional[str]
+
+class TreeSignatureGenerator:
+    """
+    Forward simulator for tree-structured mutational signature data.
+
+    Parameters
+    ----------
+    newick_forest : str
+        One or more Newick trees, semicolon-separated.  Each tree is an
+        independent tumour.  Branch lengths, if present, are used as the
+        per-node mutation-count mean (overriding `lam`).
+    signatures : np.ndarray, optional
+        Fixed (K, 96) signature matrix.  If given, `n_signatures` and
+        `signature_correlation` are ignored.
+    n_signatures : int, optional
+        Number of signatures to synthesize.  Required if `signatures` is None.
+    signature_correlation : float, default 0.0
+        Pairwise-overlap target for synthesized signatures (see
+        `synthesize_signatures`).  Ignored when `signatures` is given.
+    alpha : float, default 1.0
+        Concentration of the activity random walk e_j ~ Dir(alpha * e_parent).
+        High  -> children closely resemble parents (tree structure is strong).
+        Low   -> children drift fast (tree structure is weak).
+    alpha_0 : float, default 1.0
+        Concentration of the cohort baseline e_0 ~ Dir((alpha_0/K) * 1_K).
+    lam : float, default 1000.
+        Mean mutations per node, used when an edge has no branch length.
+    nb_dispersion : float, default 2.0
+        Dispersion of the negative-binomial count model.  M_j has mean lam_j
+        and variance lam_j * (1 + lam_j / nb_dispersion).  Smaller values ->
+        more over-dispersed (more realistic burden spread).  Set to None for
+        a plain Poisson.
+    activity_sparsity : float, default 0.0
+        Fraction of the K signatures forced to exactly zero in the cohort
+        baseline e_0.  With strict inheritance these signatures are absent at
+        every node.  true_K = K - round(activity_sparsity * K).
+    signature_dropout : float, default 0.0
+        Per-node probability that a signature active in the parent is switched
+        fully off in the child.  The only mechanism for within-tree change of
+        support.  Off (0.0) by default.
+    seed : int, default 42
+        RNG seed.
     """
 
     def __init__(
         self,
-        newick_string: str,
-        global_prior: Measure,
-        alpha_0: float,
-        alpha_dict: Optional[Dict[str, float]] = None,
-        default_alpha_j: float = 2.0,
-    ):
-        self.global_prior = global_prior
-        self.alpha_0 = alpha_0
-        self.alpha_dict = alpha_dict or {}
-        self.default_alpha_j = default_alpha_j
-        self.seed_generator = global_prior.seed_generator
-
-        self.graph = phylox.DiNetwork.from_newick(newick_string)
-        self._initialize_dp_models()
-
-    def _initialize_dp_models(self) -> None:
-        """
-        Walk the DAG in topological order (parents before children) and
-        attach a DirichletProcess to every node.
-        """
-        self.G_0 = DirichletProcess(alpha=self.alpha_0, base_measure=self.global_prior)
-
-        for node in nx.topological_sort(self.graph):
-            parents = list(self.graph.predecessors(node))
-            label = self.graph.nodes[node].get("label", str(node))
-
-            if not parents:
-                # Root node: draws from the global G_0
-                node_alpha = self.alpha_dict.get(label, self.default_alpha_j)
-                dp = DirichletProcess(alpha=node_alpha, base_measure=self.G_0)
-                branch_length = 0.0
-            else:
-                parent_dp = self.graph.nodes[parents[0]]["dp_model"]
-                node_alpha = self.alpha_dict.get(label, self.default_alpha_j)
-                dp = DirichletProcess(alpha=node_alpha, base_measure=parent_dp)
-                edge_data = self.graph.get_edge_data(parents[0], node)
-                branch_length = edge_data.get("length", 0.0)
-
-            self.graph.nodes[node]["dp_model"] = dp
-            self.graph.nodes[node]["mutations"] = []
-            self.graph.nodes[node]["num_mutations"] = int(branch_length)
-
-    def generate_all_data(self) -> Dict[str, List[int]]:
-        """
-        Sample mutations for every node according to branch lengths.
-
-        Returns
-        -------
-        dict
-            Mapping {node_label: [mutation_channel_index, ...]}.
-        """
-        results = {}
-        for node in self.graph.nodes():
-            dp_model = self.graph.nodes[node]["dp_model"]
-            num_mutations = self.graph.nodes[node]["num_mutations"]
-            mutations_list = self.graph.nodes[node]["mutations"]
-
-            for _ in range(num_mutations):
-                mutations_list.append(dp_model.sample_mutation())
-
-            results[self.graph.nodes[node]["label"]] = mutations_list
-
-        return results
-
-    def get_node_data(self, node_label: str, data_type: Optional[str] = None):
-        """
-        Retrieve stored data for a named node.
-
-        Parameters
-        ----------
-        node_label : str
-        data_type : str, optional
-            Key into the node attribute dict (e.g. 'dp_model', 'mutations').
-            If None the full attribute dict is returned.
-        """
-        node_id = self.graph.label_to_node_dict[node_label]
-        if data_type is None:
-            return self.graph.nodes[node_id]
-        return self.graph.nodes[node_id][data_type]
-
-    def get_mutation_count_matrix(self) -> pd.DataFrame:
-        """
-        Aggregate per-node mutation lists into an (N × 96) count matrix.
-
-        Nodes with zero mutations are excluded.
-
-        Returns
-        -------
-        pd.DataFrame
-            Index: node labels.  Columns: Channel_0 … Channel_95.
-        """
-        node_labels, count_rows = [], []
-
-        for node in self.graph.nodes():
-            label = self.graph.nodes[node].get("label", str(node))
-            mutations = self.graph.nodes[node].get("mutations", [])
-            if not mutations:
-                continue
-            count_rows.append(np.bincount(mutations, minlength=96))
-            node_labels.append(label)
-
-        columns = [f"Channel_{i}" for i in range(96)]
-        return pd.DataFrame(count_rows, index=node_labels, columns=columns)
-
-    def plot_tree(self, save_path: Optional[str] = None) -> None:
-        """
-        Draw the phylogenetic tree with edge labels showing the first few
-        sampled mutation channel indices.
-
-        Parameters
-        ----------
-        save_path : str, optional
-            If provided the figure is saved at 600 dpi to this path.
-        """
-        n = len(self.graph.nodes())
-
-        safe_mapping = {nd: f"Node_{str(nd).replace('-', 'M')}" for nd in self.graph.nodes()}
-        reverse_mapping = {v: k for k, v in safe_mapping.items()}
-
-        layout_graph = nx.DiGraph()
-        layout_graph.add_nodes_from(safe_mapping.values())
-        for u, v in self.graph.edges():
-            layout_graph.add_edge(safe_mapping[u], safe_mapping[v])
-
-        safe_pos = graphviz_layout(layout_graph, prog="dot")
-        pos = {reverse_mapping[s]: coords for s, coords in safe_pos.items()}
-
-        node_size = max(400, 150_000 // max(1, n))
-        font_size = max(6, node_size // 500)
-        fig_w = max(10, n * 0.6)
-        fig_h = max(8, n * 0.4)
-
-        plt.figure(figsize=(fig_w, fig_h))
-        nx.draw(
-            self.graph,
-            pos,
-            labels=dict(self.graph.nodes(data="label")),
-            node_color="lightblue",
-            node_size=node_size,
-            font_size=font_size,
-            font_weight="bold",
-            edge_color="gray",
-            arrows=True,
-            arrowsize=max(10, 25 - n // 2),
-        )
-        edge_labels = {
-            (i, j): self.graph.nodes("mutations")[j][:6]
-            for i, j in self.graph.edges()
-        }
-        nx.draw_networkx_edge_labels(
-            self.graph,
-            pos,
-            edge_labels=edge_labels,
-            font_color="red",
-            font_size=max(5, font_size - 1),
-            font_weight="bold",
-        )
-
-        if save_path:
-            plt.savefig(save_path, dpi=600)
-            print(f"Saved tree plot to '{save_path}'")
-        plt.show()
-
-class Forward_HDP_Generator:
-    """
-    Generative model for the *fixed-signature* Tree-HDP.
-
-    Mirrors the mathematical assumptions of Fixed_sig_HDP exactly so that
-    simulation studies can verify posterior recovery.
-
-    The generative process is:
-        e_0  ~ Dir(alpha/K * 1_K)            # global cohort baseline
-        e_j  ~ Dir(alpha * e_parent)          # per-node activities
-        M_j  ~ Poisson(lam)                     # mutation count per node
-        x_ji ~ Categorical(e_j @ signatures)  # observed mutations
-
-    Parameters
-    ----------
-    newick_string : str
-        One or more Newick trees separated by semicolons.  Each tree is
-        treated as an independent tumour.
-    alpha : float
-        Shared concentration parameter used at every node.
-    fixed_signatures : np.ndarray
-        Shape (K, 96).  The fixed mutational signature matrix.
-    lam : float
-        Mean of the Poisson distribution for the number of mutations per node.
-    seed : int
-        Random seed for reproducibility.
-    """
-
-    def __init__(
-        self,
-        newick_string: str,
-        alpha: float,
-        lam_root: float,
-        fixed_signatures: np.ndarray,
+        newick_forest: str,
+        signatures: Optional[np.ndarray] = None,
+        n_signatures: Optional[int] = None,
+        signature_correlation: float = 0.0,
+        alpha: float = 1.0,
+        alpha_0: float = 1.0,
+        lam: float = 1000.0,
+        nb_dispersion: Optional[float] = 2.0,
+        activity_sparsity: float = 0.0,
+        signature_dropout: float = 0.0,
         seed: int = 42,
     ):
-        self.alpha = alpha
-        self.lam_root = lam_root
-        self.fixed_signatures = fixed_signatures
-        self.K = fixed_signatures.shape[0]
         self.rng = np.random.default_rng(seed)
+        self.alpha = float(alpha)
+        self.alpha_0 = float(alpha_0)
+        self.lam = float(lam)
+        self.nb_dispersion = nb_dispersion
+        self.signature_dropout = float(signature_dropout)
 
-        # Global cohort baseline
-        self.e_0 = self.rng.dirichlet(np.ones(self.K) * (self.alpha / self.K))
+        if not 0.0 <= activity_sparsity < 1.0:
+            raise ValueError("activity_sparsity must be in [0, 1)")
+        self.activity_sparsity = float(activity_sparsity)
 
-        # Build one graph per tree in the forest
-        self.graphs = [
-            phylox.DiNetwork.from_newick(s)
-            for s in newick_string.split(";")
-            if s.strip()
-        ]
-        self._initialize_node_activities()
+        if signatures is not None:
+            self.signatures = _validate_signatures(signatures)
+        else:
+            if n_signatures is None:
+                raise ValueError(
+                    "provide either `signatures` or `n_signatures`"
+                )
+            self.signatures = synthesize_signatures(
+                n_signatures, signature_correlation, self.rng
+            )
+        self.K = self.signatures.shape[0]
 
-    def _initialize_node_activities(self) -> None:
+        self.e_0, self.active_mask = self._make_cohort_baseline()
+        self.true_K = int(self.active_mask.sum())
+
+        self.graphs: List[nx.DiGraph] = []
+        for s in newick_forest.split(";"):
+            if s.strip():
+                self.graphs.append(phylox.DiNetwork.from_newick(s + ";"))
+
+        self._truth: Dict[str, _NodeTruth] = {}
+        self._simulate()
+
+    def _make_cohort_baseline(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Traverse every tree in topological order, drawing:
-          - e_j   ~ Dir(alpha * e_parent)  for every node including roots
-          - M_j   ~ Poisson(lam)           for every node including roots
+        Draw e_0 ~ Dir((alpha_0/K) * 1_K), then zero a random subset so that
+        true K is an exact integer.
+        Returns (e_0, active_mask).
         """
-        for graph in self.graphs:
+        n_zero = int(round(self.activity_sparsity * self.K))
+        n_zero = min(n_zero, self.K - 1)  # always keep >= 1 signature
+
+        active_mask = np.ones(self.K, dtype=bool)
+        if n_zero > 0:
+            off = self.rng.choice(self.K, size=n_zero, replace=False)
+            active_mask[off] = False
+
+        conc = np.full(self.K, self.alpha_0 / self.K)
+        e_0 = np.zeros(self.K)
+        e_0[active_mask] = self.rng.dirichlet(conc[active_mask])
+        return e_0, active_mask
+
+    def _draw_child_activity(self, parent_e: np.ndarray) -> np.ndarray:
+        """
+        e_child ~ Dir(alpha * parent_e), taken strictly over the parent's
+        active support.  Signatures with zero parent mass stay exactly zero.
+
+        With signature_dropout > 0, each currently-active signature may be
+        switched off before the draw.
+        """
+        support = parent_e > 0.0
+
+        if self.signature_dropout > 0.0 and support.sum() > 1:
+            keep = support.copy()
+            for k in np.where(support)[0]:
+                if self.rng.random() < self.signature_dropout:
+                    keep[k] = False
+            if keep.sum() == 0:                       # never drop everything
+                keep[self.rng.choice(np.where(support)[0])] = True
+            support = keep
+
+        child = np.zeros_like(parent_e)
+        conc = self.alpha * parent_e[support]
+        conc = np.maximum(conc, 1e-12)
+        child[support] = self.rng.dirichlet(conc)
+        return child
+
+    def _draw_count(self, mean: float) -> int:
+        """Negative-binomial (or Poisson) draw for the per-node mutation count."""
+        if self.nb_dispersion is None:
+            return int(self.rng.poisson(mean))
+
+        r = self.nb_dispersion
+        rate = self.rng.gamma(shape=r, scale=mean / r)
+        return int(self.rng.poisson(rate))
+
+    def _simulate(self) -> None:
+        """Traverse every tree top-down, drawing activities and counts."""
+        for t_idx, graph in enumerate(self.graphs):
             for node in nx.topological_sort(graph):
                 parents = list(graph.predecessors(node))
+                label = graph.nodes[node].get(LABEL_ATTR, str(node))
 
                 if not parents:
-                    lam = self.lam_root
+                    parent_e = self.e_0
+                    parent_label = None
+                    is_root = True
+                    mean = self.lam
                 else:
-                    edge_data = graph.get_edge_data(parents[0], node)
-                    lam = edge_data.get("length", self.lam_root)
+                    p = parents[0]
+                    parent_e = graph.nodes[p]["e_vector"]
+                    parent_label = graph.nodes[p].get(LABEL_ATTR, str(p))
+                    is_root = False
+                    edge = graph.get_edge_data(p, node) or {}
+                    mean = float(edge.get("length", self.lam))
 
-                parent_e = (
-                    self.e_0 if not parents
-                    else graph.nodes[parents[0]]["e_vector"]
+                e_vec = self._draw_child_activity(parent_e)
+                count = self._draw_count(mean)
+
+                graph.nodes[node]["e_vector"] = e_vec
+                graph.nodes[node]["num_mutations"] = count
+
+                self._truth[label] = _NodeTruth(
+                    tumour=t_idx,
+                    label=label,
+                    e_vector=e_vec,
+                    num_mutations=count,
+                    is_root=is_root,
+                    parent_label=parent_label,
                 )
-
-                a_vector = np.clip(self.alpha * parent_e, 1e-9, None)
-                graph.nodes[node]["e_vector"] = self.rng.dirichlet(a_vector)
-                graph.nodes[node]["num_mutations"] = int(self.rng.poisson(lam))
 
     def get_mutation_count_matrix(self) -> pd.DataFrame:
         """
-        Generate the (N × 96) mutation count matrix.
+        Observed data: an (N x 96) integer count matrix.
 
-        Nodes with zero mutations are skipped.
+        Nodes with zero mutations are excluded from this matrix (they have
+        nothing observed) but remain in the topology and ground truth.
 
         Returns
         -------
         pd.DataFrame
-            Index: node labels.  Columns: Channel_0 … Channel_95.
+            Index: node labels.  Columns: Channel_0 ... Channel_95.
         """
-        node_labels, count_rows = [], []
-
+        labels, rows = [], []
         for graph in self.graphs:
             for node in graph.nodes():
-                num_mut = graph.nodes[node]["num_mutations"]
-                if num_mut == 0:
+                m = graph.nodes[node]["num_mutations"]
+                if m == 0:
                     continue
-                e_vector = graph.nodes[node]["e_vector"]
-                expected_probs = np.dot(e_vector, self.fixed_signatures)
-                counts = self.rng.multinomial(num_mut, expected_probs)
-                label = graph.nodes[node].get(LABEL_ATTR, str(node))
-                node_labels.append(label)
-                count_rows.append(counts)
+                e_vec = graph.nodes[node]["e_vector"]
+                probs = e_vec @ self.signatures
+                probs = probs / probs.sum()
+                rows.append(self.rng.multinomial(m, probs))
+                labels.append(graph.nodes[node].get(LABEL_ATTR, str(node)))
 
-        columns = [f"Channel_{i}" for i in range(96)]
-        return pd.DataFrame(count_rows, index=node_labels, columns=columns)
+        cols = [f"Channel_{i}" for i in range(N_CHANNELS)]
+        return pd.DataFrame(rows, index=labels, columns=cols)
+
+    def get_tree_edges(self) -> pd.DataFrame:
+        """
+        Tree topology as a (parent_label, child_label) edge list, including
+        edges to zero-mutation nodes.  This is what a tree-aware inference
+        model consumes.
+
+        Returns
+        -------
+        pd.DataFrame with columns ['tumour', 'parent', 'child'].
+        """
+        records = []
+        for label, tr in self._truth.items():
+            if tr.parent_label is not None:
+                records.append(
+                    {"tumour": tr.tumour,
+                     "parent": tr.parent_label,
+                     "child": label}
+                )
+        return pd.DataFrame(records, columns=["tumour", "parent", "child"])
 
     def get_true_activities(self) -> Dict[str, np.ndarray]:
         """
-        Return the ground-truth activity vectors for all nodes.
+        Ground-truth activity vector (length K) for every node, including
+        zero-mutation nodes.
 
         Returns
         -------
-        dict
-            Mapping {node_label: e_vector (shape K,)}.
+        dict {node_label: e_vector}
         """
+        return {lbl: tr.e_vector.copy() for lbl, tr in self._truth.items()}
+
+    def get_true_signatures(self) -> np.ndarray:
+        """The (K, 96) signature matrix used to generate the data."""
+        return self.signatures.copy()
+
+    def get_active_signature_indices(self) -> np.ndarray:
+        """Indices of the signatures with non-zero cohort baseline mass."""
+        return np.where(self.active_mask)[0]
+
+    def summary(self) -> Dict[str, object]:
+        """Quick description of the generated dataset."""
+        counts = [tr.num_mutations for tr in self._truth.values()]
         return {
-            graph.nodes[node].get(LABEL_ATTR, str(node)): graph.nodes[node]["e_vector"]
-            for graph in self.graphs
-            for node in graph.nodes()
+            "n_tumours": len(self.graphs),
+            "n_nodes_total": len(self._truth),
+            "n_nodes_observed": int(np.sum(np.array(counts) > 0)),
+            "K": self.K,
+            "true_K": self.true_K,
+            "alpha": self.alpha,
+            "mean_mutations": float(np.mean(counts)) if counts else 0.0,
+            "min_mutations": int(np.min(counts)) if counts else 0,
+            "max_mutations": int(np.max(counts)) if counts else 0,
         }
 
-def generate_random_phylogenetic_forest(
+def generate_random_forest(
     num_trees: int,
     min_leaves: int,
     max_leaves: int,
-    min_branch_length: int,
-    max_branch_length: int,
     rng: np.random.Generator,
+    min_branch_length: int = 100,
+    max_branch_length: int = 3000,
 ) -> str:
     """
-    Generate a random forest of phylogenetic trees and return them as a
-    concatenated Newick string (semicolon-separated).
+    Build a random phylogenetic forest and return it as a semicolon-separated
+    Newick string.  Each edge gets an independent integer branch length drawn
+    uniformly from [min_branch_length, max_branch_length]; that length is the
+    per-node mutation-count mean, so burden varies node to node.
 
     Parameters
     ----------
     num_trees : int
     min_leaves, max_leaves : int
-        Inclusive range for the number of leaves per tree.
-    min_branch_length, max_branch_length : int
-        Inclusive range for integer branch lengths (= number of mutations).
+        Inclusive range for leaves per tree.
     rng : np.random.Generator
-        Shared RNG for reproducibility.
-
-    Returns
-    -------
-    str
-        Concatenated Newick strings, one tree per semicolon-delimited entry.
+    min_branch_length, max_branch_length : int
+        Inclusive range for per-edge count means.
     """
-    forest_newicks = []
+    from phylox.generators.randomTC import (
+        generate_network_random_tree_child_sequence,
+    )
 
-    for tree_idx in range(num_trees):
+    newicks = []
+    for t in range(num_trees):
         n_leaves = int(rng.integers(min_leaves, max_leaves + 1))
-        tree_seed = int(rng.integers(0, 2**31))
-
-        phylo_tree = generate_network_random_tree_child_sequence(
+        tree_seed = int(rng.integers(0, 2 ** 31))
+        tree = generate_network_random_tree_child_sequence(
             n_leaves, 0, seed=tree_seed
         )
-
-        for i, node in enumerate(nx.topological_sort(phylo_tree)):
-            phylo_tree.nodes[node][LABEL_ATTR] = f"T{tree_idx + 1}_{i + 1}"
-
-        for u, v in phylo_tree.edges():
-            phylo_tree[u][v]["length"] = int(
+        for i, node in enumerate(nx.topological_sort(tree)):
+            tree.nodes[node][LABEL_ATTR] = f"T{t + 1}_{i + 1}"
+        for u, v in tree.edges():
+            tree[u][v]["length"] = int(
                 rng.integers(min_branch_length, max_branch_length + 1)
             )
-
-        forest_newicks.append(phylo_tree.newick())
-
-    return "".join(forest_newicks)
+        newicks.append(tree.newick())
+    return "".join(newicks)
