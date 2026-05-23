@@ -52,7 +52,7 @@
 #                  expected here, given the alpha_0-induced sparsity.
 #  FOLLOW-UP
 #    To make `alpha` cleanly recoverable, raise alpha_0 so e_0 is spread
-#    over many signatures (alpha_0 = 10*K = 100 gives concentration 1.0 per
+#    over many signatures (alpha_0 = K = 10 gives concentration 1.0 per
 #    component).  Tracked as a separate experiment / config, not a change
 #    to this one.  This config is kept as the record of the eps = 1.0
 #    geometry investigation.
