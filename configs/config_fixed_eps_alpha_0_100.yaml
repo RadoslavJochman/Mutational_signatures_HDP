@@ -152,6 +152,4 @@ inference:
   target_accept: 0.99
   max_treedepth: 12
 
-  init_from_nmf: true
-
   results_dir: ../results/
