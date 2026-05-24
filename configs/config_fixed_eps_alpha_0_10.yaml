@@ -1,0 +1,143 @@
+# ==========================================================================
+#  EXPERIMENT: Fixed-signature Tree-HDP  --  alpha_0 = 10  (uniform e_0)
+# ==========================================================================
+#
+#  Model structure : fixed-sig-v1
+#  Git tag         : fixed-sig-v1
+#
+#  WHAT THIS EXPERIMENT TESTS
+#    FixedSigHDP, identical to fixed-sig-v1 in every respect EXCEPT
+#    the cohort-baseline concentration: alpha_0 is raised from 1.0 to 10.0.
+#    With K = 10 this sets the e_0 prior to Dir((alpha_0/K)*1_K) = Dir(1.0),
+#    uniform over the simplex, instead of the strongly sparse Dir(0.1).
+#    eps is held at 1.0, so this isolates a single variable: alpha_0.
+#
+#  MOTIVATION
+#    The eps=1 run converged cleanly but returned
+#    shared_alpha ~= 161 against a generating value of 15.  That run also
+#    recovered e_0 as mass on just 2 signatures (8 exact zeros), a direct
+#    consequence of alpha_0 = 1.0 giving Dir(0.1).  The leading hypothesis
+#    was an alpha / alpha_0 confound: with e_0 sparse, the activity walk is
+#    effectively confined to a ~2-dimensional simplex, so the `alpha` that
+#    matches the observed tightness of that low-dimensional walk is far
+#    larger than the generator's nominal `alpha` (which scales a full
+#    10-component vector).  This experiment tests that hypothesis directly:
+#    spread e_0 across all signatures and see whether shared_alpha drops.
+#
+#  RESULT (30-tree forest, nb_dispersion: none, draws=1000, tune=200,
+#  4 chains)
+#    - Sampling is CLEAN: all 2391 parameters have r_hat <= 1.01 and
+#      ess_bulk >= 1718.  No divergences.
+#    - shared_alpha posterior mean ~= 28.4 (sd ~1.1, hdi [26.2, 30.3]),
+#      down from ~161 in the eps=1 run.  Changing ONLY alpha_0 pulled
+#      shared_alpha down by a factor of ~6, strong confirmation that the
+#      alpha / alpha_0 confound was the main driver of the earlier
+#      inflation.
+#    - e_0 recovered faithfully (tight intervals, ess in the thousands),
+#      but is not the flat vector [0.1]*10.  A typical Dir(1.0) draw in 10
+#      dimensions is still moderately uneven; with seed 42 the drawn e_0
+#      has ~5 components carrying the mass and ~5 near zero.  Inference
+#      recovered that draw correctly, this is expected behaviour of
+#      Dir(1.0), not a sparsity artefact.
+#
+#  PROBLEMS / CAVEATS
+#    - shared_alpha is improved, not recovered.  28.4 vs a generating 15
+#      is still a ~1.9x gap, and the posterior is tight enough that 15 is
+#      well outside the 94% HDI.
+#    - Two effects plausibly remain:
+#        (1) eps = 1.0 residual distortion.  The +1.0 pseudo-count is a
+#            heavy guard (Dir(1.0) per component is itself uniform); it can
+#            inflate alpha somewhat.  With the confound
+#            mostly removed, eps may now be the dominant remaining
+#            contributor.
+#        (2) Partial confound.  The drawn e_0 spans ~5 effective signatures,
+#            not 10, so a milder version of the alpha / alpha_0 confound
+#            persists.
+#      This run cannot separate (1) from (2).
+#    - FOLLOW-UP (before any reparameterization): test an extreme alpha_0,
+#      e.g. alpha_0 = 100 -> Dir(10.0), which clusters e_0 tightly around
+#      the flat vector and removes essentially all of the residual
+#      confound.  If shared_alpha then approaches 15, the residual was the
+#      partial confound and eps is largely innocent.  If it stays well
+#      above 15, the residual is eps = 1.0, which would motivate
+#      reparameterizing the activity walk so eps can be made negligible
+#      while still converging.  Note alpha_0 = 100 is a deliberately
+#      artificial probe (a near-fixed uniform e_0 is not biologically
+#      realistic); it is a diagnostic for the alpha question.
+#
+#  HOW TO REPRODUCE
+#    git checkout fixed-sig-v1
+#    python scripts/generate_data.py  --config configs/config_fixed_sig_alpha0_10.yaml
+#    python scripts/run_inference.py  --config configs/config_fixed_sig_alpha0_10.yaml
+#
+# ==========================================================================
+experiment_name: config_fixed_sig_alpha0_10
+git_tag: fixed-sig-v1
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  results_dir: ../data/        # artefacts saved under <results_dir>/<experiment_name>
+  make_plots: true
+
+  # Activity random walk: e_j ~ Dir(alpha * e_parent).
+  # High alpha  -> children closely resemble parents (strong tree signal).
+  # Low alpha   -> children drift fast (weak tree signal).
+  alpha: 15.0
+
+  alpha_0: 10.0
+
+  # Per-node mutation-count model.
+  lam: 3250
+  # Negative-binomial dispersion (Gamma-Poisson). Smaller => more
+  # over-dispersed burden. Set to `none` for a plain Poisson.
+  nb_dispersion: none
+
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  # ── Signatures ────────────────────────────────────────────────────────────
+  signatures:
+    source: synthesize           # synthesize | load
+    correlation: 0.3             # 0 = near-orthogonal (easy), 1 = overlapping (hard)
+    path: ../data/cosmic_signatures.csv   # used only when source == load
+    num_signatures: 10           # K (used when source == synthesize)
+
+  # ── Random phylogenetic forest ────────────────────────────────────────────
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500      # per-edge count mean, lower bound
+    max_branch_length: 5000      # per-edge count mean, upper bound
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  data:
+    count_matrix: ../data/config_fixed_sig_alpha0_10/mutation_count_matrix.csv
+    newick_string: ../data/config_fixed_sig_alpha0_10/newick_string.nwk
+    tree_edges: ../data/config_fixed_sig_alpha0_10/tree_edges.csv
+    fixed_signatures: ../data/config_fixed_sig_alpha0_10/fixed_signatures.csv
+    true_activities: ../data/config_fixed_sig_alpha0_10/true_activities.csv
+    ground_truth_params: ../data/config_fixed_sig_alpha0_10/ground_truth_params.json
+
+  priors:
+    alpha_prior: LogNorm
+    alpha_prior_parm:
+      mu: 3.0
+      sigma: 0.5
+    # Pseudo-count added to the per-node Dirichlet concentration:
+    #   e_j ~ Dir(alpha * e_parent + eps)
+    eps: 1.0
+
+  # NUTS sampler settings
+  draws: 1000
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+  max_treedepth: 12
+
+  init_from_nmf: true
+
+  results_dir: ../results/

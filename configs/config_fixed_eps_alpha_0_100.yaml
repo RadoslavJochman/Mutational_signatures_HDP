@@ -1,0 +1,157 @@
+# ==========================================================================
+#  EXPERIMENT: Fixed-signature Tree-HDP  --  alpha_0 = 100  (near-uniform e_0)
+# ==========================================================================
+#
+#  Model structure : fixed-sig-v1
+#  Git tag         : fixed-sig-v1
+#
+#  WHAT THIS EXPERIMENT TESTS
+#    FixedSigHDP, identical to eps=1 and the alpha_0=10 run in
+#    every respect EXCEPT the cohort-baseline concentration: alpha_0 = 100.
+#    With K = 10 this sets the e_0 prior to Dir((alpha_0/K)*1_K) = Dir(10.0),
+#    which clusters e_0 tightly around the flat vector.  eps is held at 1.0.
+#    This is the extreme end of an alpha_0 sweep (1 -> 10 -> 100) that
+#    isolates a single variable: alpha_0.
+#
+#  MOTIVATION
+#    The alpha_0 = 10 run brought shared_alpha from ~161 down to ~28 but
+#    not to the generating value of 15, because a typical Dir(1.0) draw is
+#    still uneven (~5 effective signatures), leaving a partial alpha/alpha_0
+#    confound.  alpha_0 = 100 -> Dir(10.0) pushes e_0 to near-uniform full
+#    support, removing essentially all of that residual confound.  If
+#    shared_alpha then approaches 15, the confound was the whole story and
+#    eps = 1.0 is largely innocent; if it stays well above 15, the residual
+#    is eps.
+#
+#  RESULT (30-tree forest, nb_dispersion: none, draws=1000, tune=200,
+#  4 chains)
+#    - Sampling is CLEAN: all 2391 parameters have r_hat <= 1.01 and
+#      ess_bulk >= 561.  No divergences.
+#    - shared_alpha posterior mean ~= 17.2 (sd ~0.79, hdi [15.8, 18.8])
+#      against a generating value of 15.  Essentially recovered: 15 is at
+#      the edge of the 94% HDI.
+#    - e_0 recovered as genuinely spread full support: 9 of 10 components
+#      clearly active, values roughly 0.05-0.17 (flat would be 0.10).
+#    - The alpha_0 sweep gives a clean monotone trend in shared_alpha:
+#        alpha_0 = 1    ->  ~161   (e_0 ~ Dir(0.1),  ~2 effective sigs)
+#        alpha_0 = 10   ->  ~28    (e_0 ~ Dir(1.0),  ~5 effective sigs)
+#        alpha_0 = 100  ->  ~17    (e_0 ~ Dir(10.0), ~10 effective sigs)
+#      confirming that the earlier inflation was driven by the
+#      alpha / alpha_0 confound, not by a recovery failure.
+#
+#  INTERPRETATION
+#    alpha_0 and eps act on two SEPARATE pathologies:
+#      - alpha_0 sets the effective dimensionality of the simplex the
+#        activity walk lives on.  Low alpha_0 -> sparse e_0 -> low-
+#        dimensional walk -> `alpha` confounded with that sparsity.  This
+#        is what the sweep above fixes.
+#      - eps sets the corner geometry of each per-node Dirichlet.  This is
+#        what governs convergence (small eps -> corner-seeking -> NUTS
+#        fail).
+#    This run recovers `alpha` WITH eps = 1.0 still in place, which shows
+#    eps = 1.0's distortion of `alpha` is small once the confound is gone.
+#
+#  PROBLEMS / CAVEATS
+#    - alpha_0 = 100 is a deliberately ARTIFICIAL probe.  A near-fixed
+#      uniform cohort baseline is not biologically realistic; it is a
+#      diagnostic regime for the `alpha` question, not a setting for final
+#      experiments.
+#    - The clean `alpha` recovery here is specific to the NON-SPARSE
+#      regime.  Any experiment that deliberately introduces sparsity
+#      (activity_sparsity > 0, or the unknown-K studies) puts the walk back
+#      on a low-dimensional simplex and revives the confound and there
+#      raising alpha_0 is NOT a fix, because sparsity is the object of
+#      study.
+#    - eps = 1.0 is still a heavy guard.  This run does not test small eps;
+#      eps = 0.01 showed small eps fails to converge under the
+#      current parameterization.
+#
+#  FOLLOW-UP
+#    1. Reparameterize the activity walk (non-centered / softmax-normal or
+#       stick-breaking transform of e_j) so eps can be made negligible
+#       while still converging.  Re-running THIS config under the
+#       reparameterized model should keep shared_alpha ~= 15, confirming
+#       eps was harmless here; sparse regimes can then be studied.
+#    2. Consider inferring alpha_0 rather than hardcoding the e_0 prior as
+#       Dir(ones(K)).  This removes a standing generator/inference mismatch
+#       (the generator used alpha_0/K, the model assumes 1.0).  Note this
+#       is a correctness fix, not a confound fix, jointly inferred
+#       alpha and alpha_0 remain confounded under sparsity.
+#
+#  HOW TO REPRODUCE
+#    git checkout fixed-sig-v1
+#    python scripts/generate_data.py  --config configs/config_fixed_sig_alpha0_100.yaml
+#    python scripts/run_inference.py  --config configs/config_fixed_sig_alpha0_100.yaml
+#
+# ==========================================================================
+
+experiment_name: config_fixed_sig_alpha0_100
+git_tag: fixed-sig-v1
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  results_dir: ../data/        # artefacts saved under <results_dir>/<experiment_name>
+  make_plots: true
+
+  # Activity random walk: e_j ~ Dir(alpha * e_parent).
+  # High alpha  -> children closely resemble parents (strong tree signal).
+  # Low alpha   -> children drift fast (weak tree signal).
+  alpha: 15.0
+
+  alpha_0: 100.0
+
+  # Per-node mutation-count model.
+  lam: 3250
+  # Negative-binomial dispersion (Gamma-Poisson). Smaller => more
+  # over-dispersed burden. Set to `none` for a plain Poisson.
+  nb_dispersion: none
+
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  # ── Signatures ────────────────────────────────────────────────────────────
+  signatures:
+    source: synthesize           # synthesize | load
+    correlation: 0.3             # 0 = near-orthogonal (easy), 1 = overlapping (hard)
+    path: ../data/cosmic_signatures.csv   # used only when source == load
+    num_signatures: 10           # K (used when source == synthesize)
+
+  # ── Random phylogenetic forest ────────────────────────────────────────────
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500      # per-edge count mean, lower bound
+    max_branch_length: 5000      # per-edge count mean, upper bound
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  data:
+    count_matrix: ../data/config_fixed_sig_alpha0_100/mutation_count_matrix.csv
+    newick_string: ../data/config_fixed_sig_alpha0_100/newick_string.nwk
+    tree_edges: ../data/config_fixed_sig_alpha0_100/tree_edges.csv
+    fixed_signatures: ../data/config_fixed_sig_alpha0_100/fixed_signatures.csv
+    true_activities: ../data/config_fixed_sig_alpha0_100/true_activities.csv
+    ground_truth_params: ../data/config_fixed_sig_alpha0_100/ground_truth_params.json
+
+  priors:
+    alpha_prior: LogNorm
+    alpha_prior_parm:
+      mu: 3.0
+      sigma: 0.5
+    # Pseudo-count added to the per-node Dirichlet concentration:
+    #   e_j ~ Dir(alpha * e_parent + eps)
+    eps: 1.0
+
+  # NUTS sampler settings
+  draws: 1000
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+  max_treedepth: 12
+
+  init_from_nmf: true
+
+  results_dir: ../results/
