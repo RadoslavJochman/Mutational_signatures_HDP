@@ -1,0 +1,122 @@
+# ==========================================================================
+#  EXPERIMENT: Tree-HDP v2 -- sigma_0 sensitivity sweep (SPARSE regime)
+# ==========================================================================
+#
+#  Model structure : fixed-sig-v2     Git tag: fixed-sig-v2
+#
+#  THIS CONFIG: sigma_0 = 2.0 ,  alpha_0 = 1  (sparse regime)
+#  Part of a sigma_0 = {{1, 2, 4}} sweep run at alpha_0 = 1, where the
+#  cohort baseline e_0 ~ Dir(0.1) collapses onto ~2 signatures.
+#
+#  WHAT THIS SWEEP TESTS
+#    sigma_0 is the inference-side root-prior std (eta_root ~ Normal(0,
+#    sigma_0^2)).  The question: should sigma_0 be inferred, or kept fixed?
+#    This is the sparse counterpart of the alpha_0 = 100 (non-sparse)
+#    sigma_0 sweep, run because a root prior may bind harder when the
+#    baseline carries little information.
+#
+#  RESULT (alpha_0 = 1, sparse; 30-tree forest, no eps)
+#      sigma_0 |  sigma  (mean, 94% HDI)  | r_hat | ess_min
+#      --------+--------------------------+-------+--------
+#         1    |  0.61  [0.54, 0.68]      | 1.01  | 1625
+#         2    |  0.48  [0.43, 0.53]      | 1.01  | 1382
+#         4    |  0.47  [0.42, 0.52]      | 1.03  |  190
+#    - Unlike the non-sparse sweep (where sigma was flat), here sigma_0
+#      moves sigma.  But it is a threshold, not a smooth dependence:
+#      sigma_0 = 1 gives a clearly higher sigma (HDI separated from the
+#      others); sigma_0 = 2 and 4 agree.  sigma_0 = 1 is simply too tight
+#      a root prior for the sparse data, it binds the roots and the walk
+#      scale absorbs the slack, inflating sigma.
+#    - sigma_0 = 4 shows mild sampler strain (ess_min 190): an over-wide
+#      root prior is marginally worse to sample.
+#    - e_0 stays at ~2 effective signatures for all three, sigma_0 does
+#      not change the sparsity, only how the model reconciles it.
+#
+#  CONCLUSION
+#    Consistent with the non-sparse sweep: do NOT infer sigma_0.  The
+#    sparse-regime effect is sigma_0 = 1 being too tight, not sigma_0
+#    being a quantity to estimate.  sigma_0 = 2 and 4 lie on a stable
+#    plateau in both regimes -> keep sigma_0 a fixed config constant at
+#    2.0 (1.0 too tight; 4.0 samples slightly worse).
+#
+#  CAVEAT
+#    In the sparse regime the activity walk lives on a ~2-dimensional
+#    simplex, so the absolute sigma ~= 0.47 is partly the alpha_0 confound,
+#    not a clean walk-scale estimate.  The relative finding, sigma_0 >= 2
+#    is a plateau, sigma_0 = 1 is too tight, is what this sweep
+#    establishes.
+#
+#  NON-SPARSE COUNTERPART
+#    config_v2_sigma0_{{1,2,4}}.yaml  (alpha_0 = 100): there sigma is flat
+#    across sigma_0.  The combined two-regime conclusion is recorded in the
+#    design document.
+#
+#  HOW TO REPRODUCE
+#    git checkout fixed-sig-v2
+#    python scripts/generate_data.py --config configs/config_fixed_logisticNorm_rep_sigma_0_sweep_2_alpha_0_1.yaml
+#    python scripts/run_inference.py --config configs/config_fixed_logisticNorm_rep_sigma_0_sweep_2_alpha_0_1.yaml
+# ==========================================================================
+
+experiment_name: config_v2_sigma0_2_alpha0_1
+git_tag: fixed-sig-v2
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  results_dir: ../data/
+  make_plots: true
+
+  alpha: 15.0
+  # alpha_0 = 1 with K = 10 -> Dir(0.1)
+  alpha_0: 1.0
+
+  lam: 3250
+  nb_dispersion: none
+
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  signatures:
+    source: synthesize           # synthesize | load
+    correlation: 0.3
+    path: ../data/cosmic_signatures.csv
+    num_signatures: 10           # K
+
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500
+    max_branch_length: 5000
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  data:
+    count_matrix: ../data/config_v2_sigma0_2_alpha0_1/mutation_count_matrix.csv
+    newick_string: ../data/config_v2_sigma0_2_alpha0_1/newick_string.nwk
+    tree_edges: ../data/config_v2_sigma0_2_alpha0_1/tree_edges.csv
+    fixed_signatures: ../data/config_v2_sigma0_2_alpha0_1/fixed_signatures.csv
+    true_activities: ../data/config_v2_sigma0_2_alpha0_1/true_activities.csv
+    ground_truth_params: ../data/config_v2_sigma0_2_alpha0_1/ground_truth_params.json
+
+  priors:
+    # Prior on the logistic-normal walk scale sigma. LogNormal(mu=0, sigma=1)
+    # has median 1.0 -- a moderate per-step drift in logit space.
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    # Std of the root baseline eta_root ~ Normal(0, sigma_0^2). Larger
+    # sigma_0 = a more diffuse cohort baseline in logit space.
+    sigma_0: 2.0
+    # NOTE: there is no `eps` in v2 -- the reparameterization removes it.
+
+  # NUTS sampler settings
+  draws: 1000
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+  max_treedepth: 12
+
+  results_dir: ../results/

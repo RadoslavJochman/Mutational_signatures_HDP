@@ -1,0 +1,106 @@
+# ==========================================================================
+#  EXPERIMENT: Tree-HDP v2 -- sigma_0 sensitivity sweep (NON-SPARSE regime)
+# ==========================================================================
+#
+#  Model structure : fixed-sig-v2     Git tag: fixed-sig-v2
+#
+#  THIS CONFIG: sigma_0 = 4.0 ,  alpha_0 = 100  (non-sparse regime)
+#  Part of a sigma_0 = {{1, 2, 4}} sweep run at alpha_0 = 100, where the
+#  cohort baseline e_0 is near-uniform (~10 active signatures).
+#
+#  WHAT THIS SWEEP TESTS
+#    sigma_0 is the inference-side root-prior std (eta_root ~ Normal(0,
+#    sigma_0^2)).  The question: should sigma_0 be inferred, or kept fixed?
+#    A hyperparameter is only worth inferring if the posterior depends on
+#    it, so sigma_0 is swept with everything else held fixed.
+#
+#  RESULT (alpha_0 = 100, non-sparse; 30-tree forest, no eps)
+#      sigma_0 |  sigma  (mean, 94% HDI)  | r_hat
+#      --------+--------------------------+------
+#         1    |  1.05  [1.00, 1.10]      | 1.01
+#         2    |  1.02  [0.97, 1.08]      | 1.01
+#         4    |  1.01  [0.96, 1.06]      | 1.01
+#    - sigma is flat across sigma_0; the HDIs overlap almost entirely.
+#      e_0 recovery is likewise unchanged (~8-10 active signatures in all
+#      three).  In the non-sparse regime sigma_0 is innocuous.
+#
+#  CONCLUSION
+#    Do not promote sigma_0 to an inferred variable: the posterior does not
+#    depend on it here.  Keep sigma_0 a fixed config constant at 2.0.
+#
+#  SPARSE COUNTERPART
+#    config_fixed_logisticNorm_rep_sigma_0_sweep_{{1,2,4}}_alpha_0_1.yaml
+#    (alpha_0 = 1): there sigma_0 = 1 is too tight and inflates sigma,
+#    while sigma_0 = 2 and 4 agree, a plateau consistent with this
+#    regime.  The combined two-regime conclusion is recorded in the
+#    design document.
+#
+#  HOW TO REPRODUCE
+#    git checkout fixed-sig-v2
+#    python scripts/generate_data.py --config configs/config_fixed_logisticNorm_rep_sigma_0_sweep_4.yaml
+#    python scripts/run_inference.py --config configs/config_fixed_logisticNorm_rep_sigma_0_sweep_4.yaml
+# ==========================================================================
+
+experiment_name: config_v2_sigma0_4
+git_tag: fixed-sig-v2
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  results_dir: ../data/
+  make_plots: true
+
+  alpha: 15.0
+  # alpha_0 = 100 with K = 10 -> Dir(10.0), near-uniform e_0.
+  alpha_0: 100.0
+
+  lam: 3250
+  nb_dispersion: none
+
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  signatures:
+    source: synthesize           # synthesize | load
+    correlation: 0.3
+    path: ../data/cosmic_signatures.csv
+    num_signatures: 10           # K
+
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500
+    max_branch_length: 5000
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  data:
+    count_matrix: ../data/config_v2_sigma0_4/mutation_count_matrix.csv
+    newick_string: ../data/config_v2_sigma0_4/newick_string.nwk
+    tree_edges: ../data/config_v2_sigma0_4/tree_edges.csv
+    fixed_signatures: ../data/config_v2_sigma0_4/fixed_signatures.csv
+    true_activities: ../data/config_v2_sigma0_4/true_activities.csv
+    ground_truth_params: ../data/config_v2_sigma0_4/ground_truth_params.json
+
+  priors:
+    # Prior on the logistic-normal walk scale sigma. LogNormal(mu=0, sigma=1)
+    # has median 1.0 -- a moderate per-step drift in logit space.
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    # Std of the root baseline eta_root ~ Normal(0, sigma_0^2). Larger
+    # sigma_0 = a more diffuse cohort baseline in logit space.
+    sigma_0: 4.0
+    # NOTE: there is no `eps` in v2 -- the reparameterization removes it.
+
+  # NUTS sampler settings
+  draws: 1000
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+  max_treedepth: 12
+
+  results_dir: ../results/

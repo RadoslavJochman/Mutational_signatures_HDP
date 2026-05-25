@@ -1,0 +1,130 @@
+# ==========================================================================
+#  EXPERIMENT: Tree-HDP v2 -- alpha_0 sweep (logistic-normal activity walk)
+# ==========================================================================
+#
+#  Model structure : fixed-sig-v2
+#  Git tag         : fixed-sig-v2
+#
+#  THIS CONFIG: alpha_0 = 1   -> e_0 ~ Dir(0.1),  sparse baseline (~2 active signatures)
+#  Part of a 3-point sweep over alpha_0 = {{1, 10, 100}}; all other settings
+#  identical.  Configs:
+#    config_v2_logistic_normal_alpha0_1.yaml    (alpha_0 = 1)
+#    config_v2_logistic_normal_alpha0_10.yaml   (alpha_0 = 10)
+#    config_v2_logistic_normal.yaml             (alpha_0 = 100)
+#
+#  WHAT THIS SWEEP TESTS
+#    Whether the alpha / alpha_0 confound seen in v1 survives the v2
+#    logistic-normal reparameterisation.  alpha_0 controls the sparsity of
+#    the cohort baseline e_0 (e_0 ~ Dir(alpha_0/K * 1_K)); the generator's
+#    activity-walk parameter alpha = 15 is held fixed across all three runs.
+#    A confound-free model would therefore infer the same walk scale
+#    regardless of alpha_0.  Because v2's sigma has no "true" generating
+#    value (the generator is a Dirichlet walk, not logistic-normal), the
+#    diagnostic is invariance of sigma across the sweep, not its accuracy.
+#
+#  RESULT (30-tree forest, nb_dispersion: none, no eps)
+#
+#      alpha_0 | e_0 effective dim | sigma  (mean, 94% HDI) | converged
+#      --------+-------------------+------------------------+----------
+#         1    |  ~2 signatures    | 0.48  [0.43, 0.53]     | yes
+#        10    |  ~6 signatures    | 0.94  [0.88, 0.99]     | yes
+#       100    | ~10 signatures    | 1.02  [0.97, 1.07]     | yes
+#
+#    - All three runs converge cleanly: r_hat <= 1.01, ess_bulk >= 1151,
+#      zero divergences, and NO eps pseudo-count.  v2 samples reliably in
+#      every regime, including the sparse one where v1 with small eps
+#      failed to converge.
+#    - sigma SATURATES.  Almost the entire movement is in the alpha_0
+#      1 -> 10 step (0.48 -> 0.94); from 10 -> 100 sigma barely moves
+#      (0.94 -> 1.02, HDIs nearly touching).  So sigma is effectively
+#      stable across the whole non-sparse range and is pulled down only
+#      in the extreme-sparse corner.
+#    - e_0 effective dimensionality (2 -> 6 -> 10) tracks alpha_0 as
+#      expected and saturates at K; sigma moves with that dimensionality.
+#
+#  INTERPRETATION
+#    v2 largely removes the alpha_0 confound.  Under the same alpha_0
+#    1 -> 100 sweep, v1's scale parameter moved ~10x (alpha 161 -> 17);
+#    v2's sigma moves ~2x, and almost all of that is the 1 -> 10 step.
+#    Across the practically relevant range (e_0 spanning several
+#    signatures) sigma is stable -- the confound is, for practical
+#    purposes, gone.
+#
+#  CAVEAT
+#    The confound is reduced, not mathematically eliminated.  sigma at
+#    alpha_0 = 1 (0.48) is well separated from sigma at alpha_0 = 100
+#    (1.02), the HDIs do not overlap.  It resurfaces only when e_0 is so
+#    sparse (~2 active signatures) that the activity walk is confined to a
+#    ~2-dimensional simplex; there the effective true K is ~2, and a lower
+#    sigma is arguably measuring a genuinely lower-dimensional walk rather
+#    than being "wrong".  For non-degenerate baselines the confound is not
+#    a practical concern in v2.
+#
+#  HOW TO REPRODUCE
+#    git checkout fixed-sig-v2
+#    python scripts/generate_data.py  --config configs/config_v2_logistic_normal_alpha0_10.yaml
+#    python scripts/run_inference.py  --config configs/config_v2_logistic_normal_alpha0_10.yaml
+#
+# ==========================================================================
+experiment_name: config_v2_logistic_normal_alpha0_1
+git_tag: fixed-sig-v2
+
+# ── Data generation ─────────────────────────────────────────────────────────
+simulation:
+  seed: 42
+  results_dir: ../data/
+  make_plots: true
+
+  alpha: 15.0
+  # alpha_0 sweep value (v2). e_0 ~ Dir(alpha_0/K * 1_K).
+  alpha_0: 1.0
+
+  lam: 3250
+  nb_dispersion: none
+
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  signatures:
+    source: synthesize           # synthesize | load
+    correlation: 0.3
+    path: ../data/cosmic_signatures.csv
+    num_signatures: 10           # K
+
+  forest:
+    num_trees: 30
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 1500
+    max_branch_length: 5000
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  data:
+    count_matrix: ../data/config_v2_logistic_normal_alpha0_1/mutation_count_matrix.csv
+    newick_string: ../data/config_v2_logistic_normal_alpha0_1/newick_string.nwk
+    tree_edges: ../data/config_v2_logistic_normal_alpha0_1/tree_edges.csv
+    fixed_signatures: ../data/config_v2_logistic_normal_alpha0_1/fixed_signatures.csv
+    true_activities: ../data/config_v2_logistic_normal_alpha0_1/true_activities.csv
+    ground_truth_params: ../data/config_v2_logistic_normal_alpha0_1/ground_truth_params.json
+
+  priors:
+    # Prior on the logistic-normal walk scale sigma. LogNormal(mu=0, sigma=1)
+    # has median 1.0 -- a moderate per-step drift in logit space.
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    # Std of the root baseline eta_root ~ Normal(0, sigma_0^2). Larger
+    # sigma_0 = a more diffuse cohort baseline in logit space.
+    sigma_0: 2.0
+
+  # NUTS sampler settings
+  draws: 1000
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.99
+  max_treedepth: 12
+
+  results_dir: ../results/
