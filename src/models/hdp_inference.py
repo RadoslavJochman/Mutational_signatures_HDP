@@ -16,7 +16,22 @@ _BaseTreeHDP
 FixedSigHDP
     Infers per-node signature *activities* while treating signatures as
     known.
-    Parameters recovered: shared_alpha, e_0, e_j for every node.
+
+    model_structure: fixed-sig-v2
+
+    The activity walk is a logistic-normal random walk in unconstrained
+    space:
+        eta_j ~ Normal(eta_parent, sigma^2)   (non-centered)
+        e_j   = softmax(eta_j)
+    This replaces the v1 Dirichlet walk e_j ~ Dir(alpha * e_parent), whose
+    simplex-corner geometry forced an `eps` pseudo-count.  The logistic-
+    normal walk samples cleanly with no eps.  The concentration parameter
+    alpha is replaced by a Gaussian step scale sigma; the last component
+    of eta is pinned to 0 at every node as the softmax identifiability
+    anchor.
+
+    The earlier Dirichlet-walk model (fixed-sig-v1) is preserved in the
+    git history under the tag `fixed-sig-v1`.
 """
 
 from __future__ import annotations
@@ -187,30 +202,62 @@ class _BaseTreeHDP(ABC):
 
 class FixedSigHDP(_BaseTreeHDP):
     """
-    Tree-HDP inference model with fixed (known) mutational signatures.
+    Tree-HDP inference model with fixed signatures and a logistic-normal
+    activity walk.
 
-    model_structure: fixed-sig-v1
+    model_structure: fixed-sig-v2
 
-    Infers per-node activity vectors e_j and a shared concentration parameter
-    alpha. Signatures are treated as constants.
+    Reparameterisation of the v1 Dirichlet-walk model (preserved in git
+    under the tag `fixed-sig-v1`).  Instead of the per-node Dirichlet
+    walk e_j ~ Dir(alpha * e_parent), activities follow a Gaussian random
+    walk in unconstrained space and are mapped to the simplex by softmax:
 
-    Generative model
-    --------------------------------------------------
-        shared_alpha ~ Given by the config parameter 'alpha_prior'
-        e_0          ~ Dir(1_K)                         (global cohort baseline)
-        e_j          ~ Dir(shared_alpha * e_parent)     (per node, plain Dirichlet)
-        x_ji         ~ Multinomial(M_j, e_j @ signatures)
+        sigma     ~ Given by the config parameter 'sigma_prior'
+        eta_root  ~ Normal(0, sigma_0^2)        (K-1 free components)
+        eta_j     =  eta_parent + sigma * z_j   (non-centered)
+        z_j       ~ Normal(0, 1)
+        e_j       =  softmax([eta_j, 0])
+        x_ji      ~ Multinomial(M_j, e_j @ signatures)
+
+    Why this form
+    -------------
+    The v1 Dirichlet walk has concentration entries near zero (e_parent is
+    itself near the simplex boundary), which places mass at the simplex
+    corners -- geometry NUTS samples badly, and the reason v1 needed the
+    `eps` pseudo-count.  Here the walk happens in unconstrained R^(K-1)
+    with Gaussian increments: no corners, no funnel, no eps.
+
+    Identifiability
+    ---------------
+    softmax is shift-invariant (softmax(x) == softmax(x + c)).  To make the
+    model identified, the last component of eta is pinned to 0 at every
+    node -- the standard reference-category anchor.  eta therefore has K-1
+    free components per node; e_j is still a full K-vector on the simplex.
+
+    Notes
+    -----
+    - `sigma` (Gaussian step scale) replaces v1's `shared_alpha`
+      (Dirichlet concentration).  Small sigma => children resemble parents;
+      large sigma => fast drift.  The two are NOT the same parameter and
+      are not directly comparable.
+    - The recovered `eta_root` / baseline is not directly comparable to
+      v1's Dirichlet `e_0`; the per-node activity vectors e_j (on the
+      simplex) are the quantities to compare across models.
 
     Parameters
     ----------
     newick_string : str
         Semicolon-separated Newick trees.
     data_matrix : pd.DataFrame
-        Shape (N_observed, 96). Index must match node labels.
+        Shape (N_observed, 96).  Index must match node labels.
     fixed_signatures : np.ndarray
         Shape (K, 96).
     priors : dict
-        Prior config dict.
+        Prior config dict.  Reads:
+          - 'sigma_prior' / 'sigma_prior_parm'  : prior on the walk scale
+            sigma (e.g. a HalfNormal or LogNormal).
+          - 'sigma_0' (optional, default 1.0)   : std of the root baseline
+            eta_root ~ Normal(0, sigma_0^2).
     """
 
     def __init__(
@@ -225,12 +272,21 @@ class FixedSigHDP(_BaseTreeHDP):
         self.priors = priors
         super().__init__(newick_string, data_matrix)
 
+    @staticmethod
+    def _softmax_last_zero(eta_free: pt.TensorVariable) -> pt.TensorVariable:
+        """
+        Map an (..., K-1) array of free logits to an (..., K) simplex point,
+        with the last component pinned to logit 0 (the identifiability
+        anchor).
+        """
+        # pad a column of zeros for the reference category
+        zeros = pt.zeros_like(eta_free[..., :1])
+        eta_full = pt.concatenate([eta_free, zeros], axis=-1)
+        return pt.special.softmax(eta_full, axis=-1)
+
     def _build_pymc_model(self) -> None:
-        # eps: pseudo-count for the per-node activity prior. Config-driven
-        # via priors["eps"].  eps = 0 recovers the plain (v1) form.
-        # eps is read for interface uniformity but v1 uses no
-        # pseudo-count; eps has no effect here (set eps: 0 in config).
-        eps = float(Fraction(str(self.priors.get("eps", 0.0))))
+        Km1 = self.K - 1                       # free logit dimensions
+        sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
 
         nodes_by_depth = self._get_nodes_by_depth()
         max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
@@ -238,34 +294,58 @@ class FixedSigHDP(_BaseTreeHDP):
         with pm.Model() as self.model:
             signatures = pt.as_tensor_variable(self.fixed_signatures)
 
-            # Global parameters
-            shared_alpha = get_prior(self.priors, "alpha_prior", dim=1)(name="shared_alpha")
+            # Global walk-scale parameter (replaces v1's shared_alpha).
+            sigma = get_prior(self.priors, "sigma_prior", dim=1)(name="sigma")
 
-            e_0_values = pm.Dirichlet("e_0", a=np.ones(self.K))
-
+            # node_id -> eta vector (K-1 free logits)
+            node_etas: Dict[str, pt.TensorVariable] = {}
+            # node_id -> e_j vector (K-simplex), for the likelihood
             node_es: Dict[str, pt.TensorVariable] = {}
 
             for depth in range(0, max_depth + 1):
                 current_nodes = nodes_by_depth.get(depth, [])
                 if not current_nodes:
                     continue
+                n_cur = len(current_nodes)
 
                 parent_nodes = [
-                    list(self.graph.predecessors(n))[0] if list(self.graph.predecessors(n)) else None
+                    list(self.graph.predecessors(n))[0]
+                    if list(self.graph.predecessors(n)) else None
                     for n in current_nodes
                 ]
-                if parent_nodes[0] is None:
-                    parent_e_stack = pt.stack([e_0_values] * len(current_nodes))
-                else:
-                    parent_e_stack = pt.stack([node_es[p] for p in parent_nodes])
 
-                a_matrix = shared_alpha * parent_e_stack + eps
+                if parent_nodes[0] is None:
+                    # Root level: eta_root ~ Normal(0, sigma_0^2), centered.
+                    eta_name = f"eta_level_{depth}"
+                    eta_level = pm.Normal(
+                        eta_name, mu=0.0, sigma=sigma_0,
+                        shape=(n_cur, Km1),
+                    )
+                else:
+                    # Non-root: non-centered walk
+                    #   eta_j = eta_parent + sigma * z_j,  z_j ~ N(0,1)
+                    parent_eta_stack = pt.stack(
+                        [node_etas[p] for p in parent_nodes]
+                    )
+                    z_name = f"z_level_{depth}"
+                    z_level = pm.Normal(
+                        z_name, mu=0.0, sigma=1.0,
+                        shape=(n_cur, Km1),
+                    )
+                    eta_name = f"eta_level_{depth}"
+                    eta_level = pm.Deterministic(
+                        eta_name, parent_eta_stack + sigma * z_level
+                    )
+
+                # map this level's logits to the simplex
                 e_name = f"e_level_{depth}"
-                e_level_values = pm.Dirichlet(e_name, a=a_matrix,
-                                              shape=(len(current_nodes), self.K))
+                e_level = pm.Deterministic(
+                    e_name, self._softmax_last_zero(eta_level)
+                )
 
                 for i, node in enumerate(current_nodes):
-                    node_es[node] = e_level_values[i]
+                    node_etas[node] = eta_level[i]
+                    node_es[node] = e_level[i]
                     self.node_index_map[node] = (e_name, i)
 
             # Likelihood
@@ -289,4 +369,3 @@ class FixedSigHDP(_BaseTreeHDP):
                     p=expected_probs,
                     observed=obs_counts_matrix,
                 )
-
