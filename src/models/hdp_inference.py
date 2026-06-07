@@ -199,7 +199,6 @@ class _BaseTreeHDP(ABC):
             )
         return self.trace
 
-
 class FixedSigHDP(_BaseTreeHDP):
     """
     Tree-HDP inference model with fixed signatures and a logistic-normal
@@ -369,3 +368,199 @@ class FixedSigHDP(_BaseTreeHDP):
                     p=expected_probs,
                     observed=obs_counts_matrix,
                 )
+
+class DeNovoHDP(_BaseTreeHDP):
+    """
+    Tree-HDP inference model with DE NOVO signature discovery.
+
+    model_structure: denovo-v1
+
+    Unlike FixedSigHDP, the signature matrix S is NOT supplied -- it is a
+    latent variable inferred jointly with the per-node activities.  The
+    activity walk is identical to FixedSigHDP (the validated v2 logistic-
+    normal walk); the only addition is the signature block.
+
+        S_k       ~ Dir(beta * 1_96)            for k = 1..K   (signatures)
+        sigma     ~ prior (config 'sigma_prior')
+        eta_root  ~ Normal(0, sigma_0^2)        (K-1 free components)
+        eta_j     =  eta_parent + sigma * z_j   (non-centered)
+        z_j       ~ Normal(0, 1)
+        e_j       =  softmax([eta_j, 0])
+        x_ji      ~ Multinomial(M_j, e_j @ S)
+
+    Why this form
+    -------------
+    The activity side is unchanged from the validated fixed-sig-v2 model,
+    so any new difficulty is attributable to the signature block alone.
+    Each signature S_k is a point on the 96-channel simplex with a single
+    shared Dirichlet concentration `beta`.  beta < 1 favours peaked
+    signatures, beta = 1 is uniform-over-simplex, beta > 1 favours flat
+    ones; one shared beta cannot represent the full COSMIC peakedness
+    range, so it imposes a peakedness band -- a deliberate first-cut
+    simplification, to be revisited if the data lack signal to constrain S.
+
+    IDENTIFIABILITY -- READ BEFORE USING THE TRACE
+    ----------------------------------------------
+    With S latent the model has two non-identifiabilities:
+
+    1. Label switching.  Signature index k has no fixed meaning: any
+       permutation of the K signatures, with the matching permutation of
+       the activity components, leaves the likelihood unchanged.  Posterior
+       means computed by averaging raw draws across chains (or across
+       draws, if a chain switches mid-run) are therefore MEANINGLESS.
+
+    2. S / e trade-off.  Only the product e_j @ S is observed, so a
+       continuum of (S, e) pairs fit nearly equally well.  This is broken
+       only by the structure of the priors -- the tree walk on e and the
+       Dirichlet concentration on S.
+
+    This class does NOT solve either.  Chain alignment and scoring against
+    ground-truth signatures are intentionally left to external
+    post-processing: align chains to a common labelling first, THEN compute
+    posterior means or call the activity accessors.  `get_posterior_mean`
+    inherited from the base class will silently return a permutation-
+    averaged (wrong) result if called on an un-aligned trace.
+
+    Parameters
+    ----------
+    newick_string : str
+        Semicolon-separated Newick trees.
+    data_matrix : pd.DataFrame
+        Shape (N_observed, 96).  Index must match node labels.
+    num_signatures : int
+        K, the number of signatures to discover.  Fixed (known-K setting).
+    priors : dict
+        Prior config dict.  Reads:
+          - 'sigma_prior' / 'sigma_prior_parm' : prior on the walk scale.
+          - 'sigma_0' (optional, default 1.0)  : root-baseline std.
+          - 'beta' (optional, default 0.5)     : Dirichlet concentration
+            for the signature prior S_k ~ Dir(beta * 1_96).
+    """
+
+    def __init__(
+            self,
+            newick_string: str,
+            data_matrix: pd.DataFrame,
+            num_signatures: int,
+            priors: dict,
+    ):
+        self.K = int(num_signatures)
+        self.priors = priors
+        self.n_channels = data_matrix.shape[1]
+        super().__init__(newick_string, data_matrix)
+
+    @staticmethod
+    def _softmax_last_zero(eta_free: pt.TensorVariable) -> pt.TensorVariable:
+        """
+        Map an (..., K-1) array of free logits to an (..., K) simplex point,
+        with the last component pinned to logit 0 (identifiability anchor
+        for the softmax activity walk -- identical to FixedSigHDP).
+        """
+        zeros = pt.zeros_like(eta_free[..., :1])
+        eta_full = pt.concatenate([eta_free, zeros], axis=-1)
+        return pt.special.softmax(eta_full, axis=-1)
+
+    def _build_pymc_model(self) -> None:
+        Km1 = self.K - 1
+        sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
+        beta = float(Fraction(str(self.priors.get("beta", 0.5))))
+        C = self.n_channels
+
+        nodes_by_depth = self._get_nodes_by_depth()
+        max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
+
+        with pm.Model() as self.model:
+            # K signatures, each a point on the C-channel simplex.
+            signatures = pm.Dirichlet(
+                "signatures",
+                a=beta * np.ones(C),
+                shape=(self.K, C),
+            )
+
+            sigma = get_prior(self.priors, "sigma_prior", dim=1)(name="sigma")
+
+            node_etas: Dict[str, pt.TensorVariable] = {}
+            node_es: Dict[str, pt.TensorVariable] = {}
+
+            for depth in range(0, max_depth + 1):
+                current_nodes = nodes_by_depth.get(depth, [])
+                if not current_nodes:
+                    continue
+                n_cur = len(current_nodes)
+
+                parent_nodes = [
+                    list(self.graph.predecessors(n))[0]
+                    if list(self.graph.predecessors(n)) else None
+                    for n in current_nodes
+                ]
+
+                if parent_nodes[0] is None:
+                    eta_name = f"eta_level_{depth}"
+                    eta_level = pm.Normal(
+                        eta_name, mu=0.0, sigma=sigma_0,
+                        shape=(n_cur, Km1),
+                    )
+                else:
+                    parent_eta_stack = pt.stack(
+                        [node_etas[p] for p in parent_nodes]
+                    )
+                    z_name = f"z_level_{depth}"
+                    z_level = pm.Normal(
+                        z_name, mu=0.0, sigma=1.0,
+                        shape=(n_cur, Km1),
+                    )
+                    eta_name = f"eta_level_{depth}"
+                    eta_level = pm.Deterministic(
+                        eta_name, parent_eta_stack + sigma * z_level
+                    )
+
+                e_name = f"e_level_{depth}"
+                e_level = pm.Deterministic(
+                    e_name, self._softmax_last_zero(eta_level)
+                )
+
+                for i, node in enumerate(current_nodes):
+                    node_etas[node] = eta_level[i]
+                    node_es[node] = e_level[i]
+                    self.node_index_map[node] = (e_name, i)
+
+            # Likelihood
+            observed_es, obs_counts = [], []
+            for node in self.graph.nodes():
+                label = self.graph.nodes[node].get("label", str(node))
+                if label in self.data_matrix.index:
+                    counts = self.data_matrix.loc[label].values
+                    if counts.sum() > 0:
+                        observed_es.append(node_es[node])
+                        obs_counts.append(counts)
+
+            if observed_es:
+                obs_counts_matrix = np.array(obs_counts, dtype=np.int32)
+                n_mutations = obs_counts_matrix.sum(axis=1)
+                e_matrix = pt.stack(observed_es)
+                expected_probs = pt.dot(e_matrix, signatures)
+                pm.Multinomial(
+                    "observations",
+                    n=n_mutations,
+                    p=expected_probs,
+                    observed=obs_counts_matrix,
+                )
+
+    def get_signatures_posterior(self) -> np.ndarray:
+        """
+        Return posterior samples of the discovered signature matrix.
+
+        Returns
+        -------
+        np.ndarray
+            Shape (chains, draws, K, n_channels).
+
+        Notes
+        -----
+        These samples are subject to label switching across chains (and
+        possibly within a chain).  Align chains to a common labelling
+        BEFORE averaging -- a raw mean over chains is not meaningful.
+        """
+        if self.trace is None:
+            raise ValueError("No trace found.  Run `sample()` first.")
+        return self.trace.posterior["signatures"].values
