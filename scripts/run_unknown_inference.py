@@ -1,107 +1,219 @@
 """
-scripts/run_unknown_sig_inference.py
+Run de novo signature discovery inference and align the posterior for label
+switching.
 
-Run Bayesian inference with UnknownSigHDP: jointly infers both mutational
-signatures and per-node activities from a mutation count matrix.
+Purpose
+    Fit a model that infers the per node activities and the signature matrix
+    S jointly. When S is latent the posterior carries a label switching
+    symmetry: any permutation of the K signatures, together with the matching
+    permutation of the activity components, leaves the likelihood unchanged,
+    so signature index k has no fixed meaning across draws or chains.
 
-You only need to specify K_max (an upper bound on the number of signatures)
-in the YAML config.  Signatures not needed by the data will have their
-activity components shrink toward zero, so the effective number is learned
-from the data.
+Why alignment is needed
+    Convergence statistics (r_hat, ess) computed on the raw trace are not
+    meaningful, because they would compare chains that merely ordered the
+    same signatures differently. A post hoc alignment step is inserted
+    between sampling and summary.
 
-Results written to results/<experiment_name>_<YYYY-MM-DD>/:
-    trace.nc                – full ArviZ InferenceData (MCMC samples)
-    inference_summary.csv   – ArviZ summary (mean, sd, ESS, r_hat)
-    inferred_signatures.csv – posterior-mean signatures, shape (K_max, 96)
-    bayesian_network.png    – graphviz model graph (if graphviz is installed)
+Method
+    Alignment is per draw. For each posterior draw the K inferred signatures
+    are matched to a reference labelling (chain 0 posterior mean) by maximum
+    cosine similarity, solved as a linear assignment problem; that draw's
+    signatures and per node activity components (e_level_*) are then permuted
+    into the reference order. Per draw alignment is robust to within chain
+    switching and produces a within chain switching diagnostic as a
+    by product: a chain that never switched has a constant permutation across
+    all its draws, whereas a varying permutation means that chain switched.
 
-Usage
------
-    python scripts/run_unknown_sig_inference.py \
-        --config configs/unknown_sig_experiment.yaml
+Outputs (written to the run directory)
+    trace_raw.nc          unaligned posterior trace
+    trace_aligned.nc      posterior trace after per draw alignment
+    switching_table.csv   per chain count of distinct permutations and the
+                          fraction of draws differing from the dominant one
+    inference_summary.csv arviz summary computed on the aligned trace
 
-Expected YAML structure
------------------------
-    experiment_name: unknown_sig_experiment
+Interpretation hint
+    A chain with n_distinct_perms = 1 stayed in a single labelling; a value
+    above one, or a non zero switched_fraction, indicates within chain
+    switching and a multimodal posterior. Judge convergence on the aligned
+    variables (signatures, e_level_*) only; eta_level_* and z_level_* are not
+    aligned, so their r_hat is not informative.
 
-    inference:
-      results_dir: results/
-
-      data:
-        count_matrix:  data/mutation_count_matrix.csv
-        newick_string: data/ground_truth_trees.nwk
-
-      K_max: 15
-
-      priors:
-        alpha_prior:
-          distribution: LogNormal
-          mu: 2.5
-          sigma: 1.0
-        eta: 0.1          # Dirichlet concentration for signature prior
-
-      draws: 2000
-      tune: 1000
-      chains: 4
-      cores: 4
-      target_accept: 0.95
+Usage:
+    python scripts/run_unknown_inference.py --config configs/<experiment>.yaml
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import arviz as az
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pymc as pm
+from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_config, make_output_dir
-from src.models.hdp_inference import UnknownSigHDP
-from src.plotting.plots import plot_signatures_heatmap
+from src.models.hdp_inference import DeNovoHDP
+
+def _cosine_assignment(S_draw: np.ndarray, S_ref: np.ndarray) -> np.ndarray:
+    """
+    Match the K signatures of one draw to a reference labelling.
+
+    Parameters
+    ----------
+    S_draw : np.ndarray, shape (K, C)
+        Signature matrix from one posterior draw.
+    S_ref : np.ndarray, shape (K, C)
+        Reference signature matrix.
+
+    Returns
+    -------
+    np.ndarray, shape (K,)
+        Permutation `perm` such that S_draw[perm] is aligned to S_ref:
+        perm[r] is the draw-index of the signature that best matches
+        reference signature r.
+    """
+    dn = S_draw / (np.linalg.norm(S_draw, axis=1, keepdims=True) + 1e-12)
+    rn = S_ref / (np.linalg.norm(S_ref, axis=1, keepdims=True) + 1e-12)
+    cos = rn @ dn.T
+    ref_idx, draw_idx = linear_sum_assignment(-cos)
+    perm = np.empty(len(ref_idx), dtype=int)
+    perm[ref_idx] = draw_idx        # index = reference slot, value = matching draw slot
+    return perm
 
 
-def run_unknown_sig(cfg: dict) -> None:
-    inf_cfg  = cfg["inference"]
+def align_trace(trace, activity_var_prefix: str = "e_level"):
+    """
+    Per-draw alignment of a DeNovoHDP trace to chain 0's mean labelling.
+
+    The `signatures` variable and the per-node activity variables
+    (e_level_*) are permuted along their signature axis so that signature k
+    means the same thing in every draw of every chain. eta_level_* and
+    z_level_* are not permuted: eta carries K-1 free logits, not K aligned
+    activity components.
+
+    Parameters
+    ----------
+    trace : arviz.InferenceData
+        Raw trace from DeNovoHDP.sample().
+    activity_var_prefix : str
+        Prefix of the per-node activity variables to permute alongside the
+        signatures.  e_level_* has its last axis = K; eta_level_* has its
+        last axis = K-1 (the pinned-logit anchor), so eta is not permuted
+        here, only e_level (the interpretable activity) is.
+
+    Returns
+    -------
+    aligned : arviz.InferenceData
+        A copy of `trace` with `signatures` and e_level_* permuted.
+    perms : np.ndarray, shape (chains, draws, K)
+        The permutation applied to each draw (for the switching report).
+    """
+    post = trace.posterior
+    S = post["signatures"].values
+    n_chains, n_draws, K, C = S.shape
+
+    S_ref = S[0].mean(axis=0)
+
+    perms = np.empty((n_chains, n_draws, K), dtype=int)
+    for c in range(n_chains):
+        for d in range(n_draws):
+            perms[c, d] = _cosine_assignment(S[c, d], S_ref)
+
+    aligned = trace.copy()
+
+    S_aligned = np.empty_like(S)
+    for c in range(n_chains):
+        for d in range(n_draws):
+            S_aligned[c, d] = S[c, d][perms[c, d]]
+
+    sig_da = aligned.posterior["signatures"].copy(data=S_aligned)
+    aligned.posterior["signatures"] = sig_da
+
+    for var in list(post.data_vars):
+        if not var.startswith(activity_var_prefix):
+            continue
+        arr = post[var].values
+        if arr.shape[-1] != K:
+            continue
+        out = np.empty_like(arr)
+        for c in range(n_chains):
+            for d in range(n_draws):
+                out[c, d] = arr[c, d][:, perms[c, d]]
+        aligned.posterior[var] = aligned.posterior[var].copy(data=out)
+
+    return aligned, perms
+
+
+def switching_table(perms: np.ndarray) -> pd.DataFrame:
+    """
+    Summarise within chain label switching from the per draw permutations.
+
+    For each chain it counts how many distinct permutations were applied
+    across draws and the fraction of draws that differ from that chain's most
+    common permutation.
+
+    Parameters
+    ----------
+    perms : np.ndarray, shape (chains, draws, K)
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per chain with columns chain, n_distinct_perms,
+        switched_fraction.
+    """
+    n_chains, n_draws, K = perms.shape
+    rows = []
+    for c in range(n_chains):
+        _, counts = np.unique(perms[c], axis=0, return_counts=True)
+        rows.append(
+            {
+                "chain": c,
+                "n_distinct_perms": int(len(counts)),
+                "switched_fraction": float(1.0 - counts.max() / n_draws),
+            }
+        )
+    return pd.DataFrame(rows)
+
+def run_denovo(cfg: dict) -> None:
+    inf_cfg = cfg["inference"]
     data_cfg = inf_cfg["data"]
+    result_path = inf_cfg["results_dir"]
 
-    out_dir = make_output_dir(
-        inf_cfg["results_dir"],
-        cfg.get("experiment_name", "experiment"),
-    )
+    out_dir = make_output_dir(result_path, cfg.get("experiment_name", "experiment"))
     print(f"Output directory: {out_dir}")
 
+    # Load data
     print("Loading data...")
     count_matrix = pd.read_csv(data_cfg["count_matrix"], index_col=0)
-
     with open(data_cfg["newick_string"]) as f:
         newick_string = f.read().strip()
 
-    K_max = int(inf_cfg["K_max"])
-    print(f"Count matrix:    {count_matrix.shape}")
-    print(f"K_max:           {K_max}")
+    num_signatures = int(inf_cfg["num_signatures"])
 
-    print("\nBuilding PyMC model (UnknownSigHDP)...")
-    model = UnknownSigHDP(
+    # Build model
+    print(f"\nBuilding DeNovoHDP model (K = {num_signatures})...")
+    model = DeNovoHDP(
         newick_string=newick_string,
         data_matrix=count_matrix,
-        K_max=K_max,
+        num_signatures=num_signatures,
         priors=inf_cfg["priors"],
     )
-    print(f"Nodes in model:  {len(model.node_index_map)}")
 
-    # Optional: save the graphviz Bayesian network diagram
     try:
         pm.model_to_graphviz(model.model).render(
             str(out_dir / "bayesian_network"), format="png"
         )
-        print(f"Saved Bayesian network graph to '{out_dir}'.")
+        print(f"Saved Bayesian network graph in {out_dir}.")
     except Exception:
         print("Graphviz not available, skipping model graph.")
 
+    # Sample
     print("\nStarting MCMC sampler...")
     trace = model.sample(
         draws=inf_cfg["draws"],
@@ -109,36 +221,55 @@ def run_unknown_sig(cfg: dict) -> None:
         chains=inf_cfg["chains"],
         cores=inf_cfg["cores"],
         target_accept=inf_cfg["target_accept"],
+        max_treedepth=int(inf_cfg.get("max_treedepth", 10)),
     )
 
-    trace_path = out_dir / "trace.nc"
-    az.to_netcdf(trace, str(trace_path))
-    print(f"Saved trace to '{trace_path}'")
+    # Persist the RAW trace (pre-alignment) so the alignment is reproducible.
+    raw_path = out_dir / "trace_raw.nc"
+    try:
+        trace.to_netcdf(str(raw_path))
+        print(f"Saved raw trace to '{raw_path}'")
+    except (ValueError, ImportError) as e:
+        zarr_path = out_dir / "trace_raw.zarr"
+        trace.to_zarr(str(zarr_path))
+        print(f"NetCDF backend unavailable ({e}); saved raw trace to '{zarr_path}'")
 
-    summary_df = az.summary(trace)
+    # Post-hoc alignment
+    print("\nAligning chains (per-draw, to chain 0's mean labelling)...")
+    aligned, perms = align_trace(trace)
+
+    # within-chain switching diagnostic, saved as a table
+    switch_df = switching_table(perms)
+    switch_path = out_dir / "switching_table.csv"
+    switch_df.to_csv(switch_path, index=False)
+    print(f"Saved within-chain switching table to '{switch_path}'")
+
+    # Persist the aligned trace
+    aligned_path = out_dir / "trace_aligned.nc"
+    try:
+        aligned.to_netcdf(str(aligned_path))
+        print(f"\nSaved aligned trace to '{aligned_path}'")
+    except (ValueError, ImportError) as e:
+        zarr_path = out_dir / "trace_aligned.zarr"
+        aligned.to_zarr(str(zarr_path))
+        print(f"NetCDF backend unavailable ({e}); saved aligned trace to '{zarr_path}'")
+
+    # Summary computed on the aligned trace
+    # r_hat / ess are only meaningful after alignment.
+    summary_df = az.summary(aligned)
     summary_df.to_csv(out_dir / "inference_summary.csv")
-    print(f"Saved inference summary to '{out_dir / 'inference_summary.csv'}'")
-
-    posterior_sigs = model.get_posterior_signatures(mean=True)
-    sig_df = pd.DataFrame(
-        posterior_sigs,
-        index=[f"Signature_{k}" for k in range(K_max)],
-        columns=count_matrix.columns,
-    )
-    sig_path = out_dir / "inferred_signatures.csv"
-    sig_df.to_csv(sig_path)
-    print(f"Saved inferred signatures to '{sig_path}'")
+    print(f"Saved inference summary (aligned) to '{out_dir / 'inference_summary.csv'}'")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run UnknownSigHDP inference (joint signature + activity learning)."
+        description="Run de novo signature-discovery Tree-HDP inference."
     )
-    parser.add_argument("--config", required=True, help="Path to YAML config file.")
+    parser.add_argument("--config", required=True, help="Path to YAML config.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    run_unknown_sig(cfg)
+    run_denovo(cfg)
 
 
 if __name__ == "__main__":
