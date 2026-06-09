@@ -172,6 +172,8 @@ class _BaseTreeHDP(ABC):
             cores: int = 4,
             target_accept: float = 0.95,
             max_treedepth: int = 10,
+            initvals=None,
+            init: str = "auto",
     ):
         """
         Run the NUTS sampler.
@@ -180,6 +182,12 @@ class _BaseTreeHDP(ABC):
         ----------
         draws, tune, chains, cores, target_accept, max_treedepth :
             standard pm.sample / NUTS args.
+        initvals :
+            optional dict (or list of dicts) of starting values. A single dict
+            starts every chain from the same point; pair with
+            init='adapt_diag' for a shared start without jitter.
+        init :
+            pm.sample initialisation scheme (default 'auto', unchanged).
 
         Returns
         -------
@@ -196,6 +204,8 @@ class _BaseTreeHDP(ABC):
                 target_accept=target_accept,
                 nuts_sampler="numpyro",
                 nuts={"max_tree_depth": max_treedepth},
+                initvals=initvals,
+                init=init,
             )
         return self.trace
 

@@ -259,6 +259,20 @@ def run_denovo(cfg: dict) -> None:
     except Exception:
         print("Graphviz not available, skipping model graph.")
 
+    # Optional shared, data-driven initialisation. With init: nmf every chain
+    # starts from the same NMF point (init='adapt_diag', no jitter)
+    initvals, init_scheme = None, "auto"
+    if str(inf_cfg.get("init", "")).lower() == "nmf":
+        if model_label != "DeNovoHDP":
+            raise ValueError("init: nmf is only supported for model: denovo "
+                             "(random walk); the OU walk backs out differently.")
+        from src.models.nmf_init import denovo_nmf_initvals
+        initvals = denovo_nmf_initvals(
+            model, count_matrix,
+            sigma_init=float(inf_cfg.get("init_sigma", 0.6)))
+        init_scheme = "adapt_diag"
+        print("Using shared NMF initialisation (all chains, init=adapt_diag).")
+
     # Sample
     print("\nStarting MCMC sampler...")
     trace = model.sample(
@@ -268,6 +282,8 @@ def run_denovo(cfg: dict) -> None:
         cores=inf_cfg["cores"],
         target_accept=inf_cfg["target_accept"],
         max_treedepth=int(inf_cfg.get("max_treedepth", 10)),
+        initvals=initvals,
+        init=init_scheme,
     )
 
     # Persist the RAW trace (pre-alignment) so the alignment is reproducible.
