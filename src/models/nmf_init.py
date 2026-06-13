@@ -47,12 +47,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import NMF
 
-
-def _inv_softmax_last_zero(e: np.ndarray, floor: float = 1e-6) -> np.ndarray:
-    """Map a (K,) simplex point to (K-1,) logits with the last component as
-    the pinned zero reference: eta_k = log(e_k) - log(e_{K-1})."""
-    e = np.clip(e, floor, None)
-    return np.log(e[:-1]) - np.log(e[-1])
+from src.analysis.analysis import inverse_walk
 
 
 def denovo_nmf_initvals(
@@ -87,43 +82,7 @@ def denovo_nmf_initvals(
     e_obs = W / np.clip(W.sum(axis=1, keepdims=True), 1e-12, None)
     label_to_e = {lab: e_obs[i] for i, lab in enumerate(count_matrix.index)}
 
-    # eta for every graph node, in the model's BFS order, parents first.
-    nodes_by_depth = model._get_nodes_by_depth()
-    max_depth = max(nodes_by_depth) if nodes_by_depth else 0
-
-    def node_label(n):
-        return model.graph.nodes[n].get("label", str(n))
-
-    eta_of = {}
-    init: Dict[str, np.ndarray] = {}
-
-    for depth in range(0, max_depth + 1):
-        current = nodes_by_depth.get(depth, [])
-        if not current:
-            continue
-        parents = [
-            (list(model.graph.predecessors(n)) or [None])[0] for n in current
-        ]
-        eta_rows, z_rows = [], []
-        for n, p in zip(current, parents):
-            lab = node_label(n)
-            if lab in label_to_e:
-                eta = _inv_softmax_last_zero(label_to_e[lab])
-            elif p is not None:
-                eta = eta_of[p]
-            else:
-                eta = np.zeros(K - 1)
-            eta_of[n] = eta
-            eta_rows.append(eta)
-            if p is not None:
-                z_rows.append((eta - eta_of[p]) / sigma_init)
-
-        if parents[0] is None:
-            # root level is a free, centred eta in the random-walk model
-            init[f"eta_level_{depth}"] = np.array(eta_rows)
-        else:
-            init[f"z_level_{depth}"] = np.array(z_rows)
-
+    init: Dict[str, np.ndarray] = inverse_walk(model, label_to_e, sigma_init)
     init["signatures"] = signatures_init
     init["sigma"] = float(sigma_init)
     return init

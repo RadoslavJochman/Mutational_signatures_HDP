@@ -89,7 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import (
     build_forest,
     chain_perms_to_true,
-    cos,
+    cosine,
     detect_camps,
     nodes_by_depth,
 )
@@ -231,10 +231,10 @@ def main():
                            for c in range(n_chains)])      # (n_chains, K, C)
     S_A = S_by_chain[campA].mean(axis=0)
     S_B = S_by_chain[campB].mean(axis=0)
-    btw_cos = np.array([cos(S_A[k], S_B[k]) for k in range(K)])
+    btw_cos = np.array([cosine(S_A[k], S_B[k]) for k in range(K)])
 
-    cos_A_true = float(np.mean([cos(S_A[k], true_S[k]) for k in range(K)]))
-    cos_B_true = float(np.mean([cos(S_B[k], true_S[k]) for k in range(K)]))
+    cos_A_true = float(np.mean([cosine(S_A[k], true_S[k]) for k in range(K)]))
+    cos_B_true = float(np.mean([cosine(S_B[k], true_S[k]) for k in range(K)]))
 
     sigmas, U = sumzero_singular(true_S)
     sig_min, sig_max = float(sigmas[-1]), float(sigmas[0])

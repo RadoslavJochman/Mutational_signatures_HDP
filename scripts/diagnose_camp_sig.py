@@ -70,8 +70,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import (
+    align,
     chain_perms_to_true,
-    cos,
+    cosine,
     detect_camps,
     per_chain_activity,
 )
@@ -88,7 +89,7 @@ def camp_mean_signatures(S_by_chain, camp):
 def per_signature_cosine(SA, SB):
     """Per-signature cosine between two (K, C) signature matrices."""
     K = SA.shape[0]
-    return np.array([cos(SA[k], SB[k]) for k in range(K)])
+    return np.array([cosine(SA[k], SB[k]) for k in range(K)])
 
 
 def within_camp_cosine(S_by_chain, camp):
@@ -101,7 +102,7 @@ def within_camp_cosine(S_by_chain, camp):
         return np.full(K, np.nan)
     out = np.zeros(K)
     for k in range(K):
-        cs = [cos(S_by_chain[i, k], S_by_chain[j, k])
+        cs = [cosine(S_by_chain[i, k], S_by_chain[j, k])
               for i, j in combinations(camp, 2)]
         out[k] = float(np.mean(cs))
     return out
@@ -170,13 +171,11 @@ def main():
     truth_cos_A = truth_cos_B = None
     bestmatch_A = bestmatch_B = None
     if true_S is not None:
-        truth_cos_A = np.array([cos(SA[k], true_S[k]) for k in range(K)])
-        truth_cos_B = np.array([cos(SB[k], true_S[k]) for k in range(K)])
-        tn = true_S / (np.linalg.norm(true_S, axis=1, keepdims=True) + 1e-12)
-        sAn = SA / (np.linalg.norm(SA, axis=1, keepdims=True) + 1e-12)
-        sBn = SB / (np.linalg.norm(SB, axis=1, keepdims=True) + 1e-12)
-        bestmatch_A = (tn @ sAn.T).max(axis=1)
-        bestmatch_B = (tn @ sBn.T).max(axis=1)
+        truth_cos_A = np.array([cosine(SA[k], true_S[k]) for k in range(K)])
+        truth_cos_B = np.array([cosine(SB[k], true_S[k]) for k in range(K)])
+
+        bestmatch_A = align(SA, true_S)[1].max(axis=1)
+        bestmatch_B = align(SB, true_S)[1].max(axis=1)
 
     pd.DataFrame({
         "signature": np.arange(K),

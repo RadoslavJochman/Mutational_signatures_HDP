@@ -63,40 +63,12 @@ import arviz as az
 import numpy as np
 import pandas as pd
 import pymc as pm
-from scipy.optimize import linear_sum_assignment
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_config, make_output_dir
 from src.models.hdp_inference import DeNovoHDP
 from src.models.ou_inference import TreeOUHDP
-
-def _cosine_assignment(S_draw: np.ndarray, S_ref: np.ndarray) -> np.ndarray:
-    """
-    Match the K signatures of one draw to a reference labelling.
-
-    Parameters
-    ----------
-    S_draw : np.ndarray, shape (K, C)
-        Signature matrix from one posterior draw.
-    S_ref : np.ndarray, shape (K, C)
-        Reference signature matrix.
-
-    Returns
-    -------
-    np.ndarray, shape (K,)
-        Permutation `perm` such that S_draw[perm] is aligned to S_ref:
-        perm[r] is the draw-index of the signature that best matches
-        reference signature r.
-    """
-    dn = S_draw / (np.linalg.norm(S_draw, axis=1, keepdims=True) + 1e-12)
-    rn = S_ref / (np.linalg.norm(S_ref, axis=1, keepdims=True) + 1e-12)
-    cos = rn @ dn.T
-    ref_idx, draw_idx = linear_sum_assignment(-cos)
-    perm = np.empty(len(ref_idx), dtype=int)
-    perm[ref_idx] = draw_idx        # index = reference slot, value = matching draw slot
-    return perm
-
+from src.analysis.analysis import align
 
 def align_trace(trace, activity_var_prefix: str = "e_level"):
     """
@@ -134,7 +106,7 @@ def align_trace(trace, activity_var_prefix: str = "e_level"):
     perms = np.empty((n_chains, n_draws, K), dtype=int)
     for c in range(n_chains):
         for d in range(n_draws):
-            perms[c, d] = _cosine_assignment(S[c, d], S_ref)
+            perms[c, d], _ = align(S[c, d], S_ref)
 
     aligned = trace.copy()
 
