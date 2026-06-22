@@ -250,8 +250,15 @@ def split_camps(post, model, chains: Optional[Sequence[int]] = None) -> Tuple[li
     as chain-index lists. This is the canonical camp rule; the KMeans variants
     that used to live in the scripts should call this."""
     nbd = model._get_nodes_by_depth()
-    e_arrays = [post[f"e_level_{d}"].values for d in sorted(nbd)]   # each (chain, draw, n_d, K)
-    res = detect_camps(per_chain_activity(e_arrays))
+    e_arrays = [post[f"e_level_{d}"].values for d in sorted(nbd)]
+    pc = per_chain_activity(e_arrays)              # (chain, K), each in its own frame
+    S = post["signatures"].values                  # (chain, draw, K, C)
+    ref = S[0].mean(axis=0)
+    pc_al = np.empty_like(pc)
+    for c in range(pc.shape[0]):
+        perm, _ = align(S[c].mean(axis=0), ref)    # source[perm] ~ ref
+        pc_al[c] = pc[c][perm]
+    res = detect_camps(pc_al)
     return res["campA"], res["campB"]
 
 def chain_perms_to_true(S, true_S):
