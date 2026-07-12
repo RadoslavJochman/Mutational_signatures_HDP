@@ -4,7 +4,7 @@ A Bayesian model that infers mutational-signature activities across the subclone
 of a tumour **using the phylogenetic tree that relates them**, the structure the
 standard NMF decomposition throws away. This repository holds the model, the
 simulation and inference pipeline, and everything needed to reproduce the figures
-and the table in the accompanying [lab-rotation report](report/Final_Report.pdf),
+and the table in the accompanying [lab-rotation report](report/final_report.pdf),
 *Mutational Signature Activities on Tumour Phylogenies* (Radoslav Jochman,
 supervised by Dr. Jack Kuipers and Prof. Dr. Niko Beerenwinkel).
 
