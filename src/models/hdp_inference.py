@@ -32,6 +32,18 @@ FixedSigHDP
 
     The earlier Dirichlet-walk model (fixed-sig-v1) is preserved in the
     git history under the tag `fixed-sig-v1`.
+
+DeNovoHDP
+    Infers per-node activities *and* the signature matrix jointly, with the
+    signatures latent.
+
+    model_structure: denovo-v1-ilr
+
+    The activity walk uses a symmetric sum-zero (ILR) parameterisation
+    instead of the anchored softmax, and adds a forest-pooled per-signature
+    usage level `mu_level`.  Both were needed to stop the chains splitting
+    into clusters on the harder de novo problem (see the class docstring).
+    Signatures carry a Dirichlet prior S_k ~ Dir(beta * 1_96).
 """
 
 from __future__ import annotations
@@ -74,6 +86,7 @@ class _BaseTreeHDP(ABC):
     """
 
     def __init__(self, newick_string: str, data_matrix: pd.DataFrame):
+        """Parse the Newick forest into one directed graph and build the model."""
         self.data_matrix = data_matrix
 
         # node_id -> (pymc_var_name, row_idx_or_None)
@@ -294,6 +307,7 @@ class FixedSigHDP(_BaseTreeHDP):
         return pt.special.softmax(eta_full, axis=-1)
 
     def _build_pymc_model(self) -> None:
+        """Build the fixed-signature PyMC model (structure in the class docstring)."""
         Km1 = self.K - 1                       # free logit dimensions
         sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
 
@@ -383,34 +397,27 @@ class DeNovoHDP(_BaseTreeHDP):
     """
     Tree-HDP inference model with DE NOVO signature discovery.
 
-    model_structure: denovo-v1
+    model_structure: denovo-v1-ilr
 
-    Unlike FixedSigHDP, the signature matrix S is NOT supplied -- it is a
+    Unlike FixedSigHDP, the signature matrix S is not supplied - it is a
     latent variable inferred jointly with the per-node activities.  The
-    activity walk is identical to FixedSigHDP (the validated v2 logistic-
-    normal walk); the only addition is the signature block.
+    activity walk also differs from FixedSigHDP: the anchored softmax is
+    replaced by a symmetric sum-zero (ILR) parameterisation with no pinned
+    coordinate, and a forest-pooled per-signature usage level `mu_level` is
+    added.  Both changes remove a sampling pathology in which the chains
+    settled into several clusters; the anchored-softmax de novo model is
+    preserved in the git history under the tag `denovo-v1`.
 
-        S_k       ~ Dir(beta * 1_96)            for k = 1..K   (signatures)
-        sigma     ~ prior (config 'sigma_prior')
-        eta_root  ~ Normal(0, sigma_0^2)        (K-1 free components)
-        eta_j     =  eta_parent + sigma * z_j   (non-centered)
-        z_j       ~ Normal(0, 1)
-        e_j       =  softmax([eta_j, 0])
+        S_k       ~ Dir(beta * 1_96)              for k = 1..K   (signatures)
+        sigma     ~ prior (config 'sigma_prior')  (walk scale)
+        mu_level  ~ ZeroSumNormal(sigma_mu)       (K,) forest-pooled usage level
+        z_root    ~ ZeroSumNormal(1)              (n_root, K)
+        eta_root  =  mu_level + sigma_0 * z_root  (each tree root, non-centered)
+        z_j       ~ ZeroSumNormal(1)              (K,)
+        eta_j     =  eta_parent + sigma * z_j     (non-centered)
+        e_j       =  softmax(eta_j)               (full K, no pinned coordinate)
         x_ji      ~ Multinomial(M_j, e_j @ S)
 
-    Why this form
-    -------------
-    The activity side is unchanged from the validated fixed-sig-v2 model,
-    so any new difficulty is attributable to the signature block alone.
-    Each signature S_k is a point on the 96-channel simplex with a single
-    shared Dirichlet concentration `beta`.  beta < 1 favours peaked
-    signatures, beta = 1 is uniform-over-simplex, beta > 1 favours flat
-    ones; one shared beta cannot represent the full COSMIC peakedness
-    range, so it imposes a peakedness band -- a deliberate first-cut
-    simplification, to be revisited if the data lack signal to constrain S.
-
-    IDENTIFIABILITY -- READ BEFORE USING THE TRACE
-    ----------------------------------------------
     With S latent the model has two non-identifiabilities:
 
     1. Label switching.  Signature index k has no fixed meaning: any
@@ -424,7 +431,7 @@ class DeNovoHDP(_BaseTreeHDP):
        only by the structure of the priors -- the tree walk on e and the
        Dirichlet concentration on S.
 
-    This class does NOT solve either.  Chain alignment and scoring against
+    This class does noy solve either.  Chain alignment and scoring against
     ground-truth signatures are intentionally left to external
     post-processing: align chains to a common labelling first, THEN compute
     posterior means or call the activity accessors.  `get_posterior_mean`
@@ -442,7 +449,10 @@ class DeNovoHDP(_BaseTreeHDP):
     priors : dict
         Prior config dict.  Reads:
           - 'sigma_prior' / 'sigma_prior_parm' : prior on the walk scale.
-          - 'sigma_0' (optional, default 1.0)  : root-baseline std.
+          - 'sigma_0' (optional, default 1.0)  : scale of each root's
+            deviation from mu_level (z_root), not an absolute root scale.
+          - 'sigma_mu' (optional, default 2.0) : scale of the forest-pooled
+            usage level mu_level ~ ZeroSumNormal(sigma_mu).
           - 'beta' (optional, default 0.5)     : Dirichlet concentration
             for the signature prior S_k ~ Dir(beta * 1_96).
     """
@@ -471,8 +481,9 @@ class DeNovoHDP(_BaseTreeHDP):
         return pt.special.softmax(eta_full, axis=-1)
 
     def _build_pymc_model(self) -> None:
-        Km1 = self.K - 1
+        """Build the de novo PyMC model (structure in the class docstring)."""
         sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
+        sigma_mu = float(Fraction(str(self.priors.get("sigma_mu", 2.0))))
         beta = float(Fraction(str(self.priors.get("beta", 0.5))))
         C = self.n_channels
 
@@ -489,6 +500,7 @@ class DeNovoHDP(_BaseTreeHDP):
 
             sigma = get_prior(self.priors, "sigma_prior", dim=1)(name="sigma")
 
+            mu_level = pm.ZeroSumNormal("mu_level", sigma=sigma_mu, shape=(self.K,))
             node_etas: Dict[str, pt.TensorVariable] = {}
             node_es: Dict[str, pt.TensorVariable] = {}
 
@@ -506,19 +518,18 @@ class DeNovoHDP(_BaseTreeHDP):
 
                 if parent_nodes[0] is None:
                     eta_name = f"eta_level_{depth}"
-                    eta_level = pm.Normal(
-                        eta_name, mu=0.0, sigma=sigma_0,
-                        shape=(n_cur, Km1),
+                    z_root = pm.ZeroSumNormal(f"z_root_{depth}", sigma=1.0, shape=(n_cur, self.K))
+                    eta_level = pm.Deterministic(
+                        eta_name, mu_level[None, :] + sigma_0 * z_root
                     )
                 else:
                     parent_eta_stack = pt.stack(
                         [node_etas[p] for p in parent_nodes]
                     )
                     z_name = f"z_level_{depth}"
-                    z_level = pm.Normal(
-                        z_name, mu=0.0, sigma=1.0,
-                        shape=(n_cur, Km1),
-                    )
+                    z_level = pm.ZeroSumNormal(
+                        z_name, sigma=1.0,
+                        shape=(n_cur, self.K))
                     eta_name = f"eta_level_{depth}"
                     eta_level = pm.Deterministic(
                         eta_name, parent_eta_stack + sigma * z_level
@@ -526,7 +537,7 @@ class DeNovoHDP(_BaseTreeHDP):
 
                 e_name = f"e_level_{depth}"
                 e_level = pm.Deterministic(
-                    e_name, self._softmax_last_zero(eta_level)
+                    e_name, pt.special.softmax(eta_level, axis=-1)
                 )
 
                 for i, node in enumerate(current_nodes):
