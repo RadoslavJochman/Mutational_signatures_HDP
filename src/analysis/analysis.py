@@ -1,12 +1,39 @@
 """
 Shared helpers for the de novo analysis scripts.
 
-These functions are used by more than one script in scripts/, so they are
-collected here to keep a single definition of each. They cover cosine
-similarity, alignment of inferred signatures to the true labelling, splitting
-chains into two camps by their activity fingerprint, averaging activity per
-chain, and building a phylogenetic forest from a newick string together with a
-map from (depth, position) to node label.
+Logit-simplex maps
+    softmax_last_zero / inv_softmax_last_zero, the anchored softmax link the
+    activity walk uses and its inverse, as numpy counterparts of the model's
+    pytensor version.
+
+Distribution distances
+    total_variation, hellinger, jensen_shannon, bray_curtis, cosine and
+    relative_exposure_error, with the DISTRIBUTION_METRICS registry and the
+    builders that map a named metric over signatures, per-signature usage
+    profiles or per-node compositions (signature_distances, usage_distances,
+    node_distances, exposure_errors), plus across_chain for best/mean/worst.
+
+Signature alignment
+    align (Hungarian on cosine) and chain_perms_to_true, which undo the de novo
+    label-switching symmetry before anything is compared.
+
+Forest and graph helpers
+    node_order, node_depths, node_label, build_forest and nodes_by_depth, for
+    walking a fitted model's graph or a bare newick string.
+
+The non-centred walk
+    forward_walk / inverse_walk convert between the free walk variables
+    (eta_level_*, z_level_*) and per-node activities; activities_mean /
+    activities_draw read per-node activities out of a posterior.
+
+Camp detection
+    per_chain_activity, detect_camps and split_camps split the chains into the
+    two clusters the de novo posterior falls into (named "camps" here for
+    historical reasons, the report calls them clusters).
+
+Model construction
+    build_model and DEFAULT_PRIORS build a DeNovoHDP from file paths with the
+    shared prior configuration.
 """
 
 from __future__ import annotations
@@ -45,8 +72,113 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
 
 def _row_normalise(X: np.ndarray) -> np.ndarray:
+    """Each row of X scaled to unit L2 norm (builds the cosine matrix in align)."""
     X = np.asarray(X, dtype=float)
     return X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
+
+def _as_dist(x: np.ndarray) -> np.ndarray:
+    """Non-negative vector renormalised to sum one, read as a distribution."""
+    x = np.clip(np.asarray(x, dtype=float), 0.0, None)
+    s = x.sum()
+    return x / s if s > 0 else x
+
+
+def _kl(p: np.ndarray, q: np.ndarray) -> float:
+    """KL(p || q) in nats, summed over the support of p."""
+    mask = p > 0
+    return float(np.sum(p[mask] * np.log(p[mask] / q[mask])))
+
+
+def total_variation(p: np.ndarray, q: np.ndarray) -> float:
+    """Total-variation distance, half the L1: the fraction of probability mass
+    in the wrong place. Bounded in [0, 1], linear so it does not saturate."""
+    p, q = _as_dist(p), _as_dist(q)
+    return 0.5 * float(np.abs(p - q).sum())
+
+
+def hellinger(p: np.ndarray, q: np.ndarray) -> float:
+    """Hellinger distance, the chord between the square-roots. Bounded in
+    [0, 1], symmetric, a proper metric; sensitive on the small components."""
+    p, q = _as_dist(p), _as_dist(q)
+    return float(np.linalg.norm(np.sqrt(p) - np.sqrt(q)) / np.sqrt(2.0))
+
+
+def jensen_shannon(p: np.ndarray, q: np.ndarray) -> float:
+    """Jensen-Shannon distance, the square-root of the base-2 JS divergence: a
+    symmetrised, bounded ([0, 1]) KL that stays finite when supports differ."""
+    p, q = _as_dist(p), _as_dist(q)
+    m = 0.5 * (p + q)
+    return float(np.sqrt(0.5 * (_kl(p, m) + _kl(q, m)) / np.log(2.0)))
+
+
+def relative_exposure_error(recovered_total: float, true_total: float) -> float:
+    """|recovered - true| / true for a signature's total exposure: the level
+    error the shape distances and cosine are all scale-invariant to."""
+    return float(abs(recovered_total - true_total) / (abs(true_total) + 1e-12))
+
+
+def bray_curtis(a: np.ndarray, b: np.ndarray) -> float:
+    """Bray-Curtis dissimilarity for two non-negative abundance vectors, the L1
+    difference over the summed totals. Bounded in [0, 1], symmetric, and unlike
+    cosine it is scale-sensitive, so two activity patterns that differ only in
+    overall level are still far apart. Reduces to total variation once the
+    vectors are normalised, so it sits in the same family as the shape metrics."""
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    return float(np.abs(a - b).sum() / (a.sum() + b.sum() + 1e-12))
+
+
+# name -> (function, higher_is_better) for the table builders and aggregator
+DISTRIBUTION_METRICS = {
+    "tv":        (total_variation, False),
+    "hellinger": (hellinger,       False),
+    "js":        (jensen_shannon,  False),
+    "cosine":    (cosine,          True),
+}
+
+
+def _apply(metric: str, est_rows: np.ndarray, true_rows: np.ndarray) -> np.ndarray:
+    """Map a named metric over matched rows of two (n, d) arrays -> (n,)."""
+    fn = DISTRIBUTION_METRICS[metric][0]
+    return np.array([fn(est_rows[i], true_rows[i]) for i in range(len(true_rows))])
+
+
+def signature_distances(sig_est: np.ndarray, true_S: np.ndarray,
+                        metrics: Sequence[str]) -> Dict[str, np.ndarray]:
+    """Per-signature shape distance for each named metric. Both (K, C), already
+    aligned to the same labelling. Returns {metric: (K,)}."""
+    return {m: _apply(m, sig_est, true_S) for m in metrics}
+
+
+def usage_distances(act_est: np.ndarray, true_acts: np.ndarray,
+                    metrics: Sequence[str]) -> Dict[str, np.ndarray]:
+    """Per-signature usage-profile distance: each signature's activity across
+    nodes, est vs true. Both (n_nodes, K), aligned. Returns {metric: (K,)}."""
+    return {m: _apply(m, act_est.T, true_acts.T) for m in metrics}
+
+
+def node_distances(act_est: np.ndarray, true_acts: np.ndarray,
+                   metrics: Sequence[str]) -> Dict[str, np.ndarray]:
+    """Per-node composition distance: each node's activity vector, est vs true.
+    Both (n_nodes, K), aligned. Returns {metric: (n_nodes,)}."""
+    return {m: _apply(m, act_est, true_acts) for m in metrics}
+
+
+def exposure_errors(act_est: np.ndarray, true_acts: np.ndarray) -> np.ndarray:
+    """Per-signature relative exposure error from aligned (n_nodes, K) activity
+    arrays: column totals compared, recovered vs true. Returns (K,)."""
+    rec, tru = act_est.sum(0), true_acts.sum(0)
+    return np.array([relative_exposure_error(rec[k], tru[k]) for k in range(len(tru))])
+
+
+def across_chain(values: np.ndarray, metric: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Aggregate a (..., n_chains) array over the last axis into best, mean,
+    worst, with best/worst set by the metric's direction (cosine high is good,
+    distances low is good)."""
+    mean = values.mean(-1)
+    hi, lo = values.max(-1), values.min(-1)
+    higher_is_better = DISTRIBUTION_METRICS[metric][1]
+    best, worst = (hi, lo) if higher_is_better else (lo, hi)
+    return best, mean, worst
 
 def align(source: np.ndarray, target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Hungarian alignment of `source` rows to `target` rows on cosine.
@@ -82,9 +214,11 @@ def node_depths(model) -> Dict:
     return depths
 
 def node_label(model, n) -> str:
+    """The stored 'label' of graph node `n`, falling back to str(n)."""
     return model.graph.nodes[n].get("label", str(n))
 
 def _parents(model, nodes) -> list:
+    """Parent of each node in `nodes` in the model graph (None for a root)."""
     return [(list(model.graph.predecessors(n)) or [None])[0] for n in nodes]
 
 def build_forest(newick_string):
