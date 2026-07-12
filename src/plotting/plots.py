@@ -14,6 +14,7 @@ Sections
 Signature plots
     plot_signature_bar        – bar chart of a single signature over 96 channels
     plot_node_signatures      – activities + top-N signatures for one node
+    plot_node_signatures_from_model  – same, but reads activities and signatures from a model
 
 Data / cohort plots
     plot_patient_counts       – clustered heatmap of (normalised) mutation profiles
@@ -25,7 +26,13 @@ Posterior diagnostics
     plot_alpha_correlations   – distribution and scatter of alpha-activity correlations
 
 Recovery
-    plot_recovery_distributions  – histograms of cosine similarity and MAE
+    plot_recovery_distributions    – histograms of cosine similarity and MAE
+    plot_alpha_recovery            – posterior of shared_alpha against the true value
+    plot_activity_scatter          – true vs inferred activity per component
+    plot_activity_heatmap          – side-by-side true / inferred activity heatmaps
+    plot_signature_recovery        – per-signature cosine of matched pairs
+    plot_signature_comparison_grid – matched true / inferred signature bar charts
+    plot_signature_cosine_heatmap  – pairwise cosine matrix, true vs inferred
 """
 
 from __future__ import annotations
@@ -360,8 +367,8 @@ def plot_recovery_distributions(
     Parameters
     ----------
     eval_df : pd.DataFrame
-        Output of `evaluation.evaluate_inference`.  Must contain columns
-        ``cosine_similarity`` and ``mae``.
+        Output of ``evaluation.compare_activities``.  Must contain
+        columns ``cosine_similarity`` and ``mae``.
     save_path : str, optional
     """
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -678,4 +685,3 @@ def plot_signature_cosine_heatmap(
     plt.colorbar(im, ax=ax, label="Cosine similarity")
     fig.tight_layout()
     _save_or_show(fig, save_path)
-
