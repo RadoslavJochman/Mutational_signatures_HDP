@@ -1,0 +1,82 @@
+# Tree-HDP de novo, denovo-v1-ilr. Correlation-sweep base, rho=0.1, 20 trees.
+# Family differing only in signatures.correlation; signatures are SYNTHESIZED, so
+# each replicate draws a fresh matrix at this correlation (not frozen, unlike the
+# size sweep). Per-signature index is therefore NOT comparable across replicates;
+# aggregate this sweep with --kind summary grouped by rho.
+
+experiment_name: config_denovo_corr_01_20_trees_synth_ilr
+git_tag: denovo-v1-ilr
+
+# ── Data generation (RECORD ONLY -- dataset already generated, do not rerun) ──
+simulation:
+  seed: 42
+  results_dir: ../data/
+  make_plots: true
+
+  # Activity walk e_j ~ Dir(alpha * e_parent) in the generator.
+  alpha: 15.0
+  # Cohort baseline Dir(1.0); sparsity off, baseline spreads over all signatures.
+  alpha_0: 10.0
+
+  # Generous mutation counts.
+  lam: 3000
+  nb_dispersion: none
+
+  # Easy regime: no sparsity, no dropout.
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  # ── Signatures ────────────────────────────────────────────────────────────
+  signatures:
+    source: synthesize          # fresh matrix per replicate at this correlation
+    correlation: 0.1
+    num_signatures: 10          # K
+
+  # ── Random phylogenetic forest ────────────────────────────────────────────
+  forest:
+    num_trees: 20
+    min_leaves: 3
+    max_leaves: 5
+    min_branch_length: 2000
+    max_branch_length: 5000
+
+# ── Inference ───────────────────────────────────────────────────────────────
+inference:
+  # K is known for this stage. DeNovoHDP discovers this many signatures.
+  num_signatures: 10
+
+  # Reuse the existing 20-tree dataset (NOT a new dir keyed to experiment_name).
+  data:
+    count_matrix: ../data/config_denovo_corr_01_20_trees_synth_ilr/mutation_count_matrix.csv
+    newick_string: ../data/config_denovo_corr_01_20_trees_synth_ilr/newick_string.nwk
+    tree_edges: ../data/config_denovo_corr_01_20_trees_synth_ilr/tree_edges.csv
+    fixed_signatures: ../data/config_denovo_corr_01_20_trees_synth_ilr/fixed_signatures.csv
+    true_activities: ../data/config_denovo_corr_01_20_trees_synth_ilr/true_activities.csv
+    ground_truth_params: ../data/config_denovo_corr_01_20_trees_synth_ilr/ground_truth_params.json
+
+  priors:
+    # Walk-scale prior (unchanged).
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    # Root-deviation scale. NOTE: meaning changed under denovo-v1-ilr -- this is now
+    # the spread of roots AROUND the cohort level mu_level, not an absolute root
+    # scale, so it is smaller than the denovo-v1 value (was 2.0).
+    sigma_0: 1.0
+    # NEW: cohort usage-level scale. mu_level ~ ZeroSumNormal(sigma_mu), the
+    # per-signature overall usage pooled across the whole forest.
+    sigma_mu: 2.0
+    # Signature prior S_k ~ Dir(beta * 1_96). Single shared concentration.
+    beta: 0.5
+
+  # NUTS sampler settings. Random start on purpose (no NMF init): the point is to
+  # test whether the reparameterisation lets NUTS mix natively.
+  draws: 6000
+  tune: 3000
+  chains: 8
+  cores: 8
+  target_accept: 0.9
+  max_treedepth: 10
+
+  results_dir: ../results/
