@@ -74,11 +74,12 @@ def align_trace(trace, activity_var_prefix: str = "e_level"):
     """
     Per-draw alignment of a DeNovoHDP trace to chain 0's mean labelling.
 
-    The `signatures` variable and the per-node activity variables
-    (e_level_*) are permuted along their signature axis so that signature k
-    means the same thing in every draw of every chain. eta_level_* and
-    z_level_* are not permuted: eta carries K-1 free logits, not K aligned
-    activity components.
+    The `signatures` variable, the per-signature cohort level `mu_level`
+    (denovo-v1-ilr only), and the per-node activity variables (e_level_*)
+    are permuted along their signature axis so that signature k means the
+    same thing in every draw of every chain. eta_level_* and z_level_* are
+    not permuted: eta carries K-1 free logits, not K aligned activity
+    components.
 
     Parameters
     ----------
@@ -93,7 +94,8 @@ def align_trace(trace, activity_var_prefix: str = "e_level"):
     Returns
     -------
     aligned : arviz.InferenceData
-        A copy of `trace` with `signatures` and e_level_* permuted.
+        A copy of `trace` with `signatures`, `mu_level`, and e_level_*
+        permuted.
     perms : np.ndarray, shape (chains, draws, K)
         The permutation applied to each draw (for the switching report).
     """
@@ -117,6 +119,14 @@ def align_trace(trace, activity_var_prefix: str = "e_level"):
 
     sig_da = aligned.posterior["signatures"].copy(data=S_aligned)
     aligned.posterior["signatures"] = sig_da
+
+    if "mu_level" in post.data_vars:
+        mu = post["mu_level"].values                 # (chains, draws, K)
+        mu_aligned = np.empty_like(mu)
+        for c in range(n_chains):
+            for d in range(n_draws):
+                mu_aligned[c, d] = mu[c, d][perms[c, d]]
+        aligned.posterior["mu_level"] = aligned.posterior["mu_level"].copy(data=mu_aligned)
 
     for var in list(post.data_vars):
         if not var.startswith(activity_var_prefix):
