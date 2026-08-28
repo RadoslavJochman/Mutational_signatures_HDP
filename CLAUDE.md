@@ -90,7 +90,6 @@ transition.
     (being merged into one model, see Direction of travel).
   - `src/models/hdp_simulator.py`: `TreeSignatureGenerator`, `synthesize_signatures`,
     `generate_random_forest` (the data generator).
-  - `src/models/nmf_init.py`: `denovo_nmf_initvals` (NMF-based init for de novo).
   - `src/models/dirichlet_process.py`: `Measure`, `DirichletPrior`, `DirichletProcess`.
   - `src/analysis/analysis.py`: the shared helper library (metrics, alignment, tree/forest
     utilities, walk transforms). See below.

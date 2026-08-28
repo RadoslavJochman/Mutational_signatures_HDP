@@ -59,7 +59,7 @@ def softmax_last_zero(eta: np.ndarray) -> np.ndarray:
 def inv_softmax_last_zero(e: np.ndarray, floor: float = 1e-6) -> np.ndarray:
     """(..., K) simplex point -> (..., K-1) logits, anchor = last component:
     eta_k = log(e_k) - log(e_{K-1}). Inverse of `softmax_last_zero` up to the
-    floor. Default floor matches the value used in real runs (nmf_init)."""
+    floor. Default floor matches the value used in real runs."""
     e = np.clip(np.asarray(e, dtype=float), floor, None)
     return np.log(e[..., :-1]) - np.log(e[..., -1:])
 
@@ -300,7 +300,7 @@ def inverse_walk(model, e_by_node: Dict, sigma: float) -> Dict[str, np.ndarray]:
     """{node_id (or label): e_j} -> {eta_level_0, z_level_d, ...} by inverse-
     softmax and backing z out of the non-centred walk (z = (eta_child -
     eta_parent)/sigma). Internal nodes absent from `e_by_node` inherit their
-    parent's eta (z = 0). Shared core of nmf_init and the interpolation backout."""
+    parent's eta (z = 0). Shared core of the interpolation backout."""
     nbd = model._get_nodes_by_depth()
     eta_of, out = {}, {}
     for d in sorted(nbd):

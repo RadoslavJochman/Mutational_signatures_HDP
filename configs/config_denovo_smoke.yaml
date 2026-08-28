@@ -1,0 +1,66 @@
+# Tiny de novo verification config (denovo-v1-ilr). Not a scientific run: two
+# trees of four nodes each, K = 3 synthesized signatures, ~100 draws over 4
+# chains. Written to check the de novo path still converges using PyMC's
+# default init now that the NMF sampler-init has been removed (see CLAUDE.md's
+# git history around the nmf_init.py removal).
+#
+#   cd scripts
+#   python generate_data.py          --config ../configs/config_denovo_smoke.yaml
+#   python run_unknown_inference.py  --config ../configs/config_denovo_smoke.yaml
+
+experiment_name: denovo_smoke
+git_tag: denovo-v1-ilr
+
+simulation:
+  seed: 20240607
+  results_dir: ../data/
+  make_plots: false
+
+  alpha: 15.0
+  alpha_0: 3.0
+  lam: 1500
+  nb_dispersion: 2.0
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  signatures:
+    source: synthesize
+    correlation: 0.1 # near-orthogonal, well-separated: easiest case to discover
+    num_signatures: 3
+
+  forest:
+    num_trees: 2
+    min_leaves: 2
+    max_leaves: 2
+    min_branch_length: 800
+    max_branch_length: 2000
+
+inference:
+  model: denovo
+  num_signatures: 3
+
+  data:
+    count_matrix: ../data/denovo_smoke/mutation_count_matrix.csv
+    newick_string: ../data/denovo_smoke/newick_string.nwk
+    tree_edges: ../data/denovo_smoke/tree_edges.csv
+    fixed_signatures: ../data/denovo_smoke/fixed_signatures.csv
+    true_activities: ../data/denovo_smoke/true_activities.csv
+    ground_truth_params: ../data/denovo_smoke/ground_truth_params.json
+
+  priors:
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    sigma_0: 1.0
+    sigma_mu: 2.0
+    beta: 0.5
+
+  draws: 100
+  tune: 200
+  chains: 4
+  cores: 4
+  target_accept: 0.9
+  max_treedepth: 10
+
+  results_dir: ../results/
