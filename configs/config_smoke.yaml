@@ -1,0 +1,65 @@
+# Tiny end-to-end smoke config (fixed signatures). Not a scientific run: two
+# trees of four nodes each, K = 3 synthesized signatures, and a NUTS sampler
+# small enough to finish in around a minute. Exercised by tests/test_smoke.py,
+# which redirects the data/results paths below into a temp directory; run it
+# manually the same way as any other config:
+#
+#   cd scripts
+#   python generate_data.py --config ../configs/config_smoke.yaml
+#   python run_inference.py --config ../configs/config_smoke.yaml
+#   python recovery_vs_truth.py --trace ../results/smoke/trace.nc \
+#       --true-activities ../data/smoke/true_activities.csv \
+#       --newick ../data/smoke/newick_string.nwk \
+#       --metrics cosine tv --outdir ../results/smoke/recovery
+
+experiment_name: smoke
+git_tag: fixed-sig-v2
+
+simulation:
+  seed: 20240607 # matches tests/conftest.py's RNG_SEED
+  results_dir: ../data/
+  make_plots: false
+
+  alpha: 10.0
+  alpha_0: 3.0
+  lam: 500
+  nb_dispersion: 2.0
+  activity_sparsity: 0.0
+  signature_dropout: 0.0
+
+  signatures:
+    source: synthesize
+    correlation: 0.0
+    num_signatures: 3
+
+  forest:
+    num_trees: 2
+    min_leaves: 2
+    max_leaves: 2
+    min_branch_length: 200
+    max_branch_length: 500
+
+inference:
+  data:
+    count_matrix: ../data/smoke/mutation_count_matrix.csv
+    newick_string: ../data/smoke/newick_string.nwk
+    tree_edges: ../data/smoke/tree_edges.csv
+    fixed_signatures: ../data/smoke/fixed_signatures.csv
+    true_activities: ../data/smoke/true_activities.csv
+    ground_truth_params: ../data/smoke/ground_truth_params.json
+
+  priors:
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    sigma_0: 1.0
+
+  draws: 50
+  tune: 100
+  chains: 1
+  cores: 1
+  target_accept: 0.9
+  max_treedepth: 10
+
+  results_dir: ../results/
