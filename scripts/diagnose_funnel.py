@@ -47,11 +47,12 @@ import arviz as az
 import numpy as np
 import pandas as pd
 
-
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
     _HAVE_MPL = True
 except Exception:
     _HAVE_MPL = False
@@ -61,8 +62,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", required=True)
     ap.add_argument("--outdir", default="funnel_diagnosis")
-    ap.add_argument("--n-pairs", type=int, default=6,
-                    help="How many z components to scatter against sigma.")
+    ap.add_argument(
+        "--n-pairs",
+        type=int,
+        default=6,
+        help="How many z components to scatter against sigma.",
+    )
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -81,31 +86,37 @@ def main():
     eta_vars = sorted([v for v in post.data_vars if v.startswith("eta_level")])
 
     rhat = az.rhat(idata)
-    rows = [{
-        "variable": "sigma",
-        "kind": "sigma",
-        "funnel_corr": np.nan,
-        "rhat_max": float(rhat["sigma"].values),
-    }]
+    rows = [
+        {
+            "variable": "sigma",
+            "kind": "sigma",
+            "funnel_corr": np.nan,
+            "rhat_max": float(rhat["sigma"].values),
+        }
+    ]
     for zv in z_vars:
         arr = post[zv].values
         n = arr.shape[0] * arr.shape[1]
         flat = arr.reshape(n, -1)
         per_draw_spread = flat.std(axis=1)
         c = float(np.corrcoef(log_sigma, per_draw_spread)[0, 1])
-        rows.append({
-            "variable": zv,
-            "kind": "z",
-            "funnel_corr": c,
-            "rhat_max": float(rhat[zv].max()),
-        })
+        rows.append(
+            {
+                "variable": zv,
+                "kind": "z",
+                "funnel_corr": c,
+                "rhat_max": float(rhat[zv].max()),
+            }
+        )
     for ev in eta_vars:
-        rows.append({
-            "variable": ev,
-            "kind": "eta",
-            "funnel_corr": np.nan,
-            "rhat_max": float(rhat[ev].max()),
-        })
+        rows.append(
+            {
+                "variable": ev,
+                "kind": "eta",
+                "funnel_corr": np.nan,
+                "rhat_max": float(rhat[ev].max()),
+            }
+        )
     pd.DataFrame(rows).to_csv(outdir / "funnel_metrics.csv", index=False)
 
     if _HAVE_MPL and z_vars:
@@ -113,7 +124,7 @@ def main():
         zarr = post[zv].values
         zrh = rhat[zv].values
         n_nodes, Km1 = zrh.shape
-        flat_idx = np.argsort(zrh.reshape(-1))[::-1][:args.n_pairs]
+        flat_idx = np.argsort(zrh.reshape(-1))[::-1][: args.n_pairs]
         n = len(flat_idx)
         ncol = 3
         nrow = int(np.ceil(n / ncol))
@@ -126,7 +137,7 @@ def main():
             ax.scatter(zvals, log_sigma, s=4, alpha=0.3)
             ax.set_xlabel(f"{zv}[{node_i},{comp_i}]")
             ax.set_ylabel("log(sigma)")
-            ax.set_title(f"r_hat={zrh[node_i,comp_i]:.2f}", fontsize=9)
+            ax.set_title(f"r_hat={zrh[node_i, comp_i]:.2f}", fontsize=9)
         for ax in axes[n:]:
             ax.set_visible(False)
         fig.suptitle("log(sigma) vs z components", fontsize=10)

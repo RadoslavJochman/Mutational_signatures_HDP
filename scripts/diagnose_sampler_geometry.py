@@ -57,11 +57,15 @@ def _get(ss, *names):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", required=True)
-    ap.add_argument("--max-treedepth", type=int, default=None,
-                    help="Configured NUTS max_treedepth cap. If omitted, the "
-                         "saturation flag falls back to the observed max "
-                         "depth, which can misfire when the run never "
-                         "approached the cap.")
+    ap.add_argument(
+        "--max-treedepth",
+        type=int,
+        default=None,
+        help="Configured NUTS max_treedepth cap. If omitted, the "
+        "saturation flag falls back to the observed max "
+        "depth, which can misfire when the run never "
+        "approached the cap.",
+    )
     ap.add_argument("--outdir", default="sampler_diagnosis")
     args = ap.parse_args()
 
@@ -84,7 +88,7 @@ def main():
     div_first_half = np.nan
     per_chain_div = None
     if div is not None:
-        d = div.values                       # (chain, draw) bool
+        d = div.values  # (chain, draw) bool
         total_div = int(d.sum())
         per_chain_div = d.sum(axis=1).astype(int)
         div_frac = total_div / (n_chains * n_draws)
@@ -116,13 +120,13 @@ def main():
     acc = _get(ss, "acceptance_rate", "mean_tree_accept", "accept")
     acc_mean = float(acc.values.mean()) if acc is not None else np.nan
 
-    flag_tiny_step = (bool(step_median < 0.02)
-                      if not np.isnan(step_median) else False)
+    flag_tiny_step = bool(step_median < 0.02) if not np.isnan(step_median) else False
     # Saturation = mean depth within one of the cap. Prefer the configured
     # cap; fall back to the observed max
     td_cap = args.max_treedepth if args.max_treedepth is not None else td_max
-    flag_saturated_depth = (bool(td_mean >= td_cap - 1.0)
-                            if not np.isnan(td_mean) else False)
+    flag_saturated_depth = (
+        bool(td_mean >= td_cap - 1.0) if not np.isnan(td_mean) else False
+    )
     flag_low_bfmi = bool(np.min(bfmi) < 0.3) if bfmi is not None else False
 
     summary = {
@@ -141,8 +145,7 @@ def main():
         "flag_saturated_depth": flag_saturated_depth,
         "flag_low_bfmi": flag_low_bfmi,
     }
-    pd.DataFrame([summary]).to_csv(
-        outdir / "sampler_geometry_summary.csv", index=False)
+    pd.DataFrame([summary]).to_csv(outdir / "sampler_geometry_summary.csv", index=False)
 
     per_chain = pd.DataFrame({"chain": list(range(n_chains))})
     if per_chain_div is not None:
@@ -153,8 +156,10 @@ def main():
         per_chain["step_size"] = per_chain_step
     per_chain.to_csv(outdir / "sampler_geometry_per_chain.csv", index=False)
 
-    print(f"Written: {outdir / 'sampler_geometry_summary.csv'}, "
-          f"{outdir / 'sampler_geometry_per_chain.csv'}")
+    print(
+        f"Written: {outdir / 'sampler_geometry_summary.csv'}, "
+        f"{outdir / 'sampler_geometry_per_chain.csv'}"
+    )
 
 
 if __name__ == "__main__":

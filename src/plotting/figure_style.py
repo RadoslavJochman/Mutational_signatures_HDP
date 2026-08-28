@@ -22,21 +22,24 @@ PALETTE = {
 
 def apply_style() -> None:
     """Set the shared rcParams. Call once near the top of a plotting script."""
-    mpl.rcParams.update({
-        "font.size": 10,
-        "axes.titlesize": 11,
-        "axes.labelsize": 10,
-        "axes.titleweight": "bold",
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "figure.dpi": 130,
-        "font.family": "DejaVu Sans",
-    })
+    mpl.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.titlesize": 11,
+            "axes.labelsize": 10,
+            "axes.titleweight": "bold",
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "figure.dpi": 130,
+            "font.family": "DejaVu Sans",
+        }
+    )
 
 
 def save(fig, outdir, name: str) -> None:
     """Write a figure as both PDF (vector, for the writeup) and PNG."""
     from pathlib import Path
+
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     fig.savefig(outdir / f"{name}.pdf", bbox_inches="tight")

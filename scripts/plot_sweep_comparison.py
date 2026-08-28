@@ -31,8 +31,9 @@ import argparse
 import sys
 from pathlib import Path
 
-import pandas as pd
 import matplotlib
+import pandas as pd
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -46,7 +47,9 @@ NMF = fs.PALETTE["grey"]
 
 def _series(base, sweep, method, base_metric, scale):
     """One curve (x, mean, sd) for a metric, from one sweep aggregated_summary.csv."""
-    df = pd.read_csv(base / f"{sweep}_{method}" / "aggregated_summary.csv").sort_values("setting")
+    df = pd.read_csv(base / f"{sweep}_{method}" / "aggregated_summary.csv").sort_values(
+        "setting"
+    )
     x = df["setting"].to_numpy()
     v = f"{base_metric}_mean_mean" if method == "treehdp" else f"{base_metric}_mean"
     s = f"{base_metric}_mean_std" if method == "treehdp" else f"{base_metric}_std"
@@ -75,22 +78,33 @@ def panel_corr(ax, base, base40, base_metric, scale):
     for agg, ls, band in [(base, "--", False), (base40, "-", True)]:
         for method, col in [("treehdp", TREE), ("nmf", NMF)]:
             x, y, sd = _series(agg, "corr", method, base_metric, scale)
-            ax.plot(x, y, ls, color=col, lw=2.0 if band else 1.6, marker="o", ms=5, zorder=3)
+            ax.plot(
+                x, y, ls, color=col, lw=2.0 if band else 1.6, marker="o", ms=5, zorder=3
+            )
             if band:
-                ax.fill_between(x, y - sd, y + sd, color=col, alpha=0.14, lw=0, zorder=2)
+                ax.fill_between(
+                    x, y - sd, y + sd, color=col, alpha=0.14, lw=0, zorder=2
+                )
     ax.set_xticks([0.1, 0.3, 0.5, 0.7, 0.9])
     _grid(ax)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--agg", default="../results/agg",
-                    help="20-tree aggregate dir (size_* and corr_* subdirs)")
-    ap.add_argument("--agg40", default="../results/agg40",
-                    help="40-tree aggregate dir (corr_* subdirs)")
+    ap.add_argument(
+        "--agg",
+        default="../results/agg",
+        help="20-tree aggregate dir (size_* and corr_* subdirs)",
+    )
+    ap.add_argument(
+        "--agg40",
+        default="../results/agg40",
+        help="40-tree aggregate dir (corr_* subdirs)",
+    )
     ap.add_argument("--outdir", default="../plots/")
-    ap.add_argument("--name", default="fig_sweep_comparison",
-                    help="output figure basename")
+    ap.add_argument(
+        "--name", default="fig_sweep_comparison", help="output figure basename"
+    )
     a = ap.parse_args()
     base, base40 = Path(a.agg), Path(a.agg40)
 
@@ -108,11 +122,15 @@ def main():
     ax[1, 0].set_xlabel("number of trees")
     ax[1, 1].set_xlabel(r"signature correlation $\rho$")
 
-    method_keys = [Line2D([0], [0], color=TREE, lw=2, marker="o", ms=5, label="Tree-HDP"),
-                   Line2D([0], [0], color=NMF, lw=2, marker="o", ms=5, label="NMF")]
+    method_keys = [
+        Line2D([0], [0], color=TREE, lw=2, marker="o", ms=5, label="Tree-HDP"),
+        Line2D([0], [0], color=NMF, lw=2, marker="o", ms=5, label="NMF"),
+    ]
     ax[0, 0].legend(handles=method_keys, frameon=False, loc="upper right")
-    tree_keys = [Line2D([0], [0], color="0.35", lw=1.6, ls="--", label="20 trees"),
-                 Line2D([0], [0], color="0.35", lw=2.0, ls="-", label="40 trees")]
+    tree_keys = [
+        Line2D([0], [0], color="0.35", lw=1.6, ls="--", label="20 trees"),
+        Line2D([0], [0], color="0.35", lw=2.0, ls="-", label="40 trees"),
+    ]
     ax[0, 1].legend(handles=tree_keys, frameon=False, loc="upper left")
 
     fig.tight_layout()

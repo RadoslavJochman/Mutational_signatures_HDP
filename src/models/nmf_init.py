@@ -51,10 +51,10 @@ from src.analysis.analysis import inverse_walk
 
 
 def denovo_nmf_initvals(
-        model,
-        count_matrix: pd.DataFrame,
-        sigma_init: float = 0.6,
-        seed: int = 0,
+    model,
+    count_matrix: pd.DataFrame,
+    sigma_init: float = 0.6,
+    seed: int = 0,
 ) -> Dict[str, np.ndarray]:
     """Shared NMF initial values for a DeNovoHDP-style model.
 

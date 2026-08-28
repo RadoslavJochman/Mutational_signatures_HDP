@@ -64,17 +64,18 @@ def inv_softmax_last_zero(e: np.ndarray, floor: float = 1e-6) -> np.ndarray:
     return np.log(e[..., :-1]) - np.log(e[..., -1:])
 
 
-
-
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two vectors."""
-    a = np.asarray(a, dtype=float); b = np.asarray(b, dtype=float)
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+
 
 def _row_normalise(X: np.ndarray) -> np.ndarray:
     """Each row of X scaled to unit L2 norm (builds the cosine matrix in align)."""
     X = np.asarray(X, dtype=float)
     return X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
+
 
 def _as_dist(x: np.ndarray) -> np.ndarray:
     """Non-negative vector renormalised to sum one, read as a distribution."""
@@ -123,16 +124,17 @@ def bray_curtis(a: np.ndarray, b: np.ndarray) -> float:
     cosine it is scale-sensitive, so two activity patterns that differ only in
     overall level are still far apart. Reduces to total variation once the
     vectors are normalised, so it sits in the same family as the shape metrics."""
-    a = np.asarray(a, float); b = np.asarray(b, float)
+    a = np.asarray(a, float)
+    b = np.asarray(b, float)
     return float(np.abs(a - b).sum() / (a.sum() + b.sum() + 1e-12))
 
 
 # name -> (function, higher_is_better) for the table builders and aggregator
 DISTRIBUTION_METRICS = {
-    "tv":        (total_variation, False),
-    "hellinger": (hellinger,       False),
-    "js":        (jensen_shannon,  False),
-    "cosine":    (cosine,          True),
+    "tv": (total_variation, False),
+    "hellinger": (hellinger, False),
+    "js": (jensen_shannon, False),
+    "cosine": (cosine, True),
 }
 
 
@@ -142,22 +144,25 @@ def _apply(metric: str, est_rows: np.ndarray, true_rows: np.ndarray) -> np.ndarr
     return np.array([fn(est_rows[i], true_rows[i]) for i in range(len(true_rows))])
 
 
-def signature_distances(sig_est: np.ndarray, true_S: np.ndarray,
-                        metrics: Sequence[str]) -> Dict[str, np.ndarray]:
+def signature_distances(
+    sig_est: np.ndarray, true_S: np.ndarray, metrics: Sequence[str]
+) -> Dict[str, np.ndarray]:
     """Per-signature shape distance for each named metric. Both (K, C), already
     aligned to the same labelling. Returns {metric: (K,)}."""
     return {m: _apply(m, sig_est, true_S) for m in metrics}
 
 
-def usage_distances(act_est: np.ndarray, true_acts: np.ndarray,
-                    metrics: Sequence[str]) -> Dict[str, np.ndarray]:
+def usage_distances(
+    act_est: np.ndarray, true_acts: np.ndarray, metrics: Sequence[str]
+) -> Dict[str, np.ndarray]:
     """Per-signature usage-profile distance: each signature's activity across
     nodes, est vs true. Both (n_nodes, K), aligned. Returns {metric: (K,)}."""
     return {m: _apply(m, act_est.T, true_acts.T) for m in metrics}
 
 
-def node_distances(act_est: np.ndarray, true_acts: np.ndarray,
-                   metrics: Sequence[str]) -> Dict[str, np.ndarray]:
+def node_distances(
+    act_est: np.ndarray, true_acts: np.ndarray, metrics: Sequence[str]
+) -> Dict[str, np.ndarray]:
     """Per-node composition distance: each node's activity vector, est vs true.
     Both (n_nodes, K), aligned. Returns {metric: (n_nodes,)}."""
     return {m: _apply(m, act_est, true_acts) for m in metrics}
@@ -170,7 +175,9 @@ def exposure_errors(act_est: np.ndarray, true_acts: np.ndarray) -> np.ndarray:
     return np.array([relative_exposure_error(rec[k], tru[k]) for k in range(len(tru))])
 
 
-def across_chain(values: np.ndarray, metric: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def across_chain(
+    values: np.ndarray, metric: str
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Aggregate a (..., n_chains) array over the last axis into best, mean,
     worst, with best/worst set by the metric's direction (cosine high is good,
     distances low is good)."""
@@ -179,6 +186,7 @@ def across_chain(values: np.ndarray, metric: str) -> Tuple[np.ndarray, np.ndarra
     higher_is_better = DISTRIBUTION_METRICS[metric][1]
     best, worst = (hi, lo) if higher_is_better else (lo, hi)
     return best, mean, worst
+
 
 def align(source: np.ndarray, target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Hungarian alignment of `source` rows to `target` rows on cosine.
@@ -203,9 +211,11 @@ def node_order(model) -> List:
     nbd = model._get_nodes_by_depth()
     return [n for d in sorted(nbd) for n in nbd[d]]
 
+
 def node_depths(model) -> Dict:
     """{node_id: depth} via BFS from every root of the model graph."""
     import networkx as nx
+
     depths: Dict = {}
     roots = [n for n, d in model.graph.in_degree() if d == 0]
     for r in roots:
@@ -213,13 +223,16 @@ def node_depths(model) -> Dict:
             depths.setdefault(n, depth)
     return depths
 
+
 def node_label(model, n) -> str:
     """The stored 'label' of graph node `n`, falling back to str(n)."""
     return model.graph.nodes[n].get("label", str(n))
 
+
 def _parents(model, nodes) -> list:
     """Parent of each node in `nodes` in the model graph (None for a root)."""
     return [(list(model.graph.predecessors(n)) or [None])[0] for n in nodes]
+
 
 def build_forest(newick_string):
     """Build a directed forest from a newick string (one tree per record) and
@@ -230,20 +243,23 @@ def build_forest(newick_string):
     callers (e.g. sweep_aggregate)."""
     import networkx as nx
     import phylox
+
     G = nx.DiGraph()
     for s in newick_string.split(";"):
         if not s.strip():
             continue
-        t = phylox.DiNetwork.from_newick(s + ";")   # ';' restored for phylox
+        t = phylox.DiNetwork.from_newick(s + ";")  # ';' restored for phylox
         mapping = {n: t.nodes[n].get("label", str(n)) for n in t.nodes()}
         G = nx.compose(G, nx.relabel_nodes(t, mapping))
     return G
+
 
 def nodes_by_depth(G):
     """Map (depth, position) -> node label for a forest graph, where depth is
     distance from a root and position is first-reached order at that depth.
     (Graph-level helper; for a fitted model use `node_order`/`node_depths`.)"""
     import networkx as nx
+
     roots = [n for n, d in G.in_degree() if d == 0]
     seen, by_depth = {}, {}
     for r in roots:
@@ -256,6 +272,7 @@ def nodes_by_depth(G):
         for i, n in enumerate(nodes):
             dr[(depth, i)] = n
     return dr
+
 
 def forward_walk(model, free: Dict[str, np.ndarray], sigma: float) -> Dict:
     """{eta_level_0, z_level_d, ...} (one draw or an initvals dict) -> {node_id:
@@ -277,6 +294,7 @@ def forward_walk(model, free: Dict[str, np.ndarray], sigma: float) -> Dict:
         for n in current:
             e_of[n] = softmax_last_zero(eta_of[n])
     return e_of
+
 
 def inverse_walk(model, e_by_node: Dict, sigma: float) -> Dict[str, np.ndarray]:
     """{node_id (or label): e_j} -> {eta_level_0, z_level_d, ...} by inverse-
@@ -310,15 +328,18 @@ def inverse_walk(model, e_by_node: Dict, sigma: float) -> Dict[str, np.ndarray]:
     return out
 
 
-def activities_mean(post, model, chains: Optional[Sequence[int]] = None
-                    ) -> Tuple[List, np.ndarray]:
+def activities_mean(
+    post, model, chains: Optional[Sequence[int]] = None
+) -> Tuple[List, np.ndarray]:
     """Posterior-mean per-node activities. Returns (node_order, A) with A shape
     (n_nodes, K) in node_order, averaged over the given chains (all if None)
     and all draws. Reads the e_level_* deterministics."""
     nbd = model._get_nodes_by_depth()
     sel = dict(chain=list(chains)) if chains is not None else {}
-    blocks = [post[f"e_level_{d}"].isel(**sel).mean(("chain", "draw")).values
-              for d in sorted(nbd)]
+    blocks = [
+        post[f"e_level_{d}"].isel(**sel).mean(("chain", "draw")).values
+        for d in sorted(nbd)
+    ]
     return node_order(model), np.concatenate(blocks, axis=0)
 
 
@@ -328,11 +349,16 @@ def activities_draw(post, model, chain: int, draw: int) -> Tuple[List, np.ndarra
     nbd = model._get_nodes_by_depth()
     depths = sorted(nbd)
     if all(f"e_level_{d}" in post for d in depths):
-        blocks = [post[f"e_level_{d}"].isel(chain=chain, draw=draw).values for d in depths]
+        blocks = [
+            post[f"e_level_{d}"].isel(chain=chain, draw=draw).values for d in depths
+        ]
         return node_order(model), np.concatenate(blocks, axis=0)
     sigma = float(post["sigma"].isel(chain=chain, draw=draw).values)
-    free = {v: post[v].isel(chain=chain, draw=draw).values
-            for v in post.data_vars if v.startswith(("eta_level_", "z_level_"))}
+    free = {
+        v: post[v].isel(chain=chain, draw=draw).values
+        for v in post.data_vars
+        if v.startswith(("eta_level_", "z_level_"))
+    }
     e_of = forward_walk(model, free, sigma)
     order = node_order(model)
     return order, np.stack([e_of[n] for n in order])
@@ -349,9 +375,10 @@ def per_chain_activity(e_arrays):
     acc = np.zeros((n_chains, K))
     total_nodes = 0
     for arr in e_arrays:
-        acc += arr.mean(axis=1).sum(axis=1)       # mean over draws, sum nodes
+        acc += arr.mean(axis=1).sum(axis=1)  # mean over draws, sum nodes
         total_nodes += arr.shape[2]
     return acc / max(total_nodes, 1)
+
 
 def detect_camps(chain_act):
     """
@@ -369,31 +396,40 @@ def detect_camps(chain_act):
     gaps = np.diff(axis[order])
     split = int(np.argmax(gaps))
     campA = sorted(order[: split + 1].tolist())
-    campB = sorted(order[split + 1:].tolist())
+    campB = sorted(order[split + 1 :].tolist())
     if len(gaps) > 1:
         others = np.delete(gaps, split)
         sep = float(gaps[split] / (np.median(others) + 1e-12))
     else:
         sep = np.inf
-    return {"kstar": kstar, "campA": campA, "campB": campB,
-            "separation": sep, "axis": axis}
+    return {
+        "kstar": kstar,
+        "campA": campA,
+        "campB": campB,
+        "separation": sep,
+        "axis": axis,
+    }
 
-def split_camps(post, model, chains: Optional[Sequence[int]] = None) -> Tuple[list, list]:
+
+def split_camps(
+    post, model, chains: Optional[Sequence[int]] = None
+) -> Tuple[list, list]:
     """Partition chains into two camps by activity fingerprint, via detect_camps
     (gap on the highest-between-chain-variance component). Returns (campA, campB)
     as chain-index lists. This is the canonical camp rule; the KMeans variants
     that used to live in the scripts should call this."""
     nbd = model._get_nodes_by_depth()
     e_arrays = [post[f"e_level_{d}"].values for d in sorted(nbd)]
-    pc = per_chain_activity(e_arrays)              # (chain, K), each in its own frame
-    S = post["signatures"].values                  # (chain, draw, K, C)
+    pc = per_chain_activity(e_arrays)  # (chain, K), each in its own frame
+    S = post["signatures"].values  # (chain, draw, K, C)
     ref = S[0].mean(axis=0)
     pc_al = np.empty_like(pc)
     for c in range(pc.shape[0]):
-        perm, _ = align(S[c].mean(axis=0), ref)    # source[perm] ~ ref
+        perm, _ = align(S[c].mean(axis=0), ref)  # source[perm] ~ ref
         pc_al[c] = pc[c][perm]
     res = detect_camps(pc_al)
     return res["campA"], res["campB"]
+
 
 def chain_perms_to_true(S, true_S):
     """
@@ -412,6 +448,7 @@ def chain_perms_to_true(S, true_S):
         perms[c] = perm
     return perms
 
+
 DEFAULT_PRIORS = {
     "sigma_prior": "LogNorm",
     "sigma_prior_parm": {"mu": 0.0, "sigma": 1.0},
@@ -419,13 +456,20 @@ DEFAULT_PRIORS = {
     "beta": 0.5,
 }
 
-def build_model(newick_path: str, counts_path: str, num_signatures: int,
-                priors: Optional[dict] = None):
+
+def build_model(
+    newick_path: str,
+    counts_path: str,
+    num_signatures: int,
+    priors: Optional[dict] = None,
+):
     """Construct a DeNovoHDP from file paths with the shared prior config the
     scripts had all hard-coded. Returns (model, counts). Pass `priors` to
     override DEFAULT_PRIORS."""
     import pandas as pd
+
     from src.models.hdp_inference import DeNovoHDP
+
     counts = pd.read_csv(counts_path, index_col=0)
     newick = Path(newick_path).read_text().strip()
     return DeNovoHDP(newick, counts, num_signatures, priors or DEFAULT_PRIORS), counts

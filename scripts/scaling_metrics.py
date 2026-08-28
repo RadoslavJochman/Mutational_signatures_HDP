@@ -41,9 +41,9 @@ import re
 import sys
 from pathlib import Path
 
+import arviz as az
 import numpy as np
 import pandas as pd
-import arviz as az
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import build_forest, cosine, nodes_by_depth
@@ -51,8 +51,11 @@ from src.analysis.analysis import build_forest, cosine, nodes_by_depth
 
 def _level_vars(post, prefix):
     """Per-level variables <prefix>_<d> in numeric (depth) order."""
-    vs = [v for v in map(str, post.data_vars)
-          if re.fullmatch(re.escape(prefix) + r"_?\d+", v)]
+    vs = [
+        v
+        for v in map(str, post.data_vars)
+        if re.fullmatch(re.escape(prefix) + r"_?\d+", v)
+    ]
     vs.sort(key=lambda v: int(re.findall(r"\d+", v)[-1]))
     return vs
 
@@ -67,18 +70,21 @@ def _convergence_vars(post, activity_var, conv_vars):
     if not keep:
         raise SystemExit(
             f"no convergence variables matched '{activity_var}_<d>' or 'sigma'; "
-            f"available: {list(map(str, post.data_vars))}")
+            f"available: {list(map(str, post.data_vars))}"
+        )
     return keep
 
 
 def _aligned_activities(post, prefix, newick, truth):
     """Posterior-mean per-node activities aligned to truth. e_level_<depth> row r is the node at
     (depth, r) from nodes_by_depth(forest), matched to truth by label."""
-    dr = nodes_by_depth(build_forest(newick))            # (depth, pos) -> label
+    dr = nodes_by_depth(build_forest(newick))  # (depth, pos) -> label
     labels, A = [], []
     for ev in _level_vars(post, prefix):
         depth = int(re.findall(r"\d+", ev)[-1])
-        cmean = np.atleast_2d(post[ev].mean(dim=("chain", "draw")).values)  # (n_rows, K)
+        cmean = np.atleast_2d(
+            post[ev].mean(dim=("chain", "draw")).values
+        )  # (n_rows, K)
         for r in range(cmean.shape[0]):
             label = dr.get((depth, r))
             if label is None or label not in truth.index:
@@ -86,9 +92,11 @@ def _aligned_activities(post, prefix, newick, truth):
             labels.append(label)
             A.append(cmean[r])
     if not labels:
-        raise SystemExit("no activity rows mapped to a truth node; check "
-                         "--newick and the e_level node ordering")
-    return labels, np.asarray(A)                         # (n_nodes, K)
+        raise SystemExit(
+            "no activity rows mapped to a truth node; check "
+            "--newick and the e_level node ordering"
+        )
+    return labels, np.asarray(A)  # (n_nodes, K)
 
 
 def main():
@@ -97,9 +105,13 @@ def main():
     ap.add_argument("--true-activities", default=None)
     ap.add_argument("--newick", default=None)
     ap.add_argument("--activity-var", default="e_level")
-    ap.add_argument("--conv-vars", nargs="*", default=None,
-                    help="override the convergence variables; default is the "
-                         "activity variable(s) and any 'sigma'")
+    ap.add_argument(
+        "--conv-vars",
+        nargs="*",
+        default=None,
+        help="override the convergence variables; default is the "
+        "activity variable(s) and any 'sigma'",
+    )
     ap.add_argument("--n-trees", type=int, required=True)
     ap.add_argument("--out", default="scaling_results.csv")
     a = ap.parse_args()
@@ -107,12 +119,16 @@ def main():
     idata = az.from_netcdf(a.trace)
     post = idata.posterior
 
-    diag = az.summary(idata,
-                      var_names=_convergence_vars(post, a.activity_var, a.conv_vars),
-                      kind="diagnostics")
-    row = {"n_trees": a.n_trees,
-           "max_rhat": float(diag["r_hat"].max()),
-           "min_ess": float(diag["ess_bulk"].min())}
+    diag = az.summary(
+        idata,
+        var_names=_convergence_vars(post, a.activity_var, a.conv_vars),
+        kind="diagnostics",
+    )
+    row = {
+        "n_trees": a.n_trees,
+        "max_rhat": float(diag["r_hat"].max()),
+        "min_ess": float(diag["ess_bulk"].min()),
+    }
 
     if a.true_activities and a.newick:
         truth = pd.read_csv(a.true_activities, index_col=0)
@@ -121,11 +137,15 @@ def main():
         true_acts = truth.loc[labels].values.astype(float)
         l1 = np.abs(A - true_acts).sum(axis=1)
         cos = np.array([cosine(A[n], true_acts[n]) for n in range(len(labels))])
-        row.update({
-            "n_nodes": len(labels),
-            "mean_cos": float(cos.mean()), "median_cos": float(np.median(cos)),
-            "mean_L1": float(l1.mean()), "median_L1": float(np.median(l1)),
-        })
+        row.update(
+            {
+                "n_nodes": len(labels),
+                "mean_cos": float(cos.mean()),
+                "median_cos": float(np.median(cos)),
+                "mean_L1": float(l1.mean()),
+                "median_L1": float(np.median(l1)),
+            }
+        )
     elif a.true_activities or a.newick:
         raise SystemExit("accuracy needs both --true-activities and --newick")
 

@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 
@@ -57,8 +56,11 @@ def _load(manifest: pd.DataFrame, filename: str) -> pd.DataFrame:
 
 def _aggregate(df: pd.DataFrame, group_cols: list) -> pd.DataFrame:
     """mean / std / sem / n for every numeric column over the group."""
-    value_cols = [c for c in df.select_dtypes("number").columns
-                  if c not in group_cols and c != "rep"]
+    value_cols = [
+        c
+        for c in df.select_dtypes("number").columns
+        if c not in group_cols and c != "rep"
+    ]
     g = df.groupby(group_cols)[value_cols]
     out = g.agg(["mean", "std", "sem", "count"])
     out.columns = [f"{c}_{stat}" for c, stat in out.columns]
@@ -78,14 +80,17 @@ def main():
         if col not in manifest.columns:
             raise SystemExit(f"manifest needs a '{col}' column")
 
-    default_name = {"summary": "recovery_summary.csv",
-                    "signatures": "recovery_signatures.csv"}[a.kind]
+    default_name = {
+        "summary": "recovery_summary.csv",
+        "signatures": "recovery_signatures.csv",
+    }[a.kind]
     df = _load(manifest, a.filename or default_name)
 
     group = ["setting"] if a.kind == "summary" else ["setting", "signature"]
     agg = _aggregate(df, group)
 
-    out = Path(a.outdir); out.mkdir(parents=True, exist_ok=True)
+    out = Path(a.outdir)
+    out.mkdir(parents=True, exist_ok=True)
     dest = out / f"aggregated_{a.kind}.csv"
     agg.to_csv(dest, index=False)
 
@@ -93,7 +98,8 @@ def main():
     print(f"wrote {dest}")
     print(f"settings: {sorted(df['setting'].unique())}")
     print(f"replicates per group: min {int(n_per.min())}, max {int(n_per.max())}")
-    pd.set_option("display.width", 200); pd.set_option("display.max_columns", 60)
+    pd.set_option("display.width", 200)
+    pd.set_option("display.max_columns", 60)
     print(agg.round(4).to_string(index=False))
 
 

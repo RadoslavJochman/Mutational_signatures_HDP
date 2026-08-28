@@ -13,15 +13,15 @@ Usage
 
 from __future__ import annotations
 
-import os
-import datetime
-from pathlib import Path
-from typing import Any, Dict
-import pymc as pm
-import yaml
 from fractions import Fraction
 from functools import partial
+from pathlib import Path
+from typing import Any, Dict
+
+import pymc as pm
 import pytensor.tensor as pt
+import yaml
+
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
     """
@@ -48,9 +48,9 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
     with config_path.open() as f:
         return yaml.safe_load(f)
 
+
 def make_output_dir(
-    base_dir: str | Path = "results",
-    experiment_name: str = "experiment"
+    base_dir: str | Path = "results", experiment_name: str = "experiment"
 ) -> Path:
     """
     Create and return a dated experiment output directory.
@@ -74,24 +74,25 @@ def make_output_dir(
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
-def get_prior(config: dict, prior_name: str, dim: int=None):
+
+def get_prior(config: dict, prior_name: str, dim: int = None):
     """
-        Retrieves and instantiates a PyMC prior distribution based on a configuration dictionary.
+    Retrieves and instantiates a PyMC prior distribution based on a configuration dictionary.
 
-        Args:
-            config (dict): A configuration dictionary containing the distribution name
-                and its required parameters.
-            prior_name (str): The key used to look up the desired distribution name
-                within the `config` dictionary.
-            dim(str): The dimensionality of the distribution.
-        Returns:
-            Returns a partial pm.Distribution configured with the provided parameters
-            that requires only a 'name' to be instantiated.
+    Args:
+        config (dict): A configuration dictionary containing the distribution name
+            and its required parameters.
+        prior_name (str): The key used to look up the desired distribution name
+            within the `config` dictionary.
+        dim(str): The dimensionality of the distribution.
+    Returns:
+        Returns a partial pm.Distribution configured with the provided parameters
+        that requires only a 'name' to be instantiated.
 
-        Raises:
-            KeyError: If the distribution specified in `config[prior_name]` is not
-                found in the supported `priors` dictionary.
-        """
+    Raises:
+        KeyError: If the distribution specified in `config[prior_name]` is not
+            found in the supported `priors` dictionary.
+    """
     priors = {
         "Dir": pm.Dirichlet,
         "Norm": pm.Normal,
@@ -100,7 +101,7 @@ def get_prior(config: dict, prior_name: str, dim: int=None):
         "Beta": pm.Beta,
         "Gamma": pm.Gamma,
         "Fixed": pm.Deterministic,
-        }
+    }
     dist_type = config.get(prior_name)
     if dist_type not in priors:
         raise KeyError(f"'{dist_type}' prior not found.")

@@ -41,9 +41,11 @@ def main():
     df = pd.read_csv(indir / "camp_path_profile.csv")
 
     import matplotlib
+
     matplotlib.use("Agg")
     apply_style()
     import matplotlib.pyplot as plt
+
     P = PALETTE
 
     def _shift(col):
@@ -53,13 +55,17 @@ def main():
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
     ax.plot(df.t, _shift("loglik"), color=P["accent"], lw=2.2, label="log-likelihood")
     ax.plot(df.t, _shift("logp"), color=P["soft"], lw=2.2, label="log-posterior")
-    ax.axvline(0, color=P["grey"], ls=":"); ax.axvline(1, color=P["grey"], ls=":")
+    ax.axvline(0, color=P["grey"], ls=":")
+    ax.axvline(1, color=P["grey"], ls=":")
     ax.axhline(0, color="black", lw=0.6)
     ax.set_xlabel("interpolation  t   (0 = cluster A, 1 = cluster B, label-aligned)")
     ax.set_ylabel("log-density, shifted to cluster A = 0")
-    ax.grid(color=P["grey"], lw=0.6, alpha=0.3); ax.set_axisbelow(True)
+    ax.grid(color=P["grey"], lw=0.6, alpha=0.3)
+    ax.set_axisbelow(True)
     ax.legend(frameon=False, fontsize=9, loc="lower center")
-    fig.tight_layout(); save(fig, outdir, "fig_camp_path_profile"); plt.close(fig)
+    fig.tight_layout()
+    save(fig, outdir, "fig_camp_path_profile")
+    plt.close(fig)
 
     # Figure 2
     fig, axc = plt.subplots(figsize=(7.0, 4.2))
@@ -68,14 +74,24 @@ def main():
     axc.tick_params(axis="y", labelcolor=P["stiff"])
     axc.set_xlabel("interpolation  t   (0 = cluster A, 1 = cluster B)")
     axco = axc.twinx()
-    axco.plot(df.t, df.on_path_curv, color=P["soft"], lw=2.2, label="along the path (soft)")
+    axco.plot(
+        df.t, df.on_path_curv, color=P["soft"], lw=2.2, label="along the path (soft)"
+    )
     axco.set_ylabel("curvature of logp\n(along path, soft)", color=P["soft"])
     axco.tick_params(axis="y", labelcolor=P["soft"])
     lines = axc.get_lines()[:1] + axco.get_lines()
-    axc.legend(lines, [ln.get_label() for ln in lines], frameon=False, fontsize=9,
-               loc="lower right")
-    axc.grid(color=P["grey"], lw=0.6, alpha=0.3); axc.set_axisbelow(True)
-    fig.tight_layout(); save(fig, outdir, "fig_camp_path_curvature"); plt.close(fig)
+    axc.legend(
+        lines,
+        [ln.get_label() for ln in lines],
+        frameon=False,
+        fontsize=9,
+        loc="lower right",
+    )
+    axc.grid(color=P["grey"], lw=0.6, alpha=0.3)
+    axc.set_axisbelow(True)
+    fig.tight_layout()
+    save(fig, outdir, "fig_camp_path_curvature")
+    plt.close(fig)
 
     print(f"wrote fig_camp_path_profile and fig_camp_path_curvature to {outdir}")
 

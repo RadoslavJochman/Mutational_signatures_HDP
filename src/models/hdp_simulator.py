@@ -54,6 +54,7 @@ from phylox.constants import LABEL_ATTR
 
 N_CHANNELS = 96
 
+
 def synthesize_signatures(
     n_signatures: int,
     correlation: float,
@@ -94,7 +95,7 @@ def synthesize_signatures(
         profile = correlation * base + (1.0 - correlation) * own
 
         # More peaks
-        profile = profile ** 1.5
+        profile = profile**1.5
 
         # Normalization
         sigs[k] = profile / profile.sum()
@@ -117,15 +118,18 @@ def _validate_signatures(signatures: np.ndarray) -> np.ndarray:
         raise ValueError("signatures must be non-negative")
     return signatures
 
+
 @dataclass
 class _NodeTruth:
     """Ground-truth record for a single node."""
+
     tumour: int
     label: str
     e_vector: np.ndarray
     num_mutations: int
     is_root: bool
     parent_label: Optional[str]
+
 
 class TreeSignatureGenerator:
     """
@@ -199,9 +203,7 @@ class TreeSignatureGenerator:
             self.signatures = _validate_signatures(signatures)
         else:
             if n_signatures is None:
-                raise ValueError(
-                    "provide either `signatures` or `n_signatures`"
-                )
+                raise ValueError("provide either `signatures` or `n_signatures`")
             self.signatures = synthesize_signatures(
                 n_signatures, signature_correlation, self.rng
             )
@@ -252,7 +254,7 @@ class TreeSignatureGenerator:
             for k in np.where(support)[0]:
                 if self.rng.random() < self.signature_dropout:
                     keep[k] = False
-            if keep.sum() == 0:                       # never drop everything
+            if keep.sum() == 0:  # never drop everything
                 keep[self.rng.choice(np.where(support)[0])] = True
             support = keep
 
@@ -347,9 +349,7 @@ class TreeSignatureGenerator:
         for label, tr in self._truth.items():
             if tr.parent_label is not None:
                 records.append(
-                    {"tumour": tr.tumour,
-                     "parent": tr.parent_label,
-                     "child": label}
+                    {"tumour": tr.tumour, "parent": tr.parent_label, "child": label}
                 )
         return pd.DataFrame(records, columns=["tumour", "parent", "child"])
 
@@ -387,6 +387,7 @@ class TreeSignatureGenerator:
             "max_mutations": int(np.max(counts)) if counts else 0,
         }
 
+
 def generate_random_forest(
     num_trees: int,
     min_leaves: int,
@@ -417,10 +418,8 @@ def generate_random_forest(
     newicks = []
     for t in range(num_trees):
         n_leaves = int(rng.integers(min_leaves, max_leaves + 1))
-        tree_seed = int(rng.integers(0, 2 ** 31))
-        tree = generate_network_random_tree_child_sequence(
-            n_leaves, 0, seed=tree_seed
-        )
+        tree_seed = int(rng.integers(0, 2**31))
+        tree = generate_network_random_tree_child_sequence(n_leaves, 0, seed=tree_seed)
         for i, node in enumerate(nx.topological_sort(tree)):
             tree.nodes[node][LABEL_ATTR] = f"T{t + 1}_{i + 1}"
         for u, v in tree.edges():

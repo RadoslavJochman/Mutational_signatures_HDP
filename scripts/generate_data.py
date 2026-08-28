@@ -45,8 +45,7 @@ def _load_signature_csv(path: str) -> np.ndarray:
     arr = df.to_numpy(dtype=float)
     if arr.shape[1] != 96:
         raise ValueError(
-            f"signature file '{path}' must have 96 channel columns, "
-            f"got {arr.shape[1]}"
+            f"signature file '{path}' must have 96 channel columns, got {arr.shape[1]}"
         )
     return arr
 
@@ -72,13 +71,13 @@ def run_generation(cfg: dict) -> None:
         K = sig_cfg["num_signatures"]
         gen_kwargs = {
             "n_signatures": K,
-            "signature_correlation": _as_float(
-                sig_cfg.get("correlation", 0.0)
-            ),
+            "signature_correlation": _as_float(sig_cfg.get("correlation", 0.0)),
         }
         signatures = None
-        print(f"Synthesizing {K} signatures "
-              f"(correlation={gen_kwargs['signature_correlation']})")
+        print(
+            f"Synthesizing {K} signatures "
+            f"(correlation={gen_kwargs['signature_correlation']})"
+        )
     else:
         raise ValueError(
             f"signatures.source must be 'synthesize' or 'load', got '{source}'"
@@ -98,14 +97,15 @@ def run_generation(cfg: dict) -> None:
         f.write(newick_string)
     print(f"Saved tree topology to '{trees_path}'")
 
-    generator_seed = int(rng.integers(0, 2 ** 31))
+    generator_seed = int(rng.integers(0, 2**31))
     generator = TreeSignatureGenerator(
         newick_forest=newick_string,
         alpha=_as_float(sim["alpha"]),
         alpha_0=_as_float(sim.get("alpha_0", 1.0)),
         lam=_as_float(sim["lam"]),
         nb_dispersion=(
-            None if sim.get("nb_dispersion") in (None, "none")
+            None
+            if sim.get("nb_dispersion") in (None, "none")
             else _as_float(sim["nb_dispersion"])
         ),
         activity_sparsity=_as_float(sim.get("activity_sparsity", 0.0)),
@@ -156,13 +156,11 @@ def run_generation(cfg: dict) -> None:
         "nb_dispersion": sim.get("nb_dispersion"),
         "num_signatures": K,
         "true_K": generator.true_K,
-        "active_signature_indices":
-            generator.get_active_signature_indices().tolist(),
+        "active_signature_indices": generator.get_active_signature_indices().tolist(),
         "activity_sparsity": _as_float(sim.get("activity_sparsity", 0.0)),
         "signature_dropout": _as_float(sim.get("signature_dropout", 0.0)),
         "signature_source": source,
-        "signature_correlation":
-            gen_kwargs.get("signature_correlation"),
+        "signature_correlation": gen_kwargs.get("signature_correlation"),
         **{f"forest_{k}": v for k, v in forest_cfg.items()},
         "dataset_summary": summary,
     }
@@ -174,10 +172,11 @@ def run_generation(cfg: dict) -> None:
     if cfg.get("simulation", {}).get("make_plots", True):
         try:
             from src.plotting.plots import (
-                plot_signatures_heatmap,
-                plot_patient_counts,
                 plot_node_signatures,
+                plot_patient_counts,
+                plot_signatures_heatmap,
             )
+
             plot_dir = os.path.join(output_dir, "plots")
             os.makedirs(plot_dir, exist_ok=True)
             plot_signatures_heatmap(
@@ -189,9 +188,7 @@ def run_generation(cfg: dict) -> None:
                 save_path=os.path.join(plot_dir, "heatmap_mutation_counts.pdf"),
             )
             for prefix in [f"T{i}_" for i in range(1, 4)]:
-                label = next(
-                    (l for l in true_activities if l.startswith(prefix)), None
-                )
+                label = next((l for l in true_activities if l.startswith(prefix)), None)
                 if label:
                     plot_node_signatures(
                         activities=true_activities[label],

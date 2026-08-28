@@ -72,7 +72,6 @@ across all runs.
 
 import argparse
 import sys
-from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -82,17 +81,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import (
     build_forest,
     chain_perms_to_true,
-    cosine as _cos,
     detect_camps,
     nodes_by_depth,
     per_chain_activity,
 )
+from src.analysis.analysis import (
+    cosine as _cos,
+)
+
 
 def signature_geometry(true_S):
     """Conditioning metrics of the (K, C) true signature matrix."""
     sv = np.linalg.svd(true_S, compute_uv=False)
-    sv2 = sv ** 2
-    eff_rank = float((sv2.sum() ** 2) / ((sv2 ** 2).sum() + 1e-12))
+    sv2 = sv**2
+    eff_rank = float((sv2.sum() ** 2) / ((sv2**2).sum() + 1e-12))
     Mn = true_S / (np.linalg.norm(true_S, axis=1, keepdims=True) + 1e-12)
     cosM = Mn @ Mn.T
     K = true_S.shape[0]
@@ -116,7 +118,7 @@ def participation_ratio(p):
     if s <= 0:
         return np.nan
     p = p / s
-    return float(1.0 / (np.sum(p ** 2) + 1e-12))
+    return float(1.0 / (np.sum(p**2) + 1e-12))
 
 
 def effective_num_signatures(mean_act_per_component):
@@ -139,6 +141,7 @@ def camp_recovery(S_by_chain, true_S, campA, campB, divergence_threshold):
         "camps_agree": bool(n_diff == 0),
         "n_sig_divergent": n_diff,
     }
+
 
 def _activity_arrays_and_signatures(post):
     e_vars = sorted([v for v in post.data_vars if v.startswith("e_level")])
@@ -171,6 +174,7 @@ def _mean_local_diversity(e_arrays):
 def trace_metrics(trace_path, true_S, divergence_threshold):
     """Recovery, camps, effective signatures, spread, ess from the trace."""
     import arviz as az
+
     idata = az.from_netcdf(str(trace_path))
     post = idata.posterior
     e_vars, e_arrays, S = _activity_arrays_and_signatures(post)
@@ -178,17 +182,20 @@ def trace_metrics(trace_path, true_S, divergence_threshold):
 
     out = {}
     out["eff_num_sigs"] = effective_num_signatures(
-        np.vstack([a.mean(axis=(0, 1)) for a in e_arrays]).sum(0))
+        np.vstack([a.mean(axis=(0, 1)) for a in e_arrays]).sum(0)
+    )
     out["mean_local_div"] = _mean_local_diversity(e_arrays)
     out["spread"] = _across_chain_spread(e_arrays)
 
     try:
         ess = az.ess(idata, var_names=e_vars, method="bulk")
-        out["ess_median"] = float(np.nanmedian(
-            np.concatenate([np.ravel(ess[v].values) for v in e_vars])))
+        out["ess_median"] = float(
+            np.nanmedian(np.concatenate([np.ravel(ess[v].values) for v in e_vars]))
+        )
         rhat = az.rhat(idata, var_names=e_vars)
-        out["rhat_max"] = float(np.nanmax(
-            np.concatenate([np.ravel(rhat[v].values) for v in e_vars])))
+        out["rhat_max"] = float(
+            np.nanmax(np.concatenate([np.ravel(rhat[v].values) for v in e_vars]))
+        )
     except Exception as exc:
         out["ess_median"] = np.nan
         out["rhat_max"] = np.nan
@@ -198,14 +205,20 @@ def trace_metrics(trace_path, true_S, divergence_threshold):
         perms = chain_perms_to_true(S, true_S)
         S_al = np.stack([S[c][:, perms[c], :] for c in range(n_chains)])
         S_by_chain = S_al.mean(axis=1)
-        e_al = [np.stack([a[c][:, :, perms[c]] for c in range(n_chains)])
-                for a in e_arrays]
+        e_al = [
+            np.stack([a[c][:, :, perms[c]] for c in range(n_chains)]) for a in e_arrays
+        ]
         chain_act = per_chain_activity(e_al)
         _camps = detect_camps(chain_act)
-        campA, campB, kstar, sep = (_camps["campA"], _camps["campB"],
-                                    _camps["kstar"], _camps["separation"])
-        out.update(camp_recovery(S_by_chain, true_S, campA, campB,
-                                 divergence_threshold))
+        campA, campB, kstar, sep = (
+            _camps["campA"],
+            _camps["campB"],
+            _camps["kstar"],
+            _camps["separation"],
+        )
+        out.update(
+            camp_recovery(S_by_chain, true_S, campA, campB, divergence_threshold)
+        )
         out["camp_sep"] = sep
     return out
 
@@ -250,6 +263,7 @@ def activity_L1(trace_path, true_S, true_acts_path, newick_path):
         "n_nodes": n_total,
     }
 
+
 def _resolve(data_dir, data_root, fname):
     """Look for fname in the per-correlation data subdir first, then fall
     back to the data root (for inputs shared across correlations, e.g. a
@@ -263,8 +277,7 @@ def _resolve(data_dir, data_root, fname):
     return p
 
 
-def process_run(corr, subdir, results_root, data_root, names,
-                divergence_threshold):
+def process_run(corr, subdir, results_root, data_root, names, divergence_threshold):
     results_dir = results_root / subdir
     data_dir = data_root / subdir
     row = {"correlation": corr, "subdir": subdir}
@@ -284,36 +297,47 @@ def process_run(corr, subdir, results_root, data_root, names,
         except Exception as exc:
             print(f"    (trace metrics failed: {exc})")
     else:
-        print(f"    (no {names['trace']} under results: "
-              f"recovery/ess/eff_sigs skipped)")
+        print(f"    (no {names['trace']} under results: recovery/ess/eff_sigs skipped)")
 
     acts_path = _resolve(data_dir, data_root, names["true_acts"])
     nwk_path = _resolve(data_dir, data_root, names["newick"])
-    if trace_path.exists() and acts_path.exists() and nwk_path.exists() \
-            and true_S is not None:
+    if (
+        trace_path.exists()
+        and acts_path.exists()
+        and nwk_path.exists()
+        and true_S is not None
+    ):
         try:
             row.update(activity_L1(trace_path, true_S, acts_path, nwk_path))
         except Exception as exc:
             print(f"    (activity L1 failed -- phylox/newick? {exc})")
     else:
-        print(f"    (true_activities/newick absent under data: "
-              f"activity L1 skipped)")
+        print("    (true_activities/newick absent under data: activity L1 skipped)")
 
     return row
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results-root", required=True,
-                    help="Root holding per-correlation result subdirs "
-                         "(traces, analysis outputs).")
-    ap.add_argument("--data-root", required=True,
-                    help="Root holding per-correlation data subdirs "
-                         "(signatures, newick, true activities).")
-    ap.add_argument("--runs", nargs="+", required=True,
-                    help="CORR=SUBDIR tokens, where SUBDIR is the shared "
-                         "subdirectory name under BOTH roots, e.g. "
-                         "0.3=config_denovo_easy_more_chains_corr_03")
+    ap.add_argument(
+        "--results-root",
+        required=True,
+        help="Root holding per-correlation result subdirs (traces, analysis outputs).",
+    )
+    ap.add_argument(
+        "--data-root",
+        required=True,
+        help="Root holding per-correlation data subdirs "
+        "(signatures, newick, true activities).",
+    )
+    ap.add_argument(
+        "--runs",
+        nargs="+",
+        required=True,
+        help="CORR=SUBDIR tokens, where SUBDIR is the shared "
+        "subdirectory name under BOTH roots, e.g. "
+        "0.3=config_denovo_easy_more_chains_corr_03",
+    )
     ap.add_argument("--true-sigs-name", default="fixed_signatures.csv")
     ap.add_argument("--trace-name", default="trace_aligned.nc")
     ap.add_argument("--true-acts-name", default="true_activities.csv")
@@ -324,8 +348,12 @@ def main():
 
     results_root = Path(args.results_root)
     data_root = Path(args.data_root)
-    names = {"true_sigs": args.true_sigs_name, "trace": args.trace_name,
-             "true_acts": args.true_acts_name, "newick": args.newick_name}
+    names = {
+        "true_sigs": args.true_sigs_name,
+        "trace": args.trace_name,
+        "true_acts": args.true_acts_name,
+        "newick": args.newick_name,
+    }
 
     rows = []
     for tok in args.runs:
@@ -334,16 +362,30 @@ def main():
         corr_s, subdir = tok.split("=", 1)
         corr = float(corr_s)
         print(f"[corr={corr}] results/{subdir}  +  data/{subdir}")
-        rows.append(process_run(corr, subdir, results_root, data_root,
-                                names, args.divergence_threshold))
+        rows.append(
+            process_run(
+                corr, subdir, results_root, data_root, names, args.divergence_threshold
+            )
+        )
 
     df = pd.DataFrame(rows).sort_values("correlation").reset_index(drop=True)
 
     # ordered, rounded view for the table
-    cols = ["correlation", "smallest_sv", "cond_number", "mean_pair_cos",
-            "sig_recovery_best", "sig_recovery_worst", "camps_agree",
-            "eff_num_sigs", "mean_local_div", "ess_median", "rhat_max",
-            "L1_best_median", "spread"]
+    cols = [
+        "correlation",
+        "smallest_sv",
+        "cond_number",
+        "mean_pair_cos",
+        "sig_recovery_best",
+        "sig_recovery_worst",
+        "camps_agree",
+        "eff_num_sigs",
+        "mean_local_div",
+        "ess_median",
+        "rhat_max",
+        "L1_best_median",
+        "spread",
+    ]
     cols = [c for c in cols if c in df.columns]
     view = df[cols].copy()
     for c in view.columns:

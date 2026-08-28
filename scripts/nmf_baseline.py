@@ -42,8 +42,13 @@ import pandas as pd
 from sklearn.decomposition import NMF
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.analysis.analysis import (align, exposure_errors, node_distances,
-                                   signature_distances, usage_distances)
+from src.analysis.analysis import (
+    align,
+    exposure_errors,
+    node_distances,
+    signature_distances,
+    usage_distances,
+)
 
 
 def _orient_counts(counts: pd.DataFrame) -> pd.DataFrame:
@@ -91,17 +96,24 @@ def main():
     ap.add_argument("--true-signatures", required=True)
     ap.add_argument("--restarts", type=int, default=10)
     ap.add_argument("--max-iter", type=int, default=2000)
-    ap.add_argument("--metrics", nargs="+", default=["tv", "hellinger", "cosine"],
-                    help="distribution distances to report (tv, hellinger, js, "
-                         "cosine); shared with recovery_vs_truth.py")
-    ap.add_argument("--frobenius", action="store_true",
-                    help="use squared-error loss instead of the default "
-                         "Poisson-appropriate Kullback-Leibler")
+    ap.add_argument(
+        "--metrics",
+        nargs="+",
+        default=["tv", "hellinger", "cosine"],
+        help="distribution distances to report (tv, hellinger, js, "
+        "cosine); shared with recovery_vs_truth.py",
+    )
+    ap.add_argument(
+        "--frobenius",
+        action="store_true",
+        help="use squared-error loss instead of the default "
+        "Poisson-appropriate Kullback-Leibler",
+    )
     ap.add_argument("--outdir", default="nmf")
     a = ap.parse_args()
 
     counts = _orient_counts(pd.read_csv(a.counts, index_col=0))
-    truth = pd.read_csv(a.true_activities, index_col=0)          # (N_nodes x K)
+    truth = pd.read_csv(a.true_activities, index_col=0)  # (N_nodes x K)
     true_S = pd.read_csv(a.true_signatures, index_col=0).values  # (K x 96)
     K = true_S.shape[0]
     if truth.shape[1] != K:
@@ -123,27 +135,31 @@ def main():
     err, W, H, seed = _best_nmf(X, K, a.restarts, loss, a.max_iter)
 
     # recovered signatures (row-stochastic) and per-node activity simplex
-    Shat = H / (H.sum(axis=1, keepdims=True) + 1e-12)           # (K x 96)
-    What = W / (W.sum(axis=1, keepdims=True) + 1e-12)           # (N_obs x K)
+    Shat = H / (H.sum(axis=1, keepdims=True) + 1e-12)  # (K x 96)
+    What = W / (W.sum(axis=1, keepdims=True) + 1e-12)  # (N_obs x K)
 
     # align recovered signatures to truth; apply the same permutation to usages
-    perm, _ = align(Shat, true_S)          # Shat[perm] is in true order
+    perm, _ = align(Shat, true_S)  # Shat[perm] is in true order
     Shat = Shat[perm]
     What = What[:, perm]
 
-    true_acts = truth.loc[obs].values                          # (N_obs x K)
-    exposure = truth.values.sum(axis=0)                        # cohort-wide, all nodes
+    true_acts = truth.loc[obs].values  # (N_obs x K)
+    exposure = truth.values.sum(axis=0)  # cohort-wide, all nodes
 
     metrics = a.metrics
-    sig_d = signature_distances(Shat, true_S, metrics)         # {m: (K,)}
-    use_d = usage_distances(What, true_acts, metrics)          # {m: (K,)}
-    nod_d = node_distances(What, true_acts, metrics)           # {m: (N_obs,)}
-    expo_err = exposure_errors(What, true_acts)                # (K,)
+    sig_d = signature_distances(Shat, true_S, metrics)  # {m: (K,)}
+    use_d = usage_distances(What, true_acts, metrics)  # {m: (K,)}
+    nod_d = node_distances(What, true_acts, metrics)  # {m: (N_obs,)}
+    expo_err = exposure_errors(What, true_acts)  # (K,)
 
-    out = Path(a.outdir); out.mkdir(parents=True, exist_ok=True)
+    out = Path(a.outdir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    sig_tbl = {"signature": np.arange(K), "exposure": exposure,
-               "rel_exposure_err": expo_err}
+    sig_tbl = {
+        "signature": np.arange(K),
+        "exposure": exposure,
+        "rel_exposure_err": expo_err,
+    }
     for m in metrics:
         sig_tbl[f"sig_{m}"] = sig_d[m]
         sig_tbl[f"use_{m}"] = use_d[m]
@@ -156,16 +172,22 @@ def main():
     node_df = pd.DataFrame(node_tbl)
     node_df.to_csv(out / "nmf_recovery_activities.csv", index=False)
 
-    summary = {"n_obs_nodes": len(obs), "K": K, "loss": loss,
-               "restarts": a.restarts, "best_seed": seed,
-               "reconstruction_err": err,
-               "rel_exposure_err_max": float(expo_err.max())}
+    summary = {
+        "n_obs_nodes": len(obs),
+        "K": K,
+        "loss": loss,
+        "restarts": a.restarts,
+        "best_seed": seed,
+        "reconstruction_err": err,
+        "rel_exposure_err_max": float(expo_err.max()),
+    }
     for m in metrics:
         summary[f"sig_{m}_mean"] = float(np.mean(sig_d[m]))
         summary[f"act_{m}_median"] = float(np.median(nod_d[m]))
     pd.DataFrame([summary]).to_csv(out / "nmf_recovery_summary.csv", index=False)
 
-    pd.set_option("display.width", 200); pd.set_option("display.max_columns", 50)
+    pd.set_option("display.width", 200)
+    pd.set_option("display.max_columns", 50)
     print(sig_df.round(3).to_string(index=False))
     print()
     print(pd.Series(summary).to_string())

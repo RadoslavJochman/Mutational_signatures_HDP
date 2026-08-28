@@ -38,7 +38,6 @@ Recovery
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import matplotlib.pyplot as plt
@@ -59,6 +58,7 @@ def _save_or_show(fig: plt.Figure, save_path: Optional[str], dpi: int = 300) -> 
         print(f"Saved plot to '{save_path}'")
     else:
         plt.show()
+
 
 def plot_signature_bar(
     signature: np.ndarray,
@@ -164,6 +164,7 @@ def plot_node_signatures_from_model(
         save_path=save_path,
     )
 
+
 def plot_patient_counts(
     count_matrix: pd.DataFrame,
     title: str = "Relative Mutation Profiles",
@@ -246,6 +247,7 @@ def plot_signatures_heatmap(
     fig.tight_layout()
     _save_or_show(fig, save_path)
 
+
 def plot_depth_stats(depth_df: pd.DataFrame, save_path: Optional[str] = None) -> None:
     """
     Boxplots of ESS (bulk + tail), r_hat, and sd grouped by node depth.
@@ -299,9 +301,7 @@ def plot_zero_vs_active(
     for ax, metric in zip(axes, ["ess_bulk", "r_hat"]):
         for is_zero, group in df.groupby("is_near_zero"):
             lbl = "near-zero (<0.01)" if is_zero else "active (≥0.01)"
-            group.groupby("depth")[metric].median().plot(
-                ax=ax, label=lbl, marker="o"
-            )
+            group.groupby("depth")[metric].median().plot(ax=ax, label=lbl, marker="o")
         ax.set_title(f"Median {metric}: zero vs active components")
         ax.set_xlabel("Depth")
         ax.legend()
@@ -357,6 +357,7 @@ def plot_alpha_correlations(
     fig.tight_layout()
     _save_or_show(fig, save_path)
 
+
 def plot_recovery_distributions(
     eval_df: pd.DataFrame,
     save_path: Optional[str] = None,
@@ -408,20 +409,31 @@ def plot_alpha_recovery(
         (chains × draws,).
     save_path : str, optional
     """
-    true_alpha    = float(alpha_df["true_alpha"].iloc[0])
-    post_mean     = float(alpha_df["posterior_mean"].iloc[0])
-    hdi_lo        = float(alpha_df["hdi_3%"].iloc[0])
-    hdi_hi        = float(alpha_df["hdi_97%"].iloc[0])
-    true_in_hdi   = bool(alpha_df["true_in_hdi"].iloc[0])
+    true_alpha = float(alpha_df["true_alpha"].iloc[0])
+    post_mean = float(alpha_df["posterior_mean"].iloc[0])
+    hdi_lo = float(alpha_df["hdi_3%"].iloc[0])
+    hdi_hi = float(alpha_df["hdi_97%"].iloc[0])
+    true_in_hdi = bool(alpha_df["true_in_hdi"].iloc[0])
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
     # Left: full posterior density
-    axes[0].hist(posterior_samples, bins=60, density=True,
-                 color="steelblue", alpha=0.7, edgecolor="none")
-    axes[0].axvline(true_alpha, color="red",    lw=2, label=f"True α = {true_alpha:.2f}")
-    axes[0].axvline(post_mean,  color="orange", lw=2, linestyle="--",
-                    label=f"Posterior mean = {post_mean:.2f}")
+    axes[0].hist(
+        posterior_samples,
+        bins=60,
+        density=True,
+        color="steelblue",
+        alpha=0.7,
+        edgecolor="none",
+    )
+    axes[0].axvline(true_alpha, color="red", lw=2, label=f"True α = {true_alpha:.2f}")
+    axes[0].axvline(
+        post_mean,
+        color="orange",
+        lw=2,
+        linestyle="--",
+        label=f"Posterior mean = {post_mean:.2f}",
+    )
     axes[0].axvspan(hdi_lo, hdi_hi, alpha=0.15, color="steelblue", label="94% HDI")
     axes[0].set_title("Posterior of shared_alpha")
     axes[0].set_xlabel("shared_alpha")
@@ -430,13 +442,16 @@ def plot_alpha_recovery(
 
     # Right: interval plot
     axes[1].errorbar(
-        x=[post_mean], y=[0],
+        x=[post_mean],
+        y=[0],
         xerr=[[post_mean - hdi_lo], [hdi_hi - post_mean]],
-        fmt="o", color="steelblue", capsize=8, markersize=8,
-        label=f"Posterior mean ± 94% HDI",
+        fmt="o",
+        color="steelblue",
+        capsize=8,
+        markersize=8,
+        label="Posterior mean ± 94% HDI",
     )
-    axes[1].axvline(true_alpha, color="red", lw=2,
-                    label=f"True α = {true_alpha:.2f}")
+    axes[1].axvline(true_alpha, color="red", lw=2, label=f"True α = {true_alpha:.2f}")
     cover_str = "✓ True value inside HDI" if true_in_hdi else "✗ True value outside HDI"
     axes[1].set_title(f"Alpha recovery\n{cover_str}")
     axes[1].set_xlabel("shared_alpha")
@@ -469,19 +484,21 @@ def plot_activity_scatter(
     """
     ncols = min(K, 4)
     nrows = int(np.ceil(K / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows),
-                             squeeze=False)
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False
+    )
 
     for k in range(K):
-        ax  = axes[k // ncols][k % ncols]
+        ax = axes[k // ncols][k % ncols]
         col_t = f"true_k{k}"
         col_i = f"inferred_k{k}"
         if col_t not in activity_df.columns:
             ax.set_visible(False)
             continue
 
-        ax.scatter(activity_df[col_t], activity_df[col_i],
-                   alpha=0.6, s=20, color="steelblue")
+        ax.scatter(
+            activity_df[col_t], activity_df[col_i], alpha=0.6, s=20, color="steelblue"
+        )
         lim = max(activity_df[col_t].max(), activity_df[col_i].max()) * 1.05
         ax.plot([0, lim], [0, lim], "r--", lw=1, label="y = x")
         ax.set_title(f"Signature {k}")
@@ -521,26 +538,34 @@ def plot_activity_heatmap(
     sort_col = "depth" if "depth" in activity_df.columns else None
     df_sorted = activity_df.sort_values(sort_col) if sort_col else activity_df
 
-    true_mat = df_sorted[[f"true_k{k}"     for k in range(K) if f"true_k{k}" in df_sorted.columns]].values
-    inf_mat  = df_sorted[[f"inferred_k{k}" for k in range(K) if f"inferred_k{k}" in df_sorted.columns]].values
+    true_mat = df_sorted[
+        [f"true_k{k}" for k in range(K) if f"true_k{k}" in df_sorted.columns]
+    ].values
+    inf_mat = df_sorted[
+        [f"inferred_k{k}" for k in range(K) if f"inferred_k{k}" in df_sorted.columns]
+    ].values
     node_labels = df_sorted.index.tolist()
 
     K_actual = true_mat.shape[1]
-    fig, axes = plt.subplots(1, 2, figsize=(14, max(4, len(node_labels) * 0.25)),
-                             sharey=True)
+    fig, axes = plt.subplots(
+        1, 2, figsize=(14, max(4, len(node_labels) * 0.25)), sharey=True
+    )
 
     vmax = max(true_mat.max(), inf_mat.max())
     kw = dict(vmin=0, vmax=vmax, cmap="YlOrRd", aspect="auto")
 
-    im0 = axes[0].imshow(true_mat,     **kw)
-    im1 = axes[1].imshow(inf_mat,      **kw)
+    im0 = axes[0].imshow(true_mat, **kw)
+    im1 = axes[1].imshow(inf_mat, **kw)
 
-    for ax, title, mat in zip(axes, ["True Activities", "Inferred Activities"],
-                               [true_mat, inf_mat]):
+    for ax, title, mat in zip(
+        axes, ["True Activities", "Inferred Activities"], [true_mat, inf_mat]
+    ):
         ax.set_title(title)
         ax.set_xlabel("Signature component")
         ax.set_xticks(range(K_actual))
-        ax.set_xticklabels([f"Sig {k}" for k in range(K_actual)], rotation=45, ha="right")
+        ax.set_xticklabels(
+            [f"Sig {k}" for k in range(K_actual)], rotation=45, ha="right"
+        )
 
     axes[0].set_yticks(range(len(node_labels)))
     axes[0].set_yticklabels(node_labels, fontsize=max(5, 9 - len(node_labels) // 20))
@@ -569,9 +594,12 @@ def plot_signature_recovery(
     fig, axes = plt.subplots(1, 2, figsize=(13, 4))
 
     # Cosine similarity per true signature
-    axes[0].bar(range(len(sig_comparison_df)),
-                sig_comparison_df["cosine_similarity"],
-                color="steelblue", edgecolor="black")
+    axes[0].bar(
+        range(len(sig_comparison_df)),
+        sig_comparison_df["cosine_similarity"],
+        color="steelblue",
+        edgecolor="black",
+    )
     axes[0].axhline(1.0, color="green", linestyle="--", lw=1, label="Perfect recovery")
     axes[0].axhline(0.9, color="orange", linestyle="--", lw=1, label="cos = 0.9")
     axes[0].set_xticks(range(len(sig_comparison_df)))
@@ -582,9 +610,12 @@ def plot_signature_recovery(
     axes[0].legend()
 
     # MAE per true signature
-    axes[1].bar(range(len(sig_comparison_df)),
-                sig_comparison_df["mae"],
-                color="tomato", edgecolor="black")
+    axes[1].bar(
+        range(len(sig_comparison_df)),
+        sig_comparison_df["mae"],
+        color="tomato",
+        edgecolor="black",
+    )
     axes[1].set_xticks(range(len(sig_comparison_df)))
     axes[1].set_xticklabels(sig_comparison_df.index, rotation=45, ha="right")
     axes[1].set_title("MAE: true vs best-matched inferred signature")
@@ -616,16 +647,16 @@ def plot_signature_comparison_grid(
     save_path : str, optional
     """
     K_true = len(true_sigs)
-    fig, axes = plt.subplots(K_true, 2,
-                             figsize=(14, 2.5 * K_true),
-                             squeeze=False)
+    fig, axes = plt.subplots(K_true, 2, figsize=(14, 2.5 * K_true), squeeze=False)
 
     for k in range(K_true):
-        inf_k  = assignment[k]
+        inf_k = assignment[k]
         true_s = true_sigs[k]
-        inf_s  = inferred_sigs[inf_k]
-        cos    = float(np.dot(true_s, inf_s) /
-                       (np.linalg.norm(true_s) * np.linalg.norm(inf_s) + 1e-12))
+        inf_s = inferred_sigs[inf_k]
+        cos = float(
+            np.dot(true_s, inf_s)
+            / (np.linalg.norm(true_s) * np.linalg.norm(inf_s) + 1e-12)
+        )
 
         axes[k][0].bar(range(96), true_s, color="steelblue")
         axes[k][0].set_title(f"True Sig {k}", fontsize=9)
@@ -661,19 +692,25 @@ def plot_signature_cosine_heatmap(
     save_path : str, optional
     """
     from scipy.optimize import linear_sum_assignment
+
     K_true, K_inf = cosine_sim_matrix.shape
     _, col_ind = linear_sum_assignment(-cosine_sim_matrix)
 
     fig, ax = plt.subplots(figsize=(max(6, K_inf * 0.6), max(4, K_true * 0.5)))
-    im = ax.imshow(cosine_sim_matrix, vmin=0, vmax=1,
-                   cmap="YlGnBu", aspect="auto")
+    im = ax.imshow(cosine_sim_matrix, vmin=0, vmax=1, cmap="YlGnBu", aspect="auto")
 
     # Mark the optimal assignment
     for k_true, k_inf in enumerate(col_ind):
-        ax.add_patch(plt.Rectangle(
-            (k_inf - 0.5, k_true - 0.5), 1, 1,
-            fill=False, edgecolor="red", lw=2,
-        ))
+        ax.add_patch(
+            plt.Rectangle(
+                (k_inf - 0.5, k_true - 0.5),
+                1,
+                1,
+                fill=False,
+                edgecolor="red",
+                lw=2,
+            )
+        )
 
     ax.set_xticks(range(K_inf))
     ax.set_xticklabels([f"Inf {k}" for k in range(K_inf)], rotation=45, ha="right")
@@ -681,7 +718,9 @@ def plot_signature_cosine_heatmap(
     ax.set_yticklabels([f"True {k}" for k in range(K_true)])
     ax.set_xlabel("Inferred signature index")
     ax.set_ylabel("True signature index")
-    ax.set_title("Cosine similarity: True vs Inferred signatures\n(red boxes = Hungarian assignment)")
+    ax.set_title(
+        "Cosine similarity: True vs Inferred signatures\n(red boxes = Hungarian assignment)"
+    )
     plt.colorbar(im, ax=ax, label="Cosine similarity")
     fig.tight_layout()
     _save_or_show(fig, save_path)

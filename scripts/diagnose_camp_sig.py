@@ -77,6 +77,7 @@ from src.analysis.analysis import (
     per_chain_activity,
 )
 
+
 def camp_mean_signatures(S_by_chain, camp):
     """Mean signature matrix over the chains in a camp.
 
@@ -102,23 +103,36 @@ def within_camp_cosine(S_by_chain, camp):
         return np.full(K, np.nan)
     out = np.zeros(K)
     for k in range(K):
-        cs = [cosine(S_by_chain[i, k], S_by_chain[j, k])
-              for i, j in combinations(camp, 2)]
+        cs = [
+            cosine(S_by_chain[i, k], S_by_chain[j, k]) for i, j in combinations(camp, 2)
+        ]
         out[k] = float(np.mean(cs))
     return out
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", required=True)
-    ap.add_argument("--true-sigs", dest="true_sigs", default=None,
-                    help="fixed_signatures.csv (rows=k). If given, reports "
-                         "each camp's cosine-to-truth for divergent sigs.")
-    ap.add_argument("--camps", default=None,
-                    help="Override auto-detection, e.g. '2,3,6'. The "
-                         "remaining chains form the other camp.")
-    ap.add_argument("--divergence-threshold", type=float, default=0.99,
-                    help="Per-sig between-camp cosine below this counts as "
-                         "the camps having a DIFFERENT signature.")
+    ap.add_argument(
+        "--true-sigs",
+        dest="true_sigs",
+        default=None,
+        help="fixed_signatures.csv (rows=k). If given, reports "
+        "each camp's cosine-to-truth for divergent sigs.",
+    )
+    ap.add_argument(
+        "--camps",
+        default=None,
+        help="Override auto-detection, e.g. '2,3,6'. The "
+        "remaining chains form the other camp.",
+    )
+    ap.add_argument(
+        "--divergence-threshold",
+        type=float,
+        default=0.99,
+        help="Per-sig between-camp cosine below this counts as "
+        "the camps having a DIFFERENT signature.",
+    )
     ap.add_argument("--outdir", default="camp_signatures")
     args = ap.parse_args()
 
@@ -135,14 +149,14 @@ def main():
     e_vars = sorted([v for v in post.data_vars if v.startswith("e_level")])
     e_arrays = [post[ev].values for ev in e_vars]
 
-
     true_S = None
     if args.true_sigs:
         true_S = pd.read_csv(args.true_sigs, index_col=0).values
         perms = chain_perms_to_true(S, true_S)
         S = np.stack([S[c][:, perms[c], :] for c in range(n_chains)])
-        e_arrays = [np.stack([a[c][:, :, perms[c]] for c in range(n_chains)])
-                    for a in e_arrays]
+        e_arrays = [
+            np.stack([a[c][:, :, perms[c]] for c in range(n_chains)]) for a in e_arrays
+        ]
     S_by_chain = S.mean(axis=1)
     chain_act = per_chain_activity(e_arrays)
 
@@ -155,8 +169,7 @@ def main():
         src = "user-specified"
     else:
         d = detect_camps(chain_act)
-        campA, campB, kstar, sep = (d["campA"], d["campB"],
-                                    d["kstar"], d["separation"])
+        campA, campB, kstar, sep = (d["campA"], d["campB"], d["kstar"], d["separation"])
         src = "auto-detected"
 
     SA = camp_mean_signatures(S_by_chain, campA)
@@ -177,15 +190,24 @@ def main():
         bestmatch_A = align(SA, true_S)[1].max(axis=1)
         bestmatch_B = align(SB, true_S)[1].max(axis=1)
 
-    pd.DataFrame({
-        "signature": np.arange(K),
-        "between_camp_cos": between,
-        "within_camp_cos": within,
-        "activity_gap": act_gap,
-        **({"campA_cos_truth": truth_cos_A, "campB_cos_truth": truth_cos_B,
-            "campA_best_match": bestmatch_A, "campB_best_match": bestmatch_B}
-           if truth_cos_A is not None else {}),
-    }).to_csv(outdir / "camp_signatures.csv", index=False)
+    pd.DataFrame(
+        {
+            "signature": np.arange(K),
+            "between_camp_cos": between,
+            "within_camp_cos": within,
+            "activity_gap": act_gap,
+            **(
+                {
+                    "campA_cos_truth": truth_cos_A,
+                    "campB_cos_truth": truth_cos_B,
+                    "campA_best_match": bestmatch_A,
+                    "campB_best_match": bestmatch_B,
+                }
+                if truth_cos_A is not None
+                else {}
+            ),
+        }
+    ).to_csv(outdir / "camp_signatures.csv", index=False)
 
     n_diff = int(np.sum(between < args.divergence_threshold))
     summary = {
@@ -206,22 +228,26 @@ def main():
         worst_is_B = truth_cos_A.mean() >= truth_cos_B.mean()
         worst_bm = bestmatch_B if worst_is_B else bestmatch_A
         worst_col = truth_cos_B if worst_is_B else truth_cos_A
-        summary.update({
-            "campA_mean_cos_truth": float(truth_cos_A.mean()),
-            "campB_mean_cos_truth": float(truth_cos_B.mean()),
-            "best_camp_mean_cos_truth": float(max(truth_cos_A.mean(),
-                                                  truth_cos_B.mean())),
-            "worst_camp_mean_cos_truth": float(min(truth_cos_A.mean(),
-                                                   truth_cos_B.mean())),
-            "n_signatures_poor_recovery": int(np.sum(recov < 0.9)),
-            "worse_camp_n_mislabelled": int(np.sum((worst_bm > 0.9)
-                                                   & (worst_col < 0.9))),
-            "worse_camp_n_unrecovered": int(np.sum(worst_bm < 0.9)),
-        })
+        summary.update(
+            {
+                "campA_mean_cos_truth": float(truth_cos_A.mean()),
+                "campB_mean_cos_truth": float(truth_cos_B.mean()),
+                "best_camp_mean_cos_truth": float(
+                    max(truth_cos_A.mean(), truth_cos_B.mean())
+                ),
+                "worst_camp_mean_cos_truth": float(
+                    min(truth_cos_A.mean(), truth_cos_B.mean())
+                ),
+                "n_signatures_poor_recovery": int(np.sum(recov < 0.9)),
+                "worse_camp_n_mislabelled": int(
+                    np.sum((worst_bm > 0.9) & (worst_col < 0.9))
+                ),
+                "worse_camp_n_unrecovered": int(np.sum(worst_bm < 0.9)),
+            }
+        )
     pd.DataFrame([summary]).to_csv(outdir / "camp_summary.csv", index=False)
 
-    print(f"Written: {outdir/'camp_signatures.csv'}, "
-          f"{outdir/'camp_summary.csv'}")
+    print(f"Written: {outdir / 'camp_signatures.csv'}, {outdir / 'camp_summary.csv'}")
 
 
 if __name__ == "__main__":

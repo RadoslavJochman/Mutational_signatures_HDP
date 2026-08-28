@@ -174,4 +174,6 @@ class DirichletProcess(Measure):
             An integer in [0, dimensions).
         """
         theta = self.sample()
-        return int(np.argmax(multinomial.rvs(1, theta, random_state=self.seed_generator)))
+        return int(
+            np.argmax(multinomial.rvs(1, theta, random_state=self.seed_generator))
+        )

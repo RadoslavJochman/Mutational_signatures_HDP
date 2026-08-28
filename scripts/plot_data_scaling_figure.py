@@ -18,12 +18,14 @@ Usage
     python scripts/plot_data_scaling_figure.py \\
         --scaling-csv ../results/scaling_results.csv --outdir ../plots
 """
+
 import argparse
 import sys
 from pathlib import Path
 
-import pandas as pd
 import matplotlib
+import pandas as pd
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -33,8 +35,11 @@ import src.plotting.figure_style as fs
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scaling-csv", default="../results/scaling_results.csv",
-                    help="scaling_results.csv written by scaling_metrics.py")
+    ap.add_argument(
+        "--scaling-csv",
+        default="../results/scaling_results.csv",
+        help="scaling_results.csv written by scaling_metrics.py",
+    )
     ap.add_argument("--outdir", default="../plots/")
     ap.add_argument("--name", default="scaling", help="output figure basename")
     a = ap.parse_args()

@@ -48,20 +48,22 @@ DeNovoHDP
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
 import sys
+from abc import ABC, abstractmethod
+from fractions import Fraction
 from pathlib import Path
+from typing import Dict, Optional, Tuple
+
 import networkx as nx
 import numpy as np
 import pandas as pd
 import phylox
 import pymc as pm
 import pytensor.tensor as pt
-from fractions import Fraction
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import get_prior
+
 
 class _BaseTreeHDP(ABC):
     """
@@ -126,7 +128,9 @@ class _BaseTreeHDP(ABC):
         nodes_by_depth: Dict[int, list] = {}
 
         for root in roots:
-            for node, depth in nx.single_source_shortest_path_length(self.graph, root).items():
+            for node, depth in nx.single_source_shortest_path_length(
+                self.graph, root
+            ).items():
                 if node not in seen:
                     seen[node] = depth
                     nodes_by_depth.setdefault(depth, []).append(node)
@@ -178,15 +182,15 @@ class _BaseTreeHDP(ABC):
         return self.get_node_activity_posterior(node_id).mean(axis=(0, 1))
 
     def sample(
-            self,
-            draws: int = 1000,
-            tune: int = 1000,
-            chains: int = 4,
-            cores: int = 4,
-            target_accept: float = 0.95,
-            max_treedepth: int = 10,
-            initvals=None,
-            init: str = "auto",
+        self,
+        draws: int = 1000,
+        tune: int = 1000,
+        chains: int = 4,
+        cores: int = 4,
+        target_accept: float = 0.95,
+        max_treedepth: int = 10,
+        initvals=None,
+        init: str = "auto",
     ):
         """
         Run the NUTS sampler.
@@ -221,6 +225,7 @@ class _BaseTreeHDP(ABC):
                 init=init,
             )
         return self.trace
+
 
 class FixedSigHDP(_BaseTreeHDP):
     """
@@ -308,7 +313,7 @@ class FixedSigHDP(_BaseTreeHDP):
 
     def _build_pymc_model(self) -> None:
         """Build the fixed-signature PyMC model (structure in the class docstring)."""
-        Km1 = self.K - 1                       # free logit dimensions
+        Km1 = self.K - 1  # free logit dimensions
         sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
 
         nodes_by_depth = self._get_nodes_by_depth()
@@ -333,7 +338,8 @@ class FixedSigHDP(_BaseTreeHDP):
 
                 parent_nodes = [
                     list(self.graph.predecessors(n))[0]
-                    if list(self.graph.predecessors(n)) else None
+                    if list(self.graph.predecessors(n))
+                    else None
                     for n in current_nodes
                 ]
 
@@ -341,18 +347,20 @@ class FixedSigHDP(_BaseTreeHDP):
                     # Root level: eta_root ~ Normal(0, sigma_0^2), centered.
                     eta_name = f"eta_level_{depth}"
                     eta_level = pm.Normal(
-                        eta_name, mu=0.0, sigma=sigma_0,
+                        eta_name,
+                        mu=0.0,
+                        sigma=sigma_0,
                         shape=(n_cur, Km1),
                     )
                 else:
                     # Non-root: non-centered walk
                     #   eta_j = eta_parent + sigma * z_j,  z_j ~ N(0,1)
-                    parent_eta_stack = pt.stack(
-                        [node_etas[p] for p in parent_nodes]
-                    )
+                    parent_eta_stack = pt.stack([node_etas[p] for p in parent_nodes])
                     z_name = f"z_level_{depth}"
                     z_level = pm.Normal(
-                        z_name, mu=0.0, sigma=1.0,
+                        z_name,
+                        mu=0.0,
+                        sigma=1.0,
                         shape=(n_cur, Km1),
                     )
                     eta_name = f"eta_level_{depth}"
@@ -362,9 +370,7 @@ class FixedSigHDP(_BaseTreeHDP):
 
                 # map this level's logits to the simplex
                 e_name = f"e_level_{depth}"
-                e_level = pm.Deterministic(
-                    e_name, self._softmax_last_zero(eta_level)
-                )
+                e_level = pm.Deterministic(e_name, self._softmax_last_zero(eta_level))
 
                 for i, node in enumerate(current_nodes):
                     node_etas[node] = eta_level[i]
@@ -392,6 +398,7 @@ class FixedSigHDP(_BaseTreeHDP):
                     p=expected_probs,
                     observed=obs_counts_matrix,
                 )
+
 
 class DeNovoHDP(_BaseTreeHDP):
     """
@@ -458,11 +465,11 @@ class DeNovoHDP(_BaseTreeHDP):
     """
 
     def __init__(
-            self,
-            newick_string: str,
-            data_matrix: pd.DataFrame,
-            num_signatures: int,
-            priors: dict,
+        self,
+        newick_string: str,
+        data_matrix: pd.DataFrame,
+        num_signatures: int,
+        priors: dict,
     ):
         self.K = int(num_signatures)
         self.priors = priors
@@ -512,24 +519,23 @@ class DeNovoHDP(_BaseTreeHDP):
 
                 parent_nodes = [
                     list(self.graph.predecessors(n))[0]
-                    if list(self.graph.predecessors(n)) else None
+                    if list(self.graph.predecessors(n))
+                    else None
                     for n in current_nodes
                 ]
 
                 if parent_nodes[0] is None:
                     eta_name = f"eta_level_{depth}"
-                    z_root = pm.ZeroSumNormal(f"z_root_{depth}", sigma=1.0, shape=(n_cur, self.K))
+                    z_root = pm.ZeroSumNormal(
+                        f"z_root_{depth}", sigma=1.0, shape=(n_cur, self.K)
+                    )
                     eta_level = pm.Deterministic(
                         eta_name, mu_level[None, :] + sigma_0 * z_root
                     )
                 else:
-                    parent_eta_stack = pt.stack(
-                        [node_etas[p] for p in parent_nodes]
-                    )
+                    parent_eta_stack = pt.stack([node_etas[p] for p in parent_nodes])
                     z_name = f"z_level_{depth}"
-                    z_level = pm.ZeroSumNormal(
-                        z_name, sigma=1.0,
-                        shape=(n_cur, self.K))
+                    z_level = pm.ZeroSumNormal(z_name, sigma=1.0, shape=(n_cur, self.K))
                     eta_name = f"eta_level_{depth}"
                     eta_level = pm.Deterministic(
                         eta_name, parent_eta_stack + sigma * z_level

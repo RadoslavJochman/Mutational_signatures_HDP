@@ -67,7 +67,7 @@ from pathlib import Path
 import arviz as az
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr, pearsonr
+from scipy.stats import pearsonr, spearmanr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import (
@@ -75,6 +75,7 @@ from src.analysis.analysis import (
     chain_perms_to_true,
     nodes_by_depth,
 )
+
 
 def _pair_stats(e, a, b):
     """
@@ -89,7 +90,7 @@ def _pair_stats(e, a, b):
     active = float(ea.mean() + eb.mean())
     va, vb = ea.var(), eb.var()
     if va < 1e-12 or vb < 1e-12:
-        return None                              # a stuck/degenerate chain
+        return None  # a stuck/degenerate chain
     corr = float(np.corrcoef(ea, eb)[0, 1])
     diff_v = (ea - eb).var()
     sum_v = (ea + eb).var()
@@ -100,17 +101,31 @@ def _pair_stats(e, a, b):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", required=True)
-    ap.add_argument("--truth", required=True,
-                    help="true_activities.csv (rows=nodes, cols=k0..K-1).")
-    ap.add_argument("--true-sigs", required=True, dest="true_sigs",
-                    help="fixed_signatures.csv (rows=k, cols=96).")
+    ap.add_argument(
+        "--truth", required=True, help="true_activities.csv (rows=nodes, cols=k0..K-1)."
+    )
+    ap.add_argument(
+        "--true-sigs",
+        required=True,
+        dest="true_sigs",
+        help="fixed_signatures.csv (rows=k, cols=96).",
+    )
     ap.add_argument("--newick", required=True)
-    ap.add_argument("--pair", type=int, nargs=2, default=None,
-                    help="Override focus pair (true indices). Default: the "
-                         "most cosine-similar true signature pair.")
-    ap.add_argument("--active-threshold", type=float, default=0.05,
-                    help="Min mean(e_a)+mean(e_b) for a node to count: the "
-                         "pair must actually be present to trade off.")
+    ap.add_argument(
+        "--pair",
+        type=int,
+        nargs=2,
+        default=None,
+        help="Override focus pair (true indices). Default: the "
+        "most cosine-similar true signature pair.",
+    )
+    ap.add_argument(
+        "--active-threshold",
+        type=float,
+        default=0.05,
+        help="Min mean(e_a)+mean(e_b) for a node to count: the "
+        "pair must actually be present to trade off.",
+    )
     ap.add_argument("--outdir", default="pair_tradeoff")
     args = ap.parse_args()
 
@@ -151,13 +166,12 @@ def main():
             if label is None or label not in truth.index:
                 continue
 
-            e_by_chain = [arr[c, :, node_row, :][:, perms[c]]
-                          for c in range(n_chains)]
+            e_by_chain = [arr[c, :, node_row, :][:, perms[c]] for c in range(n_chains)]
 
             chain_means = np.stack([e.mean(axis=0) for e in e_by_chain])
-            spread = float(np.abs(
-                chain_means - chain_means.mean(0, keepdims=True)
-            ).sum(1).mean())
+            spread = float(
+                np.abs(chain_means - chain_means.mean(0, keepdims=True)).sum(1).mean()
+            )
 
             node_pc = {}
             for p in all_pairs:
@@ -183,14 +197,16 @@ def main():
             anti = {p: max(0.0, -node_pc[p][0]) for p in node_pc}
             plain_load = float(np.mean(list(anti.values())))
             geom_load = float(np.mean([pair_cos[p] * anti[p] for p in anti]))
-            node_rows.append({
-                "node": label,
-                "focus_corr": node_pc.get(focus, (np.nan,))[0],
-                "plain_load": plain_load,
-                "geom_load": geom_load,
-                "n_active_pairs": len(node_pc),
-                "chain_mean_spread": spread,
-            })
+            node_rows.append(
+                {
+                    "node": label,
+                    "focus_corr": node_pc.get(focus, (np.nan,))[0],
+                    "plain_load": plain_load,
+                    "geom_load": geom_load,
+                    "n_active_pairs": len(node_pc),
+                    "chain_mean_spread": spread,
+                }
+            )
 
     node_df = pd.DataFrame(node_rows)
     node_df.to_csv(outdir / "pair_tradeoff_by_node.csv", index=False)
@@ -199,13 +215,15 @@ def main():
     for p in all_pairs:
         if not pair_nodecorr[p]:
             continue
-        summ.append({
-            "pair": f"{p[0]}-{p[1]}",
-            "cosine": pair_cos[p],
-            "median_corr": float(np.median(pair_nodecorr[p])),
-            "median_tradeoff_ratio": float(np.median(pair_noderatio[p])),
-            "n_nodes": len(pair_nodecorr[p]),
-        })
+        summ.append(
+            {
+                "pair": f"{p[0]}-{p[1]}",
+                "cosine": pair_cos[p],
+                "median_corr": float(np.median(pair_nodecorr[p])),
+                "median_tradeoff_ratio": float(np.median(pair_noderatio[p])),
+                "n_nodes": len(pair_nodecorr[p]),
+            }
+        )
     summ_df = pd.DataFrame(summ).sort_values("cosine", ascending=False)
     summ_df.to_csv(outdir / "pair_summary.csv", index=False)
 
@@ -220,21 +238,24 @@ def main():
     n_pairs = len(summ_df)
 
     top_cos = summ_df.iloc[0]
-    rank_anti = int(summ_df["median_corr"].rank(ascending=True)[
-        summ_df["pair"] == top_cos["pair"]].iloc[0])
+    rank_anti = int(
+        summ_df["median_corr"]
+        .rank(ascending=True)[summ_df["pair"] == top_cos["pair"]]
+        .iloc[0]
+    )
     most_anti = summ_df.sort_values("median_corr").iloc[0]
 
     def _link(col):
         if len(node_df) <= 5:
             return np.nan, np.nan
         return spearmanr(node_df[col], node_df["chain_mean_spread"])
+
     plain_rho, plain_p = _link("plain_load")
     geom_rho, geom_p = _link("geom_load")
     flink_rho, flink_p = np.nan, np.nan
     fd = node_df.dropna(subset=["focus_corr"])
     if len(fd) > 5:
-        flink_rho, flink_p = spearmanr(-fd["focus_corr"],
-                                       fd["chain_mean_spread"])
+        flink_rho, flink_p = spearmanr(-fd["focus_corr"], fd["chain_mean_spread"])
 
     metrics = {
         "n_chains": n_chains,
@@ -263,8 +284,10 @@ def main():
     }
     pd.DataFrame([metrics]).to_csv(outdir / "pair_metrics.csv", index=False)
 
-    print(f"Written: {outdir/'pair_metrics.csv'}, "
-          f"{outdir/'pair_summary.csv'}, {outdir/'pair_tradeoff_by_node.csv'}")
+    print(
+        f"Written: {outdir / 'pair_metrics.csv'}, "
+        f"{outdir / 'pair_summary.csv'}, {outdir / 'pair_tradeoff_by_node.csv'}"
+    )
 
 
 if __name__ == "__main__":

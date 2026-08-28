@@ -40,15 +40,21 @@ Usage:
         --traces 0.1=PATH 0.3=PATH 0.5=PATH 0.7=PATH 0.9=PATH \
         [--sigma-0 1.0] [--var-name sigma] [--out sigma_summary.csv]
 """
+
 import argparse
+
 import numpy as np
 import pandas as pd
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--traces", nargs="+", required=True,
-                    help="CORR=PATH tokens, e.g. 0.3=results/run/trace_aligned.nc")
+    ap.add_argument(
+        "--traces",
+        nargs="+",
+        required=True,
+        help="CORR=PATH tokens, e.g. 0.3=results/run/trace_aligned.nc",
+    )
     ap.add_argument("--sigma-0", type=float, default=1.0)
     ap.add_argument("--var-name", default="sigma")
     ap.add_argument("--out", default="sigma_summary.csv")
@@ -68,33 +74,49 @@ def main():
             continue
         post = idata.posterior
         if args.var_name not in post.data_vars:
-            print(f"[{corr}] no '{args.var_name}' in posterior "
-                  f"(have: {list(post.data_vars)[:8]} ...)")
+            print(
+                f"[{corr}] no '{args.var_name}' in posterior "
+                f"(have: {list(post.data_vars)[:8]} ...)"
+            )
             continue
         s = np.asarray(post[args.var_name].values).ravel()
         mean, sd = float(s.mean()), float(s.std())
         lo, hi = (float(v) for v in np.percentile(s, [3, 97]))
         try:
-            ess = az.ess(idata, var_names=[args.var_name])[
-                args.var_name].values.item()
+            ess = az.ess(idata, var_names=[args.var_name])[args.var_name].values.item()
             rhat = az.rhat(idata, var_names=[args.var_name])[
-                args.var_name].values.item()
+                args.var_name
+            ].values.item()
         except Exception:
             ess, rhat = float("nan"), float("nan")
-        depths = sorted(int(v.split("_")[-1]) for v in post.data_vars
-                        if v.startswith("e_level"))
+        depths = sorted(
+            int(v.split("_")[-1]) for v in post.data_vars if v.startswith("e_level")
+        )
         D = max(depths) if depths else 0
-        deep_std = float(np.sqrt(args.sigma_0 ** 2 + D * mean ** 2))
-        rows.append((corr, mean, sd, lo, hi, ess, rhat, D,
-                     deep_std, float(np.exp(mean))))
+        deep_std = float(np.sqrt(args.sigma_0**2 + D * mean**2))
+        rows.append(
+            (corr, mean, sd, lo, hi, ess, rhat, D, deep_std, float(np.exp(mean)))
+        )
 
     if not rows:
         print("No sigma summaries produced.")
         return
 
-    df = pd.DataFrame(rows, columns=[
-        "label", "sigma_mean", "sigma_sd", "sigma_p3", "sigma_p97",
-        "ess", "rhat", "max_depth", "deep_std", "odds_per_branch"])
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "label",
+            "sigma_mean",
+            "sigma_sd",
+            "sigma_p3",
+            "sigma_p97",
+            "ess",
+            "rhat",
+            "max_depth",
+            "deep_std",
+            "odds_per_branch",
+        ],
+    )
     df.to_csv(args.out, index=False)
     print(df.to_string(index=False))
     print(f"\nWritten: {args.out}")

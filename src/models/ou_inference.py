@@ -89,16 +89,15 @@ branch_length_scaling : bool, default False
 
 from __future__ import annotations
 
-from typing import Dict, Optional
 import sys
+from fractions import Fraction
 from pathlib import Path
+from typing import Dict
 
-import networkx as nx
 import numpy as np
 import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
-from fractions import Fraction
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import get_prior
@@ -110,12 +109,12 @@ class TreeOUHDP(_BaseTreeHDP):
     prior. See module docstring for the model and the regression check."""
 
     def __init__(
-            self,
-            newick_string: str,
-            data_matrix: pd.DataFrame,
-            num_signatures: int,
-            priors: dict,
-            branch_length_scaling: bool = False,
+        self,
+        newick_string: str,
+        data_matrix: pd.DataFrame,
+        num_signatures: int,
+        priors: dict,
+        branch_length_scaling: bool = False,
     ):
         self.K = int(num_signatures)
         self.priors = priors
@@ -150,8 +149,9 @@ class TreeOUHDP(_BaseTreeHDP):
 
         # mean edge length, used only to normalise weights when scaling is on
         if self.branch_length_scaling:
-            lengths = [float(d.get("length", 1.0))
-                       for _, _, d in self.graph.edges(data=True)]
+            lengths = [
+                float(d.get("length", 1.0)) for _, _, d in self.graph.edges(data=True)
+            ]
             self._mean_edge_length = float(np.mean(lengths)) if lengths else 1.0
         else:
             self._mean_edge_length = 1.0
@@ -162,7 +162,9 @@ class TreeOUHDP(_BaseTreeHDP):
         with pm.Model() as self.model:
             # Signature block, identical to DeNovoHDP.
             signatures = pm.Dirichlet(
-                "signatures", a=beta * np.ones(C), shape=(self.K, C),
+                "signatures",
+                a=beta * np.ones(C),
+                shape=(self.K, C),
             )
 
             # Diffusion scale (same role and prior as the v1 walk scale).
@@ -178,14 +180,14 @@ class TreeOUHDP(_BaseTreeHDP):
             # Per-unit-weight persistence phi in (0, 1); theta = -log(phi).
             if "phi_fixed" in self.priors:
                 phi = pt.as_tensor_variable(
-                    float(Fraction(str(self.priors["phi_fixed"]))))
+                    float(Fraction(str(self.priors["phi_fixed"])))
+                )
             elif "phi_prior" in self.priors:
                 phi = get_prior(self.priors, "phi_prior", dim=1)(name="phi")
             else:
                 phi = pm.Beta("phi", alpha=5.0, beta=2.0)
             # clip keeps theta finite and positive at the phi -> 1 edge
-            theta = pm.Deterministic(
-                "theta", -pt.log(pt.clip(phi, 1e-6, 1.0 - 1e-7)))
+            theta = pm.Deterministic("theta", -pt.log(pt.clip(phi, 1e-6, 1.0 - 1e-7)))
 
             node_etas: Dict[str, pt.TensorVariable] = {}
             node_es: Dict[str, pt.TensorVariable] = {}
@@ -198,34 +200,36 @@ class TreeOUHDP(_BaseTreeHDP):
 
                 parent_nodes = [
                     list(self.graph.predecessors(n))[0]
-                    if list(self.graph.predecessors(n)) else None
+                    if list(self.graph.predecessors(n))
+                    else None
                     for n in current_nodes
                 ]
 
                 if parent_nodes[0] is None:
                     # Root: eta_root = mu + sigma_0 * z_root (non-centred).
                     z_name = f"z_level_{depth}"
-                    z_level = pm.Normal(
-                        z_name, mu=0.0, sigma=1.0, shape=(n_cur, Km1))
+                    z_level = pm.Normal(z_name, mu=0.0, sigma=1.0, shape=(n_cur, Km1))
                     eta_name = f"eta_level_{depth}"
                     eta_level = pm.Deterministic(
-                        eta_name, mu[None, :] + sigma_0 * z_level)
+                        eta_name, mu[None, :] + sigma_0 * z_level
+                    )
                 else:
                     # OU step toward mu, non-centred.
                     #   phi_j = phi ** w_j,   s_j = sigma sqrt((1-phi_j^2)/(2 theta))
-                    parent_eta_stack = pt.stack(
-                        [node_etas[p] for p in parent_nodes])
+                    parent_eta_stack = pt.stack([node_etas[p] for p in parent_nodes])
                     w = np.array(
-                        [self._edge_weight(p, n)
-                         for p, n in zip(parent_nodes, current_nodes)],
-                        dtype=float)
-                    phi_j = phi ** pt.as_tensor_variable(w)          # (n_cur,)
-                    inc_var = sigma ** 2 * (1.0 - phi_j ** 2) / (2.0 * theta)
-                    s_j = pt.sqrt(inc_var)                           # (n_cur,)
+                        [
+                            self._edge_weight(p, n)
+                            for p, n in zip(parent_nodes, current_nodes)
+                        ],
+                        dtype=float,
+                    )
+                    phi_j = phi ** pt.as_tensor_variable(w)  # (n_cur,)
+                    inc_var = sigma**2 * (1.0 - phi_j**2) / (2.0 * theta)
+                    s_j = pt.sqrt(inc_var)  # (n_cur,)
 
                     z_name = f"z_level_{depth}"
-                    z_level = pm.Normal(
-                        z_name, mu=0.0, sigma=1.0, shape=(n_cur, Km1))
+                    z_level = pm.Normal(z_name, mu=0.0, sigma=1.0, shape=(n_cur, Km1))
                     eta_name = f"eta_level_{depth}"
                     eta_level = pm.Deterministic(
                         eta_name,
@@ -235,8 +239,7 @@ class TreeOUHDP(_BaseTreeHDP):
                     )
 
                 e_name = f"e_level_{depth}"
-                e_level = pm.Deterministic(
-                    e_name, self._softmax_last_zero(eta_level))
+                e_level = pm.Deterministic(e_name, self._softmax_last_zero(eta_level))
 
                 for i, node in enumerate(current_nodes):
                     node_etas[node] = eta_level[i]
@@ -260,7 +263,8 @@ class TreeOUHDP(_BaseTreeHDP):
                 expected_probs = pt.dot(e_matrix, signatures)
                 pm.Multinomial(
                     "observations",
-                    n=n_mutations, p=expected_probs,
+                    n=n_mutations,
+                    p=expected_probs,
                     observed=obs_counts_matrix,
                 )
 

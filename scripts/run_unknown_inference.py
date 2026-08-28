@@ -55,7 +55,6 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -63,12 +62,14 @@ import arviz as az
 import numpy as np
 import pandas as pd
 import pymc as pm
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.analysis.analysis import align
 from src.config import load_config, make_output_dir
 from src.models.hdp_inference import DeNovoHDP
 from src.models.ou_inference import TreeOUHDP
-from src.analysis.analysis import align
+
 
 def align_trace(trace, activity_var_prefix: str = "e_level"):
     """
@@ -121,12 +122,14 @@ def align_trace(trace, activity_var_prefix: str = "e_level"):
     aligned.posterior["signatures"] = sig_da
 
     if "mu_level" in post.data_vars:
-        mu = post["mu_level"].values                 # (chains, draws, K)
+        mu = post["mu_level"].values  # (chains, draws, K)
         mu_aligned = np.empty_like(mu)
         for c in range(n_chains):
             for d in range(n_draws):
                 mu_aligned[c, d] = mu[c, d][perms[c, d]]
-        aligned.posterior["mu_level"] = aligned.posterior["mu_level"].copy(data=mu_aligned)
+        aligned.posterior["mu_level"] = aligned.posterior["mu_level"].copy(
+            data=mu_aligned
+        )
 
     for var in list(post.data_vars):
         if not var.startswith(activity_var_prefix):
@@ -173,6 +176,7 @@ def switching_table(perms: np.ndarray) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
 
 def build_model(inf_cfg: dict, newick_string: str, count_matrix, num_signatures: int):
     """
@@ -246,12 +250,15 @@ def run_denovo(cfg: dict) -> None:
     initvals, init_scheme = None, "auto"
     if str(inf_cfg.get("init", "")).lower() == "nmf":
         if model_label != "DeNovoHDP":
-            raise ValueError("init: nmf is only supported for model: denovo "
-                             "(random walk); the OU walk backs out differently.")
+            raise ValueError(
+                "init: nmf is only supported for model: denovo "
+                "(random walk); the OU walk backs out differently."
+            )
         from src.models.nmf_init import denovo_nmf_initvals
+
         initvals = denovo_nmf_initvals(
-            model, count_matrix,
-            sigma_init=float(inf_cfg.get("init_sigma", 0.6)))
+            model, count_matrix, sigma_init=float(inf_cfg.get("init_sigma", 0.6))
+        )
         init_scheme = "adapt_diag"
         print("Using shared NMF initialisation (all chains, init=adapt_diag).")
 
