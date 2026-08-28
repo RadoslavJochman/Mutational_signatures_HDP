@@ -77,7 +77,8 @@ def make_output_dir(
 
 def get_prior(config: dict, prior_name: str, dim: int = None):
     """
-    Retrieves and instantiates a PyMC prior distribution based on a configuration dictionary.
+    Retrieves and instantiates a PyMC prior distribution based on a configuration
+    dictionary.
 
     Args:
         config (dict): A configuration dictionary containing the distribution name

@@ -188,7 +188,9 @@ def run_generation(cfg: dict) -> None:
                 save_path=os.path.join(plot_dir, "heatmap_mutation_counts.pdf"),
             )
             for prefix in [f"T{i}_" for i in range(1, 4)]:
-                label = next((l for l in true_activities if l.startswith(prefix)), None)
+                label = next(
+                    (lbl for lbl in true_activities if lbl.startswith(prefix)), None
+                )
                 if label:
                     plot_node_signatures(
                         activities=true_activities[label],

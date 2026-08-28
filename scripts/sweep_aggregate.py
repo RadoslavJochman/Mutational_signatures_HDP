@@ -210,10 +210,9 @@ def trace_metrics(trace_path, true_S, divergence_threshold):
         ]
         chain_act = per_chain_activity(e_al)
         _camps = detect_camps(chain_act)
-        campA, campB, kstar, sep = (
+        campA, campB, sep = (
             _camps["campA"],
             _camps["campB"],
-            _camps["kstar"],
             _camps["separation"],
         )
         out.update(

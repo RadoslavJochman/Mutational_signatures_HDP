@@ -76,8 +76,8 @@ def _convergence_vars(post, activity_var, conv_vars):
 
 
 def _aligned_activities(post, prefix, newick, truth):
-    """Posterior-mean per-node activities aligned to truth. e_level_<depth> row r is the node at
-    (depth, r) from nodes_by_depth(forest), matched to truth by label."""
+    """Posterior-mean per-node activities aligned to truth. e_level_<depth> row r is
+    the node at (depth, r) from nodes_by_depth(forest), matched to truth by label."""
     dr = nodes_by_depth(build_forest(newick))  # (depth, pos) -> label
     labels, A = [], []
     for ev in _level_vars(post, prefix):

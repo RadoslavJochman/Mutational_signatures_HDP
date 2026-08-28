@@ -1,0 +1,27 @@
+# Tooling configuration for Mutational_signatures_HDP.
+# Runtime dependencies are pinned in requirements.txt; dev tools in requirements-dev.txt.
+# This file intentionally has no [project] table: the repo is run from a venv, not installed.
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+# E: pycodestyle, F: pyflakes, I: import sorting. Kept deliberately light so it does
+# not fight numerical code; widen the rule set later if it proves useful.
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Diagnostic/investigation scripts (see CLAUDE.md "Diagnostic scripts" section) are
+# frozen record of a mixing-geometry investigation, not part of the pipeline. Do not
+# fix style in them; ignore rather than edit.
+"scripts/camp_*.py" = ["E501", "E731", "E741"]
+"scripts/diagnose_*.py" = ["E501", "E731", "E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]          # so `from src.analysis.analysis import ...` resolves in tests
+addopts = "-ra --strict-markers -m 'not slow'"
+markers = [
+    "slow: statistical or MCMC tests that sample; excluded from the default run",
+]

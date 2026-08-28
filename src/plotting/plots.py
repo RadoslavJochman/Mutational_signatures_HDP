@@ -14,7 +14,8 @@ Sections
 Signature plots
     plot_signature_bar        – bar chart of a single signature over 96 channels
     plot_node_signatures      – activities + top-N signatures for one node
-    plot_node_signatures_from_model  – same, but reads activities and signatures from a model
+    plot_node_signatures_from_model  – same, but reads activities and signatures
+        from a model
 
 Data / cohort plots
     plot_patient_counts       – clustered heatmap of (normalised) mutation profiles
@@ -554,7 +555,7 @@ def plot_activity_heatmap(
     vmax = max(true_mat.max(), inf_mat.max())
     kw = dict(vmin=0, vmax=vmax, cmap="YlOrRd", aspect="auto")
 
-    im0 = axes[0].imshow(true_mat, **kw)
+    axes[0].imshow(true_mat, **kw)
     im1 = axes[1].imshow(inf_mat, **kw)
 
     for ax, title, mat in zip(
@@ -719,7 +720,8 @@ def plot_signature_cosine_heatmap(
     ax.set_xlabel("Inferred signature index")
     ax.set_ylabel("True signature index")
     ax.set_title(
-        "Cosine similarity: True vs Inferred signatures\n(red boxes = Hungarian assignment)"
+        "Cosine similarity: True vs Inferred signatures\n"
+        "(red boxes = Hungarian assignment)"
     )
     plt.colorbar(im, ax=ax, label="Cosine similarity")
     fig.tight_layout()
