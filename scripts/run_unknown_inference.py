@@ -11,11 +11,8 @@ Purpose
 
 Model selection
     The config key inference.model selects the activity prior: 'denovo'
-    (default) for the random-walk model DeNovoHDP, or 'ou' for the
-    Ornstein-Uhlenbeck model TreeOUHDP (which also reads
-    inference.branch_length_scaling). Both share the signature block and
-    likelihood, so the alignment and summary below are identical; the OU model
-    only adds the global hyperparameters mu, phi, and theta.
+    (default, and currently the only supported value) for the random-walk
+    model DeNovoHDP.
 
 Why alignment is needed
     Convergence statistics (r_hat, ess) computed on the raw trace are not
@@ -45,10 +42,7 @@ Interpretation hint
     above one, or a non zero switched_fraction, indicates within chain
     switching and a multimodal posterior. Judge convergence on the aligned
     variables (signatures, e_level_*) only; eta_level_* and z_level_* are not
-    aligned, so their r_hat is not informative. For the OU model, sigma, phi
-    and theta are label-invariant scalars and their r_hat / ess are
-    meaningful as is; mu shares the signature labelling and is not aligned,
-    so treat its per-component summary like eta_level_*.
+    aligned, so their r_hat is not informative.
 
 Usage:
     python scripts/run_unknown_inference.py --config configs/<experiment>.yaml
@@ -68,7 +62,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import align
 from src.config import load_config, make_output_dir
 from src.models.hdp_inference import DeNovoHDP
-from src.models.ou_inference import TreeOUHDP
 
 
 def align_trace(trace, activity_var_prefix: str = "e_level"):
@@ -180,14 +173,10 @@ def switching_table(perms: np.ndarray) -> pd.DataFrame:
 
 def build_model(inf_cfg: dict, newick_string: str, count_matrix, num_signatures: int):
     """
-    Instantiate the inference model named by inf_cfg['model'] (default
-    'denovo'). Both variants share the signature block, the softmax anchor,
-    and the likelihood, so the alignment and summary that follow are identical.
+    Instantiate the inference model named by inf_cfg['model'] (default,
+    and currently only, 'denovo').
 
       'denovo' / 'denovo-v1' / 'rw'  -> DeNovoHDP, random-walk activity prior
-      'ou' / 'denovo-v2'             -> TreeOUHDP, Ornstein-Uhlenbeck prior
-                                        (reads inf_cfg['branch_length_scaling'],
-                                        default False)
 
     Returns
     -------
@@ -201,18 +190,7 @@ def build_model(inf_cfg: dict, newick_string: str, count_matrix, num_signatures:
             num_signatures=num_signatures,
             priors=inf_cfg["priors"],
         ), "DeNovoHDP"
-    if name in ("ou", "denovo-v2", "tree-ou"):
-        return TreeOUHDP(
-            newick_string=newick_string,
-            data_matrix=count_matrix,
-            num_signatures=num_signatures,
-            priors=inf_cfg["priors"],
-            branch_length_scaling=bool(inf_cfg.get("branch_length_scaling", False)),
-        ), "TreeOUHDP"
-    raise ValueError(
-        f"Unknown model '{name}'. Use 'denovo' (random walk) or 'ou' "
-        f"(Ornstein-Uhlenbeck)."
-    )
+    raise ValueError(f"Unknown model '{name}'. Use 'denovo' (random walk).")
 
 
 def run_denovo(cfg: dict) -> None:
