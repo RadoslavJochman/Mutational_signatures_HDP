@@ -8,7 +8,7 @@
 # across-dataset error bars.
 #
 # Layout assumed (paths are anchored to the project root, not to the cwd):
-#     <root>/scripts/        generate_data.py, run_*_inference.py, scoring
+#     <root>/scripts/        generate_data.py, run_inference.py, scoring
 #     <root>/configs/        the replicate configs and manifests
 #     <root>/data <root>/results
 #     <root>/slurm_scripts/  this file; submit from here
@@ -68,8 +68,20 @@ cd "$SCRIPTS"   # so the configs' ../data and ../results resolve here
 echo "task $SLURM_ARRAY_TASK_ID  mode=$MODE  root=$ROOT"
 echo "config=$CONFIG"
 
-RUNNER=run_unknown_inference.py
-[ "$MODE" = fixed ] && RUNNER=run_inference.py
+# Stamp the requested mode into a per-task scratch copy of the config, so
+# run_inference.py's required inference.model is set without mutating the
+# checked-in config (the manifest's config may be reused or read by other
+# tooling). generate_data.py keeps reading the original $CONFIG; it never
+# looks at inference.model.
+INF_CONFIG=$(mktemp --suffix=.yaml)
+trap 'rm -f "$INF_CONFIG"' EXIT
+python - "$CONFIG" "$MODE" "$INF_CONFIG" <<'PY'
+import sys, yaml
+cfg_path, mode, out_path = sys.argv[1:4]
+cfg = yaml.safe_load(open(cfg_path))
+cfg["inference"]["model"] = mode
+yaml.safe_dump(cfg, open(out_path, "w"), sort_keys=False)
+PY
 
 # resolve data (generation) and results (inference) dirs from the config
 read DATA RES < <(python - "$CONFIG" <<'PY'
@@ -84,12 +96,15 @@ echo "DATA=$DATA  RES=$RES  (resolved from $SCRIPTS)"
 
 # generate -> infer -> score
 python generate_data.py --config "$CONFIG"
-python "$RUNNER"        --config "$CONFIG"
+python run_inference.py --config "$INF_CONFIG"
+
+TRACE_FILE=trace_raw.nc
+[ "$MODE" = fixed ] && TRACE_FILE=trace.nc
 
 SIGFLAG=""
 [ "$MODE" = denovo ] && SIGFLAG="--true-signatures $DATA/fixed_signatures.csv"
 python recovery_vs_truth.py \
-    --trace "$RES/trace_raw.nc" \
+    --trace "$RES/$TRACE_FILE" \
     --true-activities "$DATA/true_activities.csv" \
     --newick "$DATA/newick_string.nwk" \
     $SIGFLAG \
@@ -110,7 +125,7 @@ fi
 SCRATCH_DIR=${3:-${TRACE_SCRATCH:-${SCRATCH:-/cluster/scratch/$(id -un)}/treehdp_traces}}
 TRACE_DEST="$SCRATCH_DIR/$(basename "$RES")"
 mkdir -p "$TRACE_DEST"
-for t in trace_raw.nc trace_aligned.nc trace_raw.zarr; do
+for t in trace.nc trace_raw.nc trace_aligned.nc trace_raw.zarr trace_aligned.zarr; do
     if [ -e "$RES/$t" ]; then
         mv "$RES/$t" "$TRACE_DEST/"
         echo "moved $t -> $TRACE_DEST/"
