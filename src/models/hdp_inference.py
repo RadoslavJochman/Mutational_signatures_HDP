@@ -13,37 +13,22 @@ _BaseTreeHDP
 
     Concrete subclasses only need to implement `_build_pymc_model`.
 
-FixedSigHDP
-    Infers per-node signature *activities* while treating signatures as
-    known.
+TreeHDP
+    Infers per-node signature activities under a shared ILR (sum-zero)
+    random walk, with the signature matrix S either fixed (known
+    signatures) or latent (S inferred jointly, de novo). See the class
+    docstring for the model structure.
 
-    model_structure: fixed-sig-v2
-
-    The activity walk is a logistic-normal random walk in unconstrained
-    space:
-        eta_j ~ Normal(eta_parent, sigma^2)   (non-centered)
-        e_j   = softmax(eta_j)
-    This replaces the v1 Dirichlet walk e_j ~ Dir(alpha * e_parent), whose
-    simplex-corner geometry forced an `eps` pseudo-count.  The logistic-
-    normal walk samples cleanly with no eps.  The concentration parameter
-    alpha is replaced by a Gaussian step scale sigma; the last component
-    of eta is pinned to 0 at every node as the softmax identifiability
-    anchor.
-
-    The earlier Dirichlet-walk model (fixed-sig-v1) is preserved in the
-    git history under the tag `fixed-sig-v1`.
-
-DeNovoHDP
-    Infers per-node activities *and* the signature matrix jointly, with the
-    signatures latent.
-
-    model_structure: denovo-v1-ilr
-
-    The activity walk uses a symmetric sum-zero (ILR) parameterisation
-    instead of the anchored softmax, and adds a forest-pooled per-signature
-    usage level `mu_level`.  Both were needed to stop the chains splitting
-    into clusters on the harder de novo problem (see the class docstring).
-    Signatures carry a Dirichlet prior S_k ~ Dir(beta * 1_96).
+    This unifies the former FixedSigHDP and DeNovoHDP classes, which
+    differed only in how S entered the likelihood and, incidentally, in
+    the walk parameterisation (FixedSigHDP used an anchored softmax with
+    the last logit pinned to 0; DeNovoHDP used the sum-zero ILR walk with
+    a pooled usage level, needed to stop chains splitting into clusters on
+    the harder de novo problem). Both now share the ILR walk; the fixed
+    case is that walk with S clamped to a constant instead of drawn. The
+    earlier anchored-softmax fixed-sig model and the pre-ILR de novo model
+    are preserved in the git history under the tags `fixed-sig-v2` and
+    `denovo-v1` respectively.
 """
 
 from __future__ import annotations
@@ -227,232 +212,58 @@ class _BaseTreeHDP(ABC):
         return self.trace
 
 
-class FixedSigHDP(_BaseTreeHDP):
+class TreeHDP(_BaseTreeHDP):
     """
-    Tree-HDP inference model with fixed signatures and a logistic-normal
-    activity walk.
+    Tree-HDP inference model with a shared ILR (sum-zero) activity walk.
+    The signature matrix S is either fixed (known signatures) or latent
+    (inferred jointly, de novo); everything else is the same model.
 
-    model_structure: fixed-sig-v2
+        sigma      ~ prior (config 'sigma_prior')       (walk scale)
+        mu_level   ~ ZeroSumNormal(sigma_mu)             (K,) forest-pooled
+                                                          usage level
+        z_root     ~ ZeroSumNormal(1)                    (n_root, K)
+        eta_root   =  mu_level + sigma_0 * z_root        (each tree root,
+                                                          non-centered)
+        z_j        ~ ZeroSumNormal(1)                    (K,)
+        eta_j      =  eta_parent + sigma * z_j           (non-centered)
+        e_j        =  softmax(eta_j)                     (full K, no
+                                                          pinned coordinate)
+        x_ji       ~ Multinomial(M_j, e_j @ S)
 
-    Reparameterisation of the v1 Dirichlet-walk model (preserved in git
-    under the tag `fixed-sig-v1`).  Instead of the per-node Dirichlet
-    walk e_j ~ Dir(alpha * e_parent), activities follow a Gaussian random
-    walk in unconstrained space and are mapped to the simplex by softmax:
+    S known (fixed signatures)
+        S is a constant, passed in as `fixed_signatures`. Component k
+        already is true signature k: there is no label switching, and
+        posterior means over chains and draws are directly meaningful.
 
-        sigma     ~ Given by the config parameter 'sigma_prior'
-        eta_root  ~ Normal(0, sigma_0^2)        (K-1 free components)
-        eta_j     =  eta_parent + sigma * z_j   (non-centered)
-        z_j       ~ Normal(0, 1)
-        e_j       =  softmax([eta_j, 0])
-        x_ji      ~ Multinomial(M_j, e_j @ signatures)
+    S latent (de novo)
+        S_k ~ Dir(beta * 1_C) for k = 1..K, inferred jointly with the
+        activities. This introduces two non-identifiabilities:
 
-    Why this form
-    -------------
-    The v1 Dirichlet walk has concentration entries near zero (e_parent is
-    itself near the simplex boundary), which places mass at the simplex
-    corners -- geometry NUTS samples badly, and the reason v1 needed the
-    `eps` pseudo-count.  Here the walk happens in unconstrained R^(K-1)
-    with Gaussian increments: no corners, no funnel, no eps.
+        1. Label switching. Signature index k has no fixed meaning: any
+           permutation of the K signatures, with the matching permutation
+           of the activity components, leaves the likelihood unchanged.
+           Posterior means computed by averaging raw draws across chains
+           (or across draws, if a chain switches mid-run) are therefore
+           MEANINGLESS.
+        2. S / e trade-off. Only the product e_j @ S is observed, so a
+           continuum of (S, e) pairs fit nearly equally well. This is
+           broken only by the structure of the priors -- the tree walk on
+           e and the Dirichlet concentration on S.
 
-    Identifiability
-    ---------------
-    softmax is shift-invariant (softmax(x) == softmax(x + c)).  To make the
-    model identified, the last component of eta is pinned to 0 at every
-    node -- the standard reference-category anchor.  eta therefore has K-1
-    free components per node; e_j is still a full K-vector on the simplex.
-
-    Notes
-    -----
-    - `sigma` (Gaussian step scale) replaces v1's `shared_alpha`
-      (Dirichlet concentration).  Small sigma => children resemble parents;
-      large sigma => fast drift.  The two are NOT the same parameter and
-      are not directly comparable.
-    - The recovered `eta_root` / baseline is not directly comparable to
-      v1's Dirichlet `e_0`; the per-node activity vectors e_j (on the
-      simplex) are the quantities to compare across models.
+        This class does not solve either. Chain alignment and scoring
+        against ground-truth signatures are intentionally left to external
+        post-processing: align chains to a common labelling first, THEN
+        compute posterior means or call the activity accessors.
+        `get_posterior_mean` inherited from the base class will silently
+        return a permutation-averaged (wrong) result if called on an
+        un-aligned trace.
 
     Parameters
     ----------
     newick_string : str
         Semicolon-separated Newick trees.
     data_matrix : pd.DataFrame
-        Shape (N_observed, 96).  Index must match node labels.
-    fixed_signatures : np.ndarray
-        Shape (K, 96).
-    priors : dict
-        Prior config dict.  Reads:
-          - 'sigma_prior' / 'sigma_prior_parm'  : prior on the walk scale
-            sigma (e.g. a HalfNormal or LogNormal).
-          - 'sigma_0' (optional, default 1.0)   : std of the root baseline
-            eta_root ~ Normal(0, sigma_0^2).
-    """
-
-    def __init__(
-        self,
-        newick_string: str,
-        data_matrix: pd.DataFrame,
-        fixed_signatures: np.ndarray,
-        priors: dict,
-    ):
-        self.fixed_signatures = fixed_signatures
-        self.K = fixed_signatures.shape[0]
-        self.priors = priors
-        super().__init__(newick_string, data_matrix)
-
-    @staticmethod
-    def _softmax_last_zero(eta_free: pt.TensorVariable) -> pt.TensorVariable:
-        """
-        Map an (..., K-1) array of free logits to an (..., K) simplex point,
-        with the last component pinned to logit 0 (the identifiability
-        anchor).
-        """
-        # pad a column of zeros for the reference category
-        zeros = pt.zeros_like(eta_free[..., :1])
-        eta_full = pt.concatenate([eta_free, zeros], axis=-1)
-        return pt.special.softmax(eta_full, axis=-1)
-
-    def _build_pymc_model(self) -> None:
-        """Build the fixed-signature PyMC model (structure in the class docstring)."""
-        Km1 = self.K - 1  # free logit dimensions
-        sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
-
-        nodes_by_depth = self._get_nodes_by_depth()
-        max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
-
-        with pm.Model() as self.model:
-            signatures = pt.as_tensor_variable(self.fixed_signatures)
-
-            # Global walk-scale parameter (replaces v1's shared_alpha).
-            sigma = get_prior(self.priors, "sigma_prior", dim=1)(name="sigma")
-
-            # node_id -> eta vector (K-1 free logits)
-            node_etas: Dict[str, pt.TensorVariable] = {}
-            # node_id -> e_j vector (K-simplex), for the likelihood
-            node_es: Dict[str, pt.TensorVariable] = {}
-
-            for depth in range(0, max_depth + 1):
-                current_nodes = nodes_by_depth.get(depth, [])
-                if not current_nodes:
-                    continue
-                n_cur = len(current_nodes)
-
-                parent_nodes = [
-                    list(self.graph.predecessors(n))[0]
-                    if list(self.graph.predecessors(n))
-                    else None
-                    for n in current_nodes
-                ]
-
-                if parent_nodes[0] is None:
-                    # Root level: eta_root ~ Normal(0, sigma_0^2), centered.
-                    eta_name = f"eta_level_{depth}"
-                    eta_level = pm.Normal(
-                        eta_name,
-                        mu=0.0,
-                        sigma=sigma_0,
-                        shape=(n_cur, Km1),
-                    )
-                else:
-                    # Non-root: non-centered walk
-                    #   eta_j = eta_parent + sigma * z_j,  z_j ~ N(0,1)
-                    parent_eta_stack = pt.stack([node_etas[p] for p in parent_nodes])
-                    z_name = f"z_level_{depth}"
-                    z_level = pm.Normal(
-                        z_name,
-                        mu=0.0,
-                        sigma=1.0,
-                        shape=(n_cur, Km1),
-                    )
-                    eta_name = f"eta_level_{depth}"
-                    eta_level = pm.Deterministic(
-                        eta_name, parent_eta_stack + sigma * z_level
-                    )
-
-                # map this level's logits to the simplex
-                e_name = f"e_level_{depth}"
-                e_level = pm.Deterministic(e_name, self._softmax_last_zero(eta_level))
-
-                for i, node in enumerate(current_nodes):
-                    node_etas[node] = eta_level[i]
-                    node_es[node] = e_level[i]
-                    self.node_index_map[node] = (e_name, i)
-
-            # Likelihood
-            observed_es, obs_counts = [], []
-            for node in self.graph.nodes():
-                label = self.graph.nodes[node].get("label", str(node))
-                if label in self.data_matrix.index:
-                    counts = self.data_matrix.loc[label].values
-                    if counts.sum() > 0:
-                        observed_es.append(node_es[node])
-                        obs_counts.append(counts)
-
-            if observed_es:
-                obs_counts_matrix = np.array(obs_counts, dtype=np.int32)
-                n_mutations = obs_counts_matrix.sum(axis=1)
-                e_matrix = pt.stack(observed_es)
-                expected_probs = pt.dot(e_matrix, signatures)
-                pm.Multinomial(
-                    "observations",
-                    n=n_mutations,
-                    p=expected_probs,
-                    observed=obs_counts_matrix,
-                )
-
-
-class DeNovoHDP(_BaseTreeHDP):
-    """
-    Tree-HDP inference model with DE NOVO signature discovery.
-
-    model_structure: denovo-v1-ilr
-
-    Unlike FixedSigHDP, the signature matrix S is not supplied - it is a
-    latent variable inferred jointly with the per-node activities.  The
-    activity walk also differs from FixedSigHDP: the anchored softmax is
-    replaced by a symmetric sum-zero (ILR) parameterisation with no pinned
-    coordinate, and a forest-pooled per-signature usage level `mu_level` is
-    added.  Both changes remove a sampling pathology in which the chains
-    settled into several clusters; the anchored-softmax de novo model is
-    preserved in the git history under the tag `denovo-v1`.
-
-        S_k       ~ Dir(beta * 1_96)              for k = 1..K   (signatures)
-        sigma     ~ prior (config 'sigma_prior')  (walk scale)
-        mu_level  ~ ZeroSumNormal(sigma_mu)       (K,) forest-pooled usage level
-        z_root    ~ ZeroSumNormal(1)              (n_root, K)
-        eta_root  =  mu_level + sigma_0 * z_root  (each tree root, non-centered)
-        z_j       ~ ZeroSumNormal(1)              (K,)
-        eta_j     =  eta_parent + sigma * z_j     (non-centered)
-        e_j       =  softmax(eta_j)               (full K, no pinned coordinate)
-        x_ji      ~ Multinomial(M_j, e_j @ S)
-
-    With S latent the model has two non-identifiabilities:
-
-    1. Label switching.  Signature index k has no fixed meaning: any
-       permutation of the K signatures, with the matching permutation of
-       the activity components, leaves the likelihood unchanged.  Posterior
-       means computed by averaging raw draws across chains (or across
-       draws, if a chain switches mid-run) are therefore MEANINGLESS.
-
-    2. S / e trade-off.  Only the product e_j @ S is observed, so a
-       continuum of (S, e) pairs fit nearly equally well.  This is broken
-       only by the structure of the priors -- the tree walk on e and the
-       Dirichlet concentration on S.
-
-    This class does noy solve either.  Chain alignment and scoring against
-    ground-truth signatures are intentionally left to external
-    post-processing: align chains to a common labelling first, THEN compute
-    posterior means or call the activity accessors.  `get_posterior_mean`
-    inherited from the base class will silently return a permutation-
-    averaged (wrong) result if called on an un-aligned trace.
-
-    Parameters
-    ----------
-    newick_string : str
-        Semicolon-separated Newick trees.
-    data_matrix : pd.DataFrame
-        Shape (N_observed, 96).  Index must match node labels.
-    num_signatures : int
-        K, the number of signatures to discover.  Fixed (known-K setting).
+        Shape (N_observed, C).  Index must match node labels.
     priors : dict
         Prior config dict.  Reads:
           - 'sigma_prior' / 'sigma_prior_parm' : prior on the walk scale.
@@ -461,49 +272,74 @@ class DeNovoHDP(_BaseTreeHDP):
           - 'sigma_mu' (optional, default 2.0) : scale of the forest-pooled
             usage level mu_level ~ ZeroSumNormal(sigma_mu).
           - 'beta' (optional, default 0.5)     : Dirichlet concentration
-            for the signature prior S_k ~ Dir(beta * 1_96).
+            for the signature prior S_k ~ Dir(beta * 1_C). Read only when
+            S is latent.
+    fixed_signatures : np.ndarray, optional
+        Shape (K, C). Pass to fix S (known-signature setting); K is taken
+        from this array. Exactly one of `fixed_signatures` /
+        `num_signatures` must be given.
+    num_signatures : int, optional
+        K, the number of signatures to discover, with S latent
+        (de novo setting). Exactly one of `fixed_signatures` /
+        `num_signatures` must be given.
+
+    Notes
+    -----
+    Call with keyword arguments. This replaces the former FixedSigHDP and
+    DeNovoHDP classes, whose constructors took different positional
+    arguments (see the module docstring); positional calls written against
+    either are not compatible with this constructor.
     """
 
     def __init__(
         self,
         newick_string: str,
         data_matrix: pd.DataFrame,
-        num_signatures: int,
         priors: dict,
+        fixed_signatures: Optional[np.ndarray] = None,
+        num_signatures: Optional[int] = None,
     ):
-        self.K = int(num_signatures)
+        if (fixed_signatures is None) == (num_signatures is None):
+            raise ValueError(
+                "TreeHDP needs exactly one of fixed_signatures (S known) "
+                "or num_signatures (S latent)."
+            )
+        if fixed_signatures is not None:
+            self.S_known = True
+            self.fixed_signatures = np.asarray(fixed_signatures)
+            self.K = self.fixed_signatures.shape[0]
+        else:
+            self.S_known = False
+            self.K = int(num_signatures)
         self.priors = priors
         self.n_channels = data_matrix.shape[1]
         super().__init__(newick_string, data_matrix)
 
-    @staticmethod
-    def _softmax_last_zero(eta_free: pt.TensorVariable) -> pt.TensorVariable:
+    def _build_signature_block(self) -> pt.TensorVariable:
         """
-        Map an (..., K-1) array of free logits to an (..., K) simplex point,
-        with the last component pinned to logit 0 (identifiability anchor
-        for the softmax activity walk -- identical to FixedSigHDP).
+        Return the (K, C) signature tensor: a constant when S is known, or
+        a latent pm.Dirichlet, S_k ~ Dir(beta * 1_C), when S is inferred
+        jointly (de novo). Must be called inside `self.model`.
         """
-        zeros = pt.zeros_like(eta_free[..., :1])
-        eta_full = pt.concatenate([eta_free, zeros], axis=-1)
-        return pt.special.softmax(eta_full, axis=-1)
+        if self.S_known:
+            return pt.as_tensor_variable(self.fixed_signatures)
+        beta = float(Fraction(str(self.priors.get("beta", 0.5))))
+        return pm.Dirichlet(
+            "signatures",
+            a=beta * np.ones(self.n_channels),
+            shape=(self.K, self.n_channels),
+        )
 
     def _build_pymc_model(self) -> None:
-        """Build the de novo PyMC model (structure in the class docstring)."""
+        """Build the shared-walk PyMC model (structure in the class docstring)."""
         sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
         sigma_mu = float(Fraction(str(self.priors.get("sigma_mu", 2.0))))
-        beta = float(Fraction(str(self.priors.get("beta", 0.5))))
-        C = self.n_channels
 
         nodes_by_depth = self._get_nodes_by_depth()
         max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
 
         with pm.Model() as self.model:
-            # K signatures, each a point on the C-channel simplex.
-            signatures = pm.Dirichlet(
-                "signatures",
-                a=beta * np.ones(C),
-                shape=(self.K, C),
-            )
+            signatures = self._build_signature_block()
 
             sigma = get_prior(self.priors, "sigma_prior", dim=1)(name="sigma")
 
@@ -575,19 +411,31 @@ class DeNovoHDP(_BaseTreeHDP):
 
     def get_signatures_posterior(self) -> np.ndarray:
         """
-        Return posterior samples of the discovered signature matrix.
+        Return posterior samples of the signature matrix.
 
         Returns
         -------
         np.ndarray
             Shape (chains, draws, K, n_channels).
 
+        Raises
+        ------
+        ValueError
+            If S is fixed (there is nothing latent to return) or if no
+            trace has been sampled yet.
+
         Notes
         -----
-        These samples are subject to label switching across chains (and
-        possibly within a chain).  Align chains to a common labelling
-        BEFORE averaging -- a raw mean over chains is not meaningful.
+        When S is latent these samples are subject to label switching
+        across chains (and possibly within a chain).  Align chains to a
+        common labelling BEFORE averaging -- a raw mean over chains is not
+        meaningful.
         """
+        if self.S_known:
+            raise ValueError(
+                "Signatures are fixed on this model; there is no "
+                "'signatures' posterior to return."
+            )
         if self.trace is None:
             raise ValueError("No trace found.  Run `sample()` first.")
         return self.trace.posterior["signatures"].values

@@ -6,10 +6,13 @@ run. Run it once per tree count and append to a shared CSV; the collected rows
 feed the trees-vs-fit table in the report.
 
 Convergence
-    max_rhat : worst split-Rhat over the activity variables (e_level_*) and sigma.
+    max_rhat : worst split-Rhat over the activity variables (e_level_*), sigma
+               and mu_level.
     min_ess  : smallest bulk ESS over the same variables.
-    eta-level and z-level variables are not matched and so are excluded, since
-    they are uninformative by construction in the non-centred walk.
+    mu_level is the forest-pooled baseline every root deviates from, so it is
+    genuinely identifiable and is monitored deliberately. eta-level, z-level
+    and z-root variables are not matched and so are excluded, since they are
+    uninformative by construction in the non-centred walk.
 
 Accuracy (when --true-activities and --newick are given)
     Activities are aligned to the truth
@@ -61,12 +64,17 @@ def _level_vars(post, prefix):
 
 
 def _convergence_vars(post, activity_var, conv_vars):
-    """Variables to judge convergence on: the activity variables and any
-    'sigma'. eta-level and z-level are not matched and so are excluded."""
+    """Variables to judge convergence on: the activity variables, any
+    'sigma', and 'mu_level'. mu_level is a single forest-pooled baseline
+    (identifiable, unlike the walk increments) and is kept deliberately,
+    not by accident of the name match below. eta-level, z-level and
+    z-root are not matched and so are excluded."""
     if conv_vars:
         return list(conv_vars)
     keep = _level_vars(post, activity_var)
-    keep += [str(v) for v in post.data_vars if "sigma" in str(v)]
+    keep += [
+        str(v) for v in post.data_vars if "sigma" in str(v) or str(v) == "mu_level"
+    ]
     if not keep:
         raise SystemExit(
             f"no convergence variables matched '{activity_var}_<d>' or 'sigma'; "

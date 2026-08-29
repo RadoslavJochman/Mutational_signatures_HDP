@@ -1,8 +1,8 @@
 """
 scripts/run_inference.py
 
-Run Bayesian inference on a mutation count matrix using either
-FixedSigHDP or FullSigHDP, driven entirely by a YAML config.
+Run Bayesian inference on a mutation count matrix using TreeHDP with fixed
+(known) signatures, driven entirely by a YAML config.
 
 Results (trace, summary CSV, plots) are written to a dated experiment
 directory under results/.
@@ -23,7 +23,7 @@ import pymc as pm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_config, make_output_dir
-from src.models.hdp_inference import FixedSigHDP
+from src.models.hdp_inference import TreeHDP
 
 
 def run_fixed_sig(cfg: dict) -> None:
@@ -45,7 +45,7 @@ def run_fixed_sig(cfg: dict) -> None:
 
     # Build model
     print("\nBuilding PyMC model...")
-    model = FixedSigHDP(
+    model = TreeHDP(
         newick_string=newick_string,
         data_matrix=count_matrix,
         fixed_signatures=fixed_signatures,

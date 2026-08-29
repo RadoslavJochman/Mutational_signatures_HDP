@@ -83,9 +83,10 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
     assert post.sizes["chain"] == cfg["inference"]["chains"]
     assert post.sizes["draw"] == cfg["inference"]["draws"]
 
-    # Expected variables: sigma, plus e_level_<d>/eta_level_<d> for every
-    # depth actually present in the generated forest, and z_level_<d> for
-    # every non-root depth (depth 0 is a direct Normal draw, not a walk step).
+    # Expected variables: sigma and mu_level, plus e_level_<d>/eta_level_<d>
+    # for every depth actually present in the generated forest (full
+    # K-dimensional ILR walk, no pinned coordinate). Depth 0 draws
+    # z_root_0; every other depth draws z_level_<d>.
     dr = nodes_by_depth(build_forest(newick))
     depths = sorted({d for d, _ in dr})
     n_at_depth = {d: sum(1 for dd, _ in dr if dd == d) for d in depths}
@@ -93,17 +94,22 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
 
     assert "sigma" in post.data_vars
     assert np.isfinite(post["sigma"].values).all()
+    assert "mu_level" in post.data_vars
+    assert post["mu_level"].shape[-1] == K
+    assert np.isfinite(post["mu_level"].values).all()
     for d in depths:
         e_var, eta_var = f"e_level_{d}", f"eta_level_{d}"
         assert e_var in post.data_vars, f"missing {e_var}"
         assert eta_var in post.data_vars, f"missing {eta_var}"
         assert post[e_var].shape[-2:] == (n_at_depth[d], K)
-        assert post[eta_var].shape[-2:] == (n_at_depth[d], K - 1)
+        assert post[eta_var].shape[-2:] == (n_at_depth[d], K)
         assert np.isfinite(post[e_var].values).all()
-        if d > 0:
+        if d == 0:
+            z_var = f"z_root_{d}"
+        else:
             z_var = f"z_level_{d}"
-            assert z_var in post.data_vars, f"missing {z_var}"
-            assert post[z_var].shape[-2:] == (n_at_depth[d], K - 1)
+        assert z_var in post.data_vars, f"missing {z_var}"
+        assert post[z_var].shape[-2:] == (n_at_depth[d], K)
 
     # ---- score ------------------------------------------------------------
     recovery_out = results_out / "recovery"
