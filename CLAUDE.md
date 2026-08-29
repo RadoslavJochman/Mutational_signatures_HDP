@@ -6,9 +6,10 @@ Conventions and layout for `Mutational_signatures_HDP` (Tree-HDP). Read before e
 
 Tree-HDP infers mutational signature activities across tumour phylogenies. Activities follow a
 random walk down each tree (a finite-dimensional approximation of a tree-structured HDP), node
-spectra are `e_j S`, and counts are multinomial. Two inference models: `FixedSigHDP` (`S`
-given) and `DeNovoHDP` (`S` inferred jointly with the activities). Developed and validated on
-simulated forests; targets single-cell tumour data.
+spectra are `e_j S`, and counts are multinomial. One inference model, `TreeHDP`, under a shared
+ILR activity walk: signatures are either clamped to a catalogue (`S` known) or given a
+Dirichlet prior and inferred jointly (`S` latent). Developed and validated on simulated
+forests; targets single-cell tumour data.
 
 ## Environment
 
@@ -52,11 +53,14 @@ This repo predates two planned changes we are now making. When helping with a re
 toward these targets rather than entrenching the current design, and expect the current configs
 and parts of the models and evaluation to be replaced.
 
-1. **One model, not two.** Merge `FixedSigHDP` and `DeNovoHDP` into a single model under the
-   ILR activity walk, with signatures either clamped to a catalogue (`S` known) or given a
-   Dirichlet prior and inferred jointly (`S` latent). The fixed case becomes the same model
-   with `S` fixed, and the label-switching alignment applies only when `S` is latent. This
-   also unifies the two runners. Rerun the fixed-signature results under the ILR walk so the
+1. **One model, not two -- merge done, rerun still open.** `FixedSigHDP` and `DeNovoHDP` are
+   merged into `TreeHDP`, a single model under the ILR activity walk, with signatures either
+   clamped to a catalogue (`S` known) or given a Dirichlet prior and inferred jointly (`S`
+   latent); the fixed case is the same model with `S` fixed, and the label-switching alignment
+   applies only when `S` is latent. The two runners are merged into one `run_inference.py`,
+   dispatching on the required `inference.model: fixed | denovo`. Still open: cut the new tag
+   this change needs (see Git and reproducibility), migrate the fixed configs to the
+   shared-walk convention, and rerun the fixed-signature results under the ILR walk so the
    reported numbers match the presented model.
 
 2. **Evaluation redo.**
@@ -86,8 +90,8 @@ transition.
 ## Repository layout
 
 - `src/` is the library. Import from it; do not reimplement its pieces in scripts.
-  - `src/models/hdp_inference.py`: `_BaseTreeHDP` (abstract), `FixedSigHDP`, `DeNovoHDP`
-    (being merged into one model, see Direction of travel).
+  - `src/models/hdp_inference.py`: `_BaseTreeHDP` (abstract), `TreeHDP` (`S` known or latent,
+    see Direction of travel).
   - `src/models/hdp_simulator.py`: `TreeSignatureGenerator`, `synthesize_signatures`,
     `generate_random_forest` (the data generator).
   - `src/models/dirichlet_process.py`: `Measure`, `DirichletPrior`, `DirichletProcess`.
@@ -113,8 +117,7 @@ Run Python from `scripts/` (as `run_replicates.sbatch` does with `cd scripts`); 
 ```
 cd scripts
 python generate_data.py          --config ../configs/<cfg>.yaml   # -> ../data/<experiment_name>/
-python run_inference.py          --config ../configs/<cfg>.yaml   # FIXED signatures
-python run_unknown_inference.py  --config ../configs/<cfg>.yaml   # DE NOVO
+python run_inference.py          --config ../configs/<cfg>.yaml   # inference.model: fixed | denovo
 python recovery_vs_truth.py --trace ../results/<name>/trace_raw.nc \
     --true-activities ../data/<name>/true_activities.csv \
     --newick ../data/<name>/newick_string.nwk \
@@ -128,13 +131,14 @@ python nmf_baseline.py --counts ../data/<name>/mutation_count_matrix.csv \
 
 Rules that matter:
 
-- De novo MUST use `run_unknown_inference.py`, never `run_inference.py`. The de novo runner
-  adds the post-hoc per-draw alignment to chain 0 (`trace_aligned.nc`); without it the
-  summary's `r_hat` and `ess` are meaningless, since chains merely order the signatures
+- `run_inference.py` reads `inference.model` (`fixed` or `denovo`) and dispatches on it;
+  configs written before the runner collapse that don't set it fall back to whether
+  `inference.num_signatures` is present (denovo) or absent (fixed) -- the same signal the old
+  two-script split encoded implicitly. De novo (`S` latent) always gets the post-hoc per-draw
+  alignment to chain 0 (`trace_aligned.nc`), gated on the built model's `S_known`; without it
+  the summary's `r_hat` and `ess` are meaningless, since chains merely order the signatures
   differently. `--true-signatures` is passed to scoring for de novo only (fixed-sig has no
   label switching, so component k already is true signature k).
-- `inference.model` selects the de novo activity prior: `denovo` (default, and currently the
-  only supported value, the random walk).
 - Generation writes to `../data/<experiment_name>/`: `mutation_count_matrix.csv`,
   `newick_string.nwk`, `tree_edges.csv`, `fixed_signatures.csv`, `true_activities.csv`,
   `ground_truth_params.json`. Inference writes traces to `../results/<experiment_name>/`.

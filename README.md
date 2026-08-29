@@ -93,15 +93,15 @@ fixes `simulation.seed`, so data generation and sampling are deterministic.
 
 ```
 src/
-  models/      hdp_simulator.py (generator), hdp_inference.py (FixedSigHDP, DeNovoHDP)
+  models/      hdp_simulator.py (generator), hdp_inference.py (TreeHDP)
   analysis/    analysis.py (align, forest, distances), evaluation.py
   plotting/    figure_style.py (shared palette), plots.py
   config.py    YAML config loader
 
 scripts/       run from here
   generate_data.py            config -> ../data/<name>/  (counts, tree, truth)
-  run_inference.py            fixed-signature inference   -> trace.nc
-  run_unknown_inference.py    de novo inference           -> trace_raw.nc, trace_aligned.nc
+  run_inference.py            fixed (-> trace.nc) or de novo (-> trace_raw.nc, trace_aligned.nc),
+                               picked by inference.model in the config
   recovery_vs_truth.py        score a trace against the truth
   nmf_baseline.py             NMF comparison on the same counts
   scaling_metrics.py          one convergence+accuracy row per fixed-sig run (Table 1)
@@ -187,7 +187,7 @@ D=../data/config_denovo_corr_03_20_trees_synth_ilr
 R=../results/config_denovo_corr_03_20_trees_synth_ilr
 
 python generate_data.py         --config $CFG
-python run_unknown_inference.py --config $CFG      # writes $R/trace_raw.nc
+python run_inference.py         --config $CFG      # inference.model: denovo -> $R/trace_raw.nc
 
 # Figures 2-5: the clusters
 python diagnose_modes.py \

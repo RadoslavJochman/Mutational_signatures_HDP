@@ -32,8 +32,8 @@ Camp detection
     historical reasons, the report calls them clusters).
 
 Model construction
-    build_model and DEFAULT_PRIORS build a DeNovoHDP from file paths with the
-    shared prior configuration.
+    build_model and DEFAULT_PRIORS build a TreeHDP (S latent) from file paths
+    with the shared prior configuration.
 """
 
 from __future__ import annotations
@@ -463,13 +463,16 @@ def build_model(
     num_signatures: int,
     priors: Optional[dict] = None,
 ):
-    """Construct a DeNovoHDP from file paths with the shared prior config the
-    scripts had all hard-coded. Returns (model, counts). Pass `priors` to
-    override DEFAULT_PRIORS."""
+    """Construct a TreeHDP (S latent) from file paths with the shared prior
+    config the scripts had all hard-coded. Returns (model, counts). Pass
+    `priors` to override DEFAULT_PRIORS."""
     import pandas as pd
 
-    from src.models.hdp_inference import DeNovoHDP
+    from src.models.hdp_inference import TreeHDP
 
     counts = pd.read_csv(counts_path, index_col=0)
     newick = Path(newick_path).read_text().strip()
-    return DeNovoHDP(newick, counts, num_signatures, priors or DEFAULT_PRIORS), counts
+    model = TreeHDP(
+        newick, counts, priors or DEFAULT_PRIORS, num_signatures=num_signatures
+    )
+    return model, counts

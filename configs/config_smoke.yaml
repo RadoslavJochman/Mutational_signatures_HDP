@@ -40,6 +40,8 @@ simulation:
     max_branch_length: 500
 
 inference:
+  model: fixed
+
   data:
     count_matrix: ../data/smoke/mutation_count_matrix.csv
     newick_string: ../data/smoke/newick_string.nwk
