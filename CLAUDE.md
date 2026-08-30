@@ -30,7 +30,8 @@ the JAX sampling path (see `enable_local_gpu.sh`).
 
 The project is a git repository, and experiments are pinned to tags. Every config records a
 `git_tag` (in use so far: `fixed-sig-v1`, `fixed-sig-v2`, `denovo-v1`, `denovo-v1-ilr`,
-`denovo-v2`), and reproducing a run means checking out that tag before generating and fitting.
+`denovo-v2`, `treehdp-v1`, `switch-drift-v1`), and reproducing a run means checking out that
+tag before generating and fitting.
 Treat a tag as immutable: when the model changes in a way that would alter results, cut a new
 tag and point the new configs at it rather than editing the model under an existing tag. The
 planned unification is such a change and needs its own tag.
@@ -42,10 +43,13 @@ Working practice:
 - Check `git status` and `git diff` before committing, and keep the working tree clean.
 - Commit messages follow the writing rule: concise, plain, imperative, British spelling, no
   em-dashes. Do not add `Co-Authored-By` or `Generated with Claude Code` trailers.
-- Do not commit run artefacts. `.gitignore` already covers `data/`, per-run `results/`, traces
-  (`.nc`, `.zarr`), `.venv/`, `logs/`, `__pycache__/`, and `.DS_Store`. The tracked exceptions
-  are the aggregated tables under `results/agg/` and `results/agg40/` and
-  `results/scaling_results.csv`; those aggregated outputs are meant to be committed.
+- Do not commit run artefacts. `.gitignore` covers `data/`, `results/`, and `plots/` at any
+  depth -- an experiment's own subdirectories, wherever they are nested (e.g.
+  `experiments/<name>/data/`, `experiments/<sweep>/rep03/results/`) -- plus traces (`.nc`,
+  `.zarr`), `.venv/`, `logs/`, `__pycache__/`, and `.DS_Store`. The tracked exceptions are
+  every experiment's `config.yaml`, a sweep's `manifest_*` files and `agg/` directory, and
+  `tables/` (`scaling_results.csv`, `agg/`, `agg40/`, the cross-cutting committed tables
+  predating the per-sweep `agg/` convention); those are meant to be committed.
 
 ## Direction of travel (work in progress)
 
@@ -58,10 +62,10 @@ and parts of the models and evaluation to be replaced.
    clamped to a catalogue (`S` known) or given a Dirichlet prior and inferred jointly (`S`
    latent); the fixed case is the same model with `S` fixed, and the label-switching alignment
    applies only when `S` is latent. The two runners are merged into one `run_inference.py`,
-   dispatching on the required `inference.model: fixed | denovo`. Still open: cut the new tag
-   this change needs (see Git and reproducibility), migrate the fixed configs to the
-   shared-walk convention, and rerun the fixed-signature results under the ILR walk so the
-   reported numbers match the presented model.
+   dispatching on the required `inference.model: fixed | denovo`. The tag this change needed
+   is cut (`treehdp-v1`). Still open: migrate the fixed configs to the shared-walk
+   convention, and rerun the fixed-signature results under the ILR walk so the reported
+   numbers match the presented model.
 
 2. **Evaluation redo.**
    - Metric: cosine similarity is primary (already in `recovery_vs_truth.py` and
@@ -80,9 +84,10 @@ and parts of the models and evaluation to be replaced.
    data, and make the low-count burden regime and the forest size the primary sweep axes. Demote
    the signature-overlap sweep to a secondary stress test that interpolates two flat signatures,
    and draw counts with over-dispersion (Dirichlet-multinomial) to avoid simulating from the
-   inference model. The current `corr_sweep`, `size_sweep`, and `bases_*` configs will be
-   replaced by configs for these axes. The full simulator design lives in `simulator_spec.md`
-   (ask for it if it is not yet in the repo).
+   inference model. The old `corr_sweep`, `size_sweep`, and `bases_*` configs are already
+   deleted (recoverable from the `treehdp-v1`/`switch-drift-v1` tags); this item's new sweep
+   configs, once designed, replace them under `experiments/`. The full simulator design lives
+   in `simulator_spec.md` (ask for it if it is not yet in the repo).
 
 The sections below describe the code as it is now, so navigation stays accurate during the
 transition.
@@ -92,8 +97,8 @@ transition.
 - `src/` is the library. Import from it; do not reimplement its pieces in scripts.
   - `src/models/hdp_inference.py`: `_BaseTreeHDP` (abstract), `TreeHDP` (`S` known or latent,
     see Direction of travel).
-  - `src/models/hdp_simulator.py`: `TreeSignatureGenerator`, `synthesize_signatures`,
-    `generate_random_forest` (the data generator).
+  - `src/models/hdp_simulator.py`: `TreeSwitchDriftGenerator` (the switch-plus-drift data
+    generator; see `simulator_spec.md`).
   - `src/models/dirichlet_process.py`: `Measure`, `DirichletPrior`, `DirichletProcess`.
   - `src/analysis/analysis.py`: the shared helper library (metrics, alignment, tree/forest
     utilities, walk transforms). See below.
@@ -101,13 +106,16 @@ transition.
     these. `src/plotting/plots.py`: reusable plot builders.
   - `src/config.py`: `load_config`, `make_output_dir`, `get_prior` (YAML to PyMC priors).
 - `scripts/` is a flat set of runnable entry points (pipeline plus one-off diagnostics).
-- `configs/` holds base configs at the top level, plus one subdirectory per sweep
-  (`size_sweep`, `corr_sweep`, `corr_sweep_40`, and the `bases_*` base configs the replicate
-  configs are expanded from). Each sweep dir also carries `manifest_configs.txt` and
-  `manifest_agg*.csv`. These correlation-knob sweeps are being replaced by the calibrated
-  burden and forest-size sweeps (see Direction of travel).
-- `data/`, `results/`, and `COSMIC_sig/` live at the repo root (not in git). Scripts run from
-  `scripts/`, so the configs' `../data`, `../results`, `../COSMIC_sig` resolve to those.
+- `experiments/` holds one directory per fit: `<name>/config.yaml`, `<name>/data/`,
+  `<name>/results/`, `<name>/plots/`. A sweep is `<sweep_name>/` holding `rep00/`, `rep01/`,
+  ... (each itself a full experiment directory) plus `<sweep_name>/agg/` and the sweep's
+  `manifest_*` files. Only `config.yaml`, `manifest_*`, and `agg/` are tracked; `data/`,
+  `results/`, and `plots/` are gitignored at any depth (see Do not).
+- `configs/` holds standalone historical configs pinned to old tags (the pre-restructure
+  `alpha`/`lam` generator schema); nothing new is written here under the current layout.
+- `COSMIC_sig/` (the signature catalogue) and `tables/` (cross-cutting committed tables:
+  `scaling_results.csv`, `agg/`, `agg40/`) live at the repo root. Scripts run from `scripts/`,
+  so the configs' `../experiments` and `../COSMIC_sig` resolve to those.
 
 ## Running the pipeline
 
@@ -116,17 +124,17 @@ Run Python from `scripts/` (as `run_replicates.sbatch` does with `cd scripts`); 
 
 ```
 cd scripts
-python generate_data.py          --config ../configs/<cfg>.yaml   # -> ../data/<experiment_name>/
-python run_inference.py          --config ../configs/<cfg>.yaml   # inference.model: fixed | denovo
-python recovery_vs_truth.py --trace ../results/<name>/trace_raw.nc \
-    --true-activities ../data/<name>/true_activities.csv \
-    --newick ../data/<name>/newick_string.nwk \
-    --true-signatures ../data/<name>/fixed_signatures.csv \
-    --metrics tv hellinger cosine --outdir ../results/<name>/recovery
-python nmf_baseline.py --counts ../data/<name>/mutation_count_matrix.csv \
-    --true-activities ../data/<name>/true_activities.csv \
-    --true-signatures ../data/<name>/fixed_signatures.csv \
-    --metrics tv hellinger cosine --outdir ../results/<name>/nmf   # de novo comparison only
+python generate_data.py --config ../experiments/<name>/config.yaml   # -> ../experiments/<name>/data/
+python run_inference.py --config ../experiments/<name>/config.yaml   # inference.model: fixed | denovo
+python recovery_vs_truth.py --trace ../experiments/<name>/results/trace_raw.nc \
+    --true-activities ../experiments/<name>/data/true_activities.csv \
+    --newick ../experiments/<name>/data/newick_string.nwk \
+    --true-signatures ../experiments/<name>/data/fixed_signatures.csv \
+    --metrics tv hellinger cosine --outdir ../experiments/<name>/results/recovery
+python nmf_baseline.py --counts ../experiments/<name>/data/mutation_count_matrix.csv \
+    --true-activities ../experiments/<name>/data/true_activities.csv \
+    --true-signatures ../experiments/<name>/data/fixed_signatures.csv \
+    --metrics tv hellinger cosine --outdir ../experiments/<name>/results/nmf   # de novo only
 ```
 
 Rules that matter:
@@ -139,28 +147,35 @@ Rules that matter:
   the summary's `r_hat` and `ess` are meaningless, since chains merely order the signatures
   differently. `--true-signatures` is passed to scoring for de novo only (fixed-sig has no
   label switching, so component k already is true signature k).
-- Generation writes to `../data/<experiment_name>/`: `mutation_count_matrix.csv`,
+- Generation writes to `<experiment_root>/<experiment_name>/data/`: `mutation_count_matrix.csv`,
   `newick_string.nwk`, `tree_edges.csv`, `fixed_signatures.csv`, `true_activities.csv`,
-  `ground_truth_params.json`. Inference writes traces to `../results/<experiment_name>/`.
+  `true_active_sets.csv`, `ground_truth_params.json` (plus `plots/` when `make_plots` is set).
+  Inference writes to `<experiment_root>/<experiment_name>/results/`. `experiment_root` and
+  `experiment_name` are shared top-level config keys, so both scripts always agree on which
+  experiment directory they write into.
 - Local GPU: `source enable_local_gpu.sh` (sets PyTensor to JAX mode).
 
 ## Config structure
 
-Two top-level blocks. `simulation` drives `generate_data.py`; `inference` drives the runners.
+Shared identity keys, plus two top-level blocks. `simulation` drives `generate_data.py`
+(`TreeSwitchDriftGenerator`, see `simulator_spec.md`); `inference` drives the runners.
 
 ```
-experiment_name, git_tag
+experiment_name, experiment_root (../experiments/), git_tag
 simulation:
-  seed, results_dir (../data/), make_plots
-  alpha            # activity-walk concentration e_j ~ Dir(alpha * e_parent)
-  alpha_0          # baseline concentration e_0 ~ Dir((alpha_0/K) * 1_K)
-  lam, nb_dispersion          # per-node burden; lam=970 matches the reference mean, nb=2.0
-  activity_sparsity, signature_dropout
-  signatures: {source: synthesize|load, correlation, path, num_signatures}
-  forest: {num_trees, min_leaves, max_leaves, min_branch_length, max_branch_length}
+  seed, make_plots
+  repertoire: {source, path, signatures}      # catalogue signatures, never synthesised
+  switching: {enabled, branch_length_scaling,
+              units: [{signatures, root_prob, lambda_on, lambda_off}]}
+  levels: {enabled, walk, concentration, branch_length_scaling, concentration_floor,
+           root_concentration, activation_pseudocount}
+  forest: {n_trees, nodes_per_tree, depth, max_attempts,
+           branch_lengths: {distribution, params|path}}
+  burden: {mean, distribution, dispersion}
+  counts: {model, kappa}
 inference:
-  model                        # denovo (de novo runner only)
-  num_signatures               # K
+  model                        # fixed | denovo, required
+  num_signatures               # K, denovo only
   data: {count_matrix, newick_string, tree_edges, fixed_signatures, true_activities,
          ground_truth_params}
   priors:
@@ -169,24 +184,41 @@ inference:
     sigma_mu                         # de novo ILR only: forest-pooled usage-level std
     beta                             # de novo only: S_k ~ Dir(beta * 1_96)
   draws, tune, chains, cores, target_accept, max_treedepth
-  results_dir (../results/)
 ```
 
+`experiment_root` and `experiment_name` are read directly by `generate_data.py` and
+`run_inference.py` (there is no separate `simulation.results_dir`/`inference.results_dir`
+any more, so the two scripts can never disagree on where an experiment's files live).
+`experiment_name` may itself contain `/` for a sweep replicate (e.g. `corr_sweep/rep03`).
 Fixed-sig configs use `sigma_0` and no `sigma_mu`/`beta`. De novo ILR configs use `sigma_0`
-plus `sigma_mu` and `beta`. `signatures.correlation` is ignored when `source: load`.
+plus `sigma_mu` and `beta`.
 
 ## Sweeps and replicates
 
 A replicate is one dataset (one `simulation.seed`) fit and scored on its own; averaging
-replicates of a setting gives the error bars.
+replicates of a setting gives the error bars. A sweep is `experiments/<sweep_name>/`,
+holding `rep00/`, `rep01/`, ... (each a full experiment directory) plus `agg/` once
+aggregated.
 
-- `make_replicate_configs.py` expands one `bases_*` base config into R replicate configs that
-  differ only in `simulation.seed` and identity. `signatures.path` is left untouched so every
-  replicate loads the same frozen signature matrix; only the forest and activities vary.
+- `make_replicate_configs.py` expands one base config into R replicate configs that differ
+  only in `simulation.seed` and identity, writing each straight into
+  `experiments/<sweep_name>/rep<NN>/config.yaml` (derived from the base config's own
+  `experiment_root` and `experiment_name`; there is no separate `--outdir`, so a replicate's
+  config can never disagree with where its own data and results land). `repertoire.path` is
+  left untouched so every replicate loads the same frozen signature matrix; only the forest
+  and activities vary. Run from `scripts/`, like every other pipeline script.
 - `run_replicates.sbatch <manifest> [fixed|denovo] [scratch]` is one SLURM array task per
   replicate (generate, infer, score), moving traces to scratch afterwards.
 - `aggregate_replicates.py` groups the per-replicate `recovery_*.csv` by setting into
-  mean/sd/se/count. `sweep_aggregate.py` assembles a sweep into one master table.
+  mean/sd/se/count, writing to `experiments/<sweep_name>/agg/`.
+
+The correlation-overlap and forest-size sweeps that used to live under `configs/bases_*` and
+`configs/corr_sweep*`/`configs/size_sweep` are deleted (recoverable from the `treehdp-v1`/
+`switch-drift-v1` tags); no base config for a live sweep currently exists. `sweep_aggregate.py`,
+which those sweeps used (a two-root `results/`/`data/` design that does not fit
+`experiment_root`), is deleted with them; `aggregate_replicates.py`'s manifest flow carries
+the sweep-aggregation job forward. The calibrated simulator's own sweep configs (Direction of
+travel) will be the first to exercise this machinery for real.
 
 ## Shared library (`src/analysis/analysis.py`)
 
@@ -256,7 +288,7 @@ Three levels:
   `hellinger`, `total_variation`, `bray_curtis`); round-trips for the walk transforms
   (`softmax_last_zero`/`inv_softmax_last_zero`, `forward_walk`/`inverse_walk`); a known
   permutation for `chain_perms_to_true`; and shapes plus seed-determinism for
-  `TreeSignatureGenerator`.
+  `TreeSwitchDriftGenerator`.
 - Integration, the smoke config. A tiny end-to-end run (a couple of trees, roughly 50 to 100
   draws, one chain, fixed seed) through generate then infer then score, asserting the pipeline
   runs, writes the expected files, and produces the expected trace variables. Fast enough to run
@@ -296,6 +328,7 @@ rules do not apply here.
 - Duplicate helpers that exist in `src/analysis/analysis.py` or `figure_style.py`.
 - Compare true-label and inferred-label frames without aligning first.
 - Include `eta_level`/`z_level` in convergence statistics.
-- Commit `data/`, per-run `results/`, or traces. The aggregated tables under `results/agg*/`
-  and `results/scaling_results.csv` are the tracked exceptions.
+- Commit an experiment's `data/`, `results/`, or `plots/` subdirectory, or any trace. Every
+  experiment's `config.yaml`, a sweep's `manifest_*` and `agg/`, and `tables/` (the
+  cross-cutting `scaling_results.csv`, `agg/`, `agg40/`) are the tracked exceptions.
 - Add a feature without its tests, or mix a `ruff format` pass into a logic commit.

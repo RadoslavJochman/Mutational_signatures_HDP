@@ -86,7 +86,7 @@ pip install -r requirements.txt
 
 Sampling uses PyMC and ArviZ; the figures use matplotlib and pandas only. **All
 commands below are run from the `scripts/` directory**, because the config files
-reference `../data`, `../results` and `../COSMIC_sig` relative to it. Every config
+reference `../experiments` and `../COSMIC_sig` relative to it. Every config
 fixes `simulation.seed`, so data generation and sampling are deterministic.
 
 ---
@@ -101,26 +101,27 @@ src/
   config.py    YAML config loader
 
 scripts/       run from here
-  generate_data.py            config -> ../data/<name>/  (counts, tree, truth)
-  run_inference.py            fixed (-> trace.nc) or de novo (-> trace_raw.nc, trace_aligned.nc),
-                               picked by inference.model in the config
+  generate_data.py            config -> ../experiments/<name>/data/  (counts, tree, truth)
+  run_inference.py            fixed (-> results/trace.nc) or de novo (-> results/trace_raw.nc,
+                               results/trace_aligned.nc), picked by inference.model in the config
   recovery_vs_truth.py        score a trace against the truth
   nmf_baseline.py             NMF comparison on the same counts
   scaling_metrics.py          one convergence+accuracy row per fixed-sig run (Table 1)
   diagnose_modes.py / plot_mode_analysis.py     de novo clusters (Figures 2-5)
   diagnose_camp_path.py / plot_camp_path.py     mixing geometry (Figure 6)
-  make_replicate_configs.py   expand a base config into 15 replicate configs
+  make_replicate_configs.py   expand a base config into per-replicate experiment directories
   run_replicates.sbatch       SLURM array: generate -> infer -> score, per replicate
   aggregate_replicates.py     replicates -> mean/std -> aggregated_summary.csv
   plot_sweep_comparison.py    recovery vs NMF, both sweeps (Figure 7)
   plot_data_scaling_figure.py
 
-configs/       bases_*/ (one base per setting), corr_sweep/ corr_sweep_40/ size_sweep/
-               (replicate configs + manifests), config_fixed_realistic_data_sweep_*.yaml
+experiments/   one directory per fit: config.yaml, data/, results/, plots/; a sweep is
+               <sweep>/rep00/, rep01/, ... plus <sweep>/agg/ and <sweep>/manifest_*
+configs/       standalone historical configs pinned to old tags (the pre-restructure
+               alpha/lam generator schema); nothing new is written here under this layout
 COSMIC_sig/    cosmic_signatures.csv  (10 real COSMIC SBS profiles)
-results/agg/, results/agg40/, results/scaling_results.csv   committed metrics (fast path)
-plots/         the report figures
-report/        the lab-rotation report (Final_Report.pdf, and .tex / refs.bib source)
+tables/        cross-cutting committed tables: scaling_results.csv, agg/, agg40/ (fast path)
+report/        the lab-rotation report (final_report.pdf) and its figures/ (report/figures/)
 ```
 
 ---
