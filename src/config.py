@@ -50,20 +50,28 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
 
 
 def make_output_dir(
-    base_dir: str | Path = "results", experiment_name: str = "experiment"
+    base_dir: str | Path = "experiments",
+    experiment_name: str = "experiment",
+    subdir: str | None = None,
 ) -> Path:
     """
-    Create and return a dated experiment output directory.
+    Create and return an experiment's output directory, or one of its
+    subdirectories.
 
-    The directory name is ``<experiment_name>``, If not provided,
-    the directory is named ``experiment``.
+    The directory is ``<base_dir>/<experiment_name>``, or
+    ``<base_dir>/<experiment_name>/<subdir>`` when `subdir` is given.
+    `experiment_name` may itself contain `/` (a sweep replicate's name, e.g.
+    ``"corr_sweep/rep03"``), which joins as extra path segments the same way.
 
     Parameters
     ----------
     experiment_name : str
-        Name of the experiment.
+        Name of the experiment (config `experiment_name`).
     base_dir : str or Path
-        Root results directory (default: ``results/``).
+        Root experiments directory (config `experiment_root`).
+    subdir : str, optional
+        `data`, `results`, or `plots` -- the one caller-specific
+        subdirectory each script owns within the experiment directory.
 
     Returns
     -------
@@ -71,6 +79,8 @@ def make_output_dir(
         Absolute path to the created directory.
     """
     out_dir = Path(base_dir) / f"{experiment_name}"
+    if subdir is not None:
+        out_dir = out_dir / subdir
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 

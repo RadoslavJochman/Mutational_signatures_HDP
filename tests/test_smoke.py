@@ -1,8 +1,9 @@
 """End-to-end smoke test: generate then infer then score on a tiny
-fixed-signature config (configs/config_smoke.yaml). This is the manual fast
-gate described in CLAUDE.md's Testing section -- it asserts the pipeline
-runs, writes the expected files, and produces a trace with the expected
-variables and finite recovery scores. It does not assert exact numbers.
+fixed-signature config (experiments/smoke/config.yaml). This is the manual
+fast gate described in CLAUDE.md's Testing section -- it asserts the
+pipeline runs, writes the expected files, and produces a trace with the
+expected variables and finite recovery scores. It does not assert exact
+numbers.
 """
 
 import sys
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = REPO_ROOT / "configs" / "config_smoke.yaml"
+CONFIG_PATH = REPO_ROOT / "experiments" / "smoke" / "config.yaml"
 
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -30,20 +31,18 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
     cfg = load_config(CONFIG_PATH)
     name = cfg["experiment_name"]
 
-    # Redirect data/results into tmp_workdir so the run never touches the
-    # repo's data/ or results/; everything else in the config is untouched.
-    data_dir = tmp_workdir / "data"
-    results_dir = tmp_workdir / "results"
-    data_out = data_dir / name
-    results_out = results_dir / name
+    # Redirect experiment_root into tmp_workdir so the run never touches the
+    # repo's experiments/; everything else in the config is untouched.
+    exp_dir = tmp_workdir / "experiments" / name
+    data_out = exp_dir / "data"
+    results_out = exp_dir / "results"
 
-    cfg["simulation"]["results_dir"] = str(data_dir)
+    cfg["experiment_root"] = str(tmp_workdir / "experiments")
     # The catalogue path is relative to scripts/ (see CLAUDE.md); resolve it
     # to an absolute path since this test runs from a temp working directory.
     cfg["simulation"]["repertoire"]["path"] = str(
         REPO_ROOT / "COSMIC_sig" / "cosmic_signatures.csv"
     )
-    cfg["inference"]["results_dir"] = str(results_dir)
     cfg["inference"]["data"] = {
         "count_matrix": str(data_out / "mutation_count_matrix.csv"),
         "newick_string": str(data_out / "newick_string.nwk"),

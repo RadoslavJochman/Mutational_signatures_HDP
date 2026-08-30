@@ -8,8 +8,12 @@ This drives `TreeSwitchDriftGenerator`, the switch-plus-drift forward
 simulator (simulator_spec.md). `cfg["simulation"]` is passed straight to the
 generator: it already matches the plain-dict schema the generator expects
 (simulator_spec.md section 3), apart from the config-layer keys handled here
-(`seed`, `results_dir`, `make_plots`, `n_seeds`), which the generator itself
-ignores.
+(`seed`, `make_plots`, `n_seeds`), which the generator itself ignores.
+
+Writes to `<experiment_root>/<experiment_name>/data/` (and `.../plots/` when
+`make_plots` is set). `experiment_root` and `experiment_name` are top-level
+config keys, shared with run_inference.py, so both scripts always agree on
+which experiment directory they are writing into.
 
 Usage
 -----
@@ -30,10 +34,10 @@ from src.models.hdp_simulator import TreeSwitchDriftGenerator
 
 def run_generation(cfg: dict) -> None:
     sim = cfg["simulation"]
+    exp_root = cfg["experiment_root"]
+    exp_name = cfg.get("experiment_name", "experiment")
 
-    output_dir = make_output_dir(
-        sim["results_dir"], cfg.get("experiment_name", "experiment")
-    )
+    output_dir = make_output_dir(exp_root, exp_name, "data")
     print(f"Output directory: {output_dir}")
 
     generator = TreeSwitchDriftGenerator(sim)
@@ -90,8 +94,7 @@ def run_generation(cfg: dict) -> None:
                 plot_signatures_heatmap,
             )
 
-            plot_dir = os.path.join(output_dir, "plots")
-            os.makedirs(plot_dir, exist_ok=True)
+            plot_dir = make_output_dir(exp_root, exp_name, "plots")
             plot_signatures_heatmap(
                 signatures.to_numpy(),
                 save_path=os.path.join(plot_dir, "heatmap_true_signatures.pdf"),

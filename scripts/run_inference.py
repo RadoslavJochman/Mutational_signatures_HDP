@@ -226,7 +226,7 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
     _validate_inference_config(inf_cfg, model_name)
 
     out_dir = make_output_dir(
-        inf_cfg["results_dir"], cfg.get("experiment_name", "experiment")
+        cfg["experiment_root"], cfg.get("experiment_name", "experiment"), "results"
     )
     print(f"Output directory: {out_dir}")
 

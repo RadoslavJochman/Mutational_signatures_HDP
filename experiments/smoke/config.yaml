@@ -2,23 +2,23 @@
 # Not a scientific run: two small trees, K = 3 catalogue signatures (one
 # always-on pair plus one switching unit so on/off actually exercises), and a
 # NUTS sampler small enough to finish in around a minute. Exercised by
-# tests/test_smoke.py, which redirects the data/results paths below into a
-# temp directory; run it manually the same way as any other config:
+# tests/test_smoke.py, which redirects experiment_root into a temp directory;
+# run it manually the same way as any other config:
 #
 #   cd scripts
-#   python generate_data.py --config ../configs/config_smoke.yaml
-#   python run_inference.py --config ../configs/config_smoke.yaml
-#   python recovery_vs_truth.py --trace ../results/smoke/trace.nc \
-#       --true-activities ../data/smoke/true_activities.csv \
-#       --newick ../data/smoke/newick_string.nwk \
-#       --metrics cosine tv --outdir ../results/smoke/recovery
+#   python generate_data.py --config ../experiments/smoke/config.yaml
+#   python run_inference.py --config ../experiments/smoke/config.yaml
+#   python recovery_vs_truth.py --trace ../experiments/smoke/results/trace.nc \
+#       --true-activities ../experiments/smoke/data/true_activities.csv \
+#       --newick ../experiments/smoke/data/newick_string.nwk \
+#       --metrics cosine tv --outdir ../experiments/smoke/results/recovery
 
 experiment_name: smoke
+experiment_root: ../experiments/
 git_tag: switch-drift-v1
 
 simulation:
   seed: 20240607 # matches tests/conftest.py's RNG_SEED
-  results_dir: ../data/
   make_plots: false
 
   repertoire:
@@ -74,12 +74,12 @@ inference:
   model: fixed
 
   data:
-    count_matrix: ../data/smoke/mutation_count_matrix.csv
-    newick_string: ../data/smoke/newick_string.nwk
-    tree_edges: ../data/smoke/tree_edges.csv
-    fixed_signatures: ../data/smoke/fixed_signatures.csv
-    true_activities: ../data/smoke/true_activities.csv
-    ground_truth_params: ../data/smoke/ground_truth_params.json
+    count_matrix: ../experiments/smoke/data/mutation_count_matrix.csv
+    newick_string: ../experiments/smoke/data/newick_string.nwk
+    tree_edges: ../experiments/smoke/data/tree_edges.csv
+    fixed_signatures: ../experiments/smoke/data/fixed_signatures.csv
+    true_activities: ../experiments/smoke/data/true_activities.csv
+    ground_truth_params: ../experiments/smoke/data/ground_truth_params.json
 
   priors:
     sigma_prior: LogNorm
@@ -94,5 +94,3 @@ inference:
   cores: 1
   target_accept: 0.9
   max_treedepth: 10
-
-  results_dir: ../results/
