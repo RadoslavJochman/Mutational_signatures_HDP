@@ -145,11 +145,11 @@ many hours) and the appropriate tag checked out.
 ```bash
 cd scripts
 
-# Figure 7: Tree-HDP vs NMF, both sweeps, from ../results/agg and ../results/agg40
-python plot_sweep_comparison.py --agg ../results/agg --agg40 ../results/agg40 --outdir ../plots
+# Figure 7: Tree-HDP vs NMF, both sweeps, from ../tables/agg and ../tables/agg40
+python plot_sweep_comparison.py --agg ../tables/agg --agg40 ../tables/agg40 --outdir ../report/figures
 
-# Scaling figure + Table 1 numbers, from ../results/scaling_results.csv
-python plot_data_scaling_figure.py --scaling-csv ../results/scaling_results.csv --outdir ../plots
+# Scaling figure + Table 1 numbers, from ../tables/scaling_results.csv
+python plot_data_scaling_figure.py --scaling-csv ../tables/scaling_results.csv --outdir ../report/figures
 ```
 
 Table 1 is read directly from the committed `scaling_results.csv`. Figures 2 to 6
@@ -254,7 +254,7 @@ python plot_sweep_comparison.py --agg ../results/agg --agg40 ../results/agg40 --
 
 ## Results
 
-![Tree-HDP vs NMF recovery across the two sweeps](plots/fig_sweep_comparison.png)
+![Tree-HDP vs NMF recovery across the two sweeps](report/figures/fig_sweep_comparison.png)
 
 The figure compares Tree-HDP (blue) against the NMF baseline (grey) on signatures
 (top, Hellinger to truth) and activities (bottom, L1 to truth); lower is better.
