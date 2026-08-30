@@ -1,8 +1,9 @@
-# Tiny end-to-end smoke config (fixed signatures). Not a scientific run: two
-# trees of four nodes each, K = 3 synthesized signatures, and a NUTS sampler
-# small enough to finish in around a minute. Exercised by tests/test_smoke.py,
-# which redirects the data/results paths below into a temp directory; run it
-# manually the same way as any other config:
+# Tiny end-to-end smoke config (fixed signatures, switch-plus-drift generator).
+# Not a scientific run: two small trees, K = 3 catalogue signatures (one
+# always-on pair plus one switching unit so on/off actually exercises), and a
+# NUTS sampler small enough to finish in around a minute. Exercised by
+# tests/test_smoke.py, which redirects the data/results paths below into a
+# temp directory; run it manually the same way as any other config:
 #
 #   cd scripts
 #   python generate_data.py --config ../configs/config_smoke.yaml
@@ -13,31 +14,61 @@
 #       --metrics cosine tv --outdir ../results/smoke/recovery
 
 experiment_name: smoke
-git_tag: fixed-sig-v2
+git_tag: switch-drift-v1
 
 simulation:
   seed: 20240607 # matches tests/conftest.py's RNG_SEED
   results_dir: ../data/
   make_plots: false
 
-  alpha: 10.0
-  alpha_0: 3.0
-  lam: 500
-  nb_dispersion: 2.0
-  activity_sparsity: 0.0
-  signature_dropout: 0.0
+  repertoire:
+    source: cosmic
+    path: ../COSMIC_sig/cosmic_signatures.csv
+    signatures: [SBS1, SBS5, SBS36]
 
-  signatures:
-    source: synthesize
-    correlation: 0.0
-    num_signatures: 3
+  switching:
+    enabled: true
+    branch_length_scaling: true
+    units:
+      - signatures: [SBS1] # clock: always on
+        root_prob: 1.0
+        lambda_on: 0.0
+        lambda_off: 0.0
+      - signatures: [SBS5] # clock: always on
+        root_prob: 1.0
+        lambda_on: 0.0
+        lambda_off: 0.0
+      - signatures: [SBS36] # the one switching unit
+        root_prob: 0.3
+        lambda_on: 0.6
+        lambda_off: 0.3
+
+  levels:
+    enabled: true
+    walk: dirichlet
+    concentration: 50.0
+    branch_length_scaling: true
+    concentration_floor: 1.0
+    root_concentration: 1.0
+    activation_pseudocount: 0.02
 
   forest:
-    num_trees: 2
-    min_leaves: 2
-    max_leaves: 2
-    min_branch_length: 200
-    max_branch_length: 500
+    n_trees: 2
+    nodes_per_tree: [4, 8]
+    depth: [2, 4]
+    max_attempts: 200
+    branch_lengths:
+      distribution: lognormal
+      params: { mu: 0.0, sigma: 0.6 }
+
+  burden:
+    mean: 300
+    distribution: negbin
+    dispersion: 2.0
+
+  counts:
+    model: dirichlet_multinomial
+    kappa: 50.0
 
 inference:
   model: fixed

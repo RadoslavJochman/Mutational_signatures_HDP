@@ -38,6 +38,11 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
     results_out = results_dir / name
 
     cfg["simulation"]["results_dir"] = str(data_dir)
+    # The catalogue path is relative to scripts/ (see CLAUDE.md); resolve it
+    # to an absolute path since this test runs from a temp working directory.
+    cfg["simulation"]["repertoire"]["path"] = str(
+        REPO_ROOT / "COSMIC_sig" / "cosmic_signatures.csv"
+    )
     cfg["inference"]["results_dir"] = str(results_dir)
     cfg["inference"]["data"] = {
         "count_matrix": str(data_out / "mutation_count_matrix.csv"),
@@ -48,7 +53,7 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
         "ground_truth_params": str(data_out / "ground_truth_params.json"),
     }
 
-    # ---- generate -----------------------------------------------------
+    # generate
     generate_data.run_generation(cfg)
 
     for fname in [
@@ -57,6 +62,7 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
         "tree_edges.csv",
         "fixed_signatures.csv",
         "true_activities.csv",
+        "true_active_sets.csv",
         "ground_truth_params.json",
     ]:
         assert (data_out / fname).exists(), f"generate did not write {fname}"
@@ -67,9 +73,16 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
     K = true_signatures.shape[0]
     assert true_signatures.shape[1] == 96
     assert true_activities.shape[1] == K
-    assert K == cfg["simulation"]["signatures"]["num_signatures"]
+    assert K == len(cfg["simulation"]["repertoire"]["signatures"])
 
-    # ---- infer ----------------------------------------------------------
+    true_active_sets = pd.read_csv(data_out / "true_active_sets.csv", index_col=0)
+    assert true_active_sets.shape == true_activities.shape
+    # off signatures are exactly zero and agree with the active set
+    assert (
+        (true_activities.to_numpy() == 0.0) == (true_active_sets.to_numpy() == 0)
+    ).all()
+
+    # infer
     run_inference.run_fixed_sig(cfg)
 
     trace_path = results_out / "trace.nc"
@@ -111,7 +124,7 @@ def test_generate_infer_score(tmp_workdir, monkeypatch):
         assert z_var in post.data_vars, f"missing {z_var}"
         assert post[z_var].shape[-2:] == (n_at_depth[d], K)
 
-    # ---- score ------------------------------------------------------------
+    # score
     recovery_out = results_out / "recovery"
     monkeypatch.setattr(
         sys,

@@ -1,8 +1,7 @@
-"""Tests for TreeSwitchDriftGenerator (src/models/switch_drift_generator.py).
+"""Tests for TreeSwitchDriftGenerator (src/models/hdp_simulator.py).
 
-Phase-one tests: constructed directly against hand-built config dicts, no
-YAML and no generate_data.py (see simulator_spec.md section 14). Only the
-import line changes when phase two merges this module into hdp_simulator.py.
+Constructed directly against hand-built config dicts, no YAML and no
+generate_data.py (see simulator_spec.md section 14).
 
 Covers the nine invariants from simulator_spec.md section 14: (a) shapes;
 (b) byte-for-byte seed determinism; (c) loader validation rules; (d)
@@ -20,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.models.switch_drift_generator import (
+from src.models.hdp_simulator import (
     BranchLengthConfig,
     ForestConfig,
     LevelsConfig,
