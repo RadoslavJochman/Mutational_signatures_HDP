@@ -219,6 +219,7 @@ class TreeSignatureGenerator:
 
         self._truth: Dict[str, _NodeTruth] = {}
         self._simulate()
+        self._count_matrix = self._draw_mutation_count_matrix()
 
     def _make_cohort_baseline(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -308,9 +309,9 @@ class TreeSignatureGenerator:
                     parent_label=parent_label,
                 )
 
-    def get_mutation_count_matrix(self) -> pd.DataFrame:
+    def _draw_mutation_count_matrix(self) -> pd.DataFrame:
         """
-        Observed data: an (N x 96) integer count matrix.
+        Draw the observed (N x 96) integer count matrix, once.
 
         Nodes with zero mutations are excluded from this matrix (they have
         nothing observed) but remain in the topology and ground truth.
@@ -334,6 +335,19 @@ class TreeSignatureGenerator:
 
         cols = [f"Channel_{i}" for i in range(N_CHANNELS)]
         return pd.DataFrame(rows, index=labels, columns=cols)
+
+    def get_mutation_count_matrix(self) -> pd.DataFrame:
+        """
+        Observed data: an (N x 96) integer count matrix.
+
+        Drawn once at construction; repeated calls return the same values.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: node labels.  Columns: Channel_0 ... Channel_95.
+        """
+        return self._count_matrix.copy()
 
     def get_tree_edges(self) -> pd.DataFrame:
         """
