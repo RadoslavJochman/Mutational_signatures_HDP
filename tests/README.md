@@ -10,7 +10,9 @@ Mirror `src/` and the scripts under test, for example:
 - `test_analysis_metrics.py` for the metrics in `src/analysis/analysis.py`
 - `test_walk_transforms.py` for the softmax and walk round-trips
 - `test_alignment.py` for `chain_perms_to_true`
-- `test_simulator.py` for `TreeSignatureGenerator`
+- `test_simulator.py` for `TreeSwitchDriftGenerator`
+  (`src/models/switch_drift_generator.py`; phase two moves this into
+  `hdp_simulator.py`, at which point only this test's import line changes)
 - `test_smoke.py` for the tiny end-to-end generate, infer, score run
 
 ## Running
