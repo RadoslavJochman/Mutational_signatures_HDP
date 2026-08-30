@@ -9,15 +9,15 @@
 #
 # Layout assumed (paths are anchored to the project root, not to the cwd):
 #     <root>/scripts/        generate_data.py, run_inference.py, scoring
-#     <root>/configs/        the replicate configs and manifests
-#     <root>/data <root>/results
+#     <root>/experiments/    <sweep>/manifest_configs.txt, <sweep>/rep<NN>/config.yaml,
+#                             <sweep>/rep<NN>/{data,results,plots}/ (this script's own output)
 #     <root>/slurm_scripts/  this file; submit from here
 # Submit from slurm_scripts/ so SLURM_SUBMIT_DIR points there, or export
 # PROJECT_ROOT to override. The Python runs from scripts/ so the configs'
-# ../data and ../results resolve correctly.
+# ../experiments resolves correctly.
 #
 # Usage
-#     sbatch run_replicates.sbatch configs/overlap_sweep/manifest_configs.txt denovo
+#     sbatch run_replicates.sbatch experiments/corr_sweep/manifest_configs.txt denovo
 #     sbatch run_replicates.sbatch <manifest> fixed
 #     sbatch run_replicates.sbatch <manifest> denovo /cluster/scratch/$(id -un)/traces
 # Manifest paths and the config paths inside it are taken relative to the project
@@ -45,8 +45,9 @@ MANIFEST_IN=${1:?usage: sbatch run_replicates.sbatch <manifest> [fixed|denovo] [
 MODE=${2:-denovo}
 
 # Resolve a path that may be absolute, root-relative, or scripts-relative. The
-# manifest is usually root-relative (configs/...), while the config paths inside
-# it are often scripts-relative (../configs/...). Use whichever base exists.
+# manifest is usually root-relative (experiments/...), while the config paths
+# inside it are absolute (make_replicate_configs.py writes them that way).
+# Use whichever base exists.
 resolve_path() {
     local p="$1" base
     case "$p" in /*) printf '%s' "$p"; return ;; esac
@@ -64,7 +65,7 @@ CONFIG_LINE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$MANIFEST")
 CONFIG=$(resolve_path "$CONFIG_LINE")
 [ -f "$CONFIG" ] || { echo "config not found: $CONFIG_LINE (looked under $ROOT and $SCRIPTS)"; exit 1; }
 
-cd "$SCRIPTS"   # so the configs' ../data and ../results resolve here
+cd "$SCRIPTS"   # so the configs' ../experiments resolves here
 echo "task $SLURM_ARRAY_TASK_ID  mode=$MODE  root=$ROOT"
 echo "config=$CONFIG"
 
@@ -83,16 +84,20 @@ cfg["inference"]["model"] = mode
 yaml.safe_dump(cfg, open(out_path, "w"), sort_keys=False)
 PY
 
-# resolve data (generation) and results (inference) dirs from the config
-read DATA RES < <(python - "$CONFIG" <<'PY'
+# resolve the experiment name and its data/results dirs from the config.
+# NAME can itself contain '/' for a sweep replicate (e.g. corr_sweep/rep03);
+# read explicitly here rather than derived from $RES later, since $RES now
+# always ends in '.../results' and basename would collide across every
+# replicate.
+read NAME DATA RES < <(python - "$CONFIG" <<'PY'
 import sys, yaml
 c = yaml.safe_load(open(sys.argv[1]))
 name = c.get("experiment_name", "experiment")
-print(f'{c["simulation"]["results_dir"].rstrip("/")}/{name}',
-      f'{c["inference"]["results_dir"].rstrip("/")}/{name}')
+root = f'{c["experiment_root"].rstrip("/")}/{name}'
+print(name, f'{root}/data', f'{root}/results')
 PY
 )
-echo "DATA=$DATA  RES=$RES  (resolved from $SCRIPTS)"
+echo "NAME=$NAME  DATA=$DATA  RES=$RES  (resolved from $SCRIPTS)"
 
 # generate -> infer -> score
 python generate_data.py --config "$CONFIG"
@@ -123,7 +128,7 @@ fi
 
 # once scored, move traces to scratch
 SCRATCH_DIR=${3:-${TRACE_SCRATCH:-${SCRATCH:-/cluster/scratch/$(id -un)}/treehdp_traces}}
-TRACE_DEST="$SCRATCH_DIR/$(basename "$RES")"
+TRACE_DEST="$SCRATCH_DIR/$NAME"
 mkdir -p "$TRACE_DEST"
 for t in trace.nc trace_raw.nc trace_aligned.nc trace_raw.zarr trace_aligned.zarr; do
     if [ -e "$RES/$t" ]; then
