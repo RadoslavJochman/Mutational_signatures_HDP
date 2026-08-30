@@ -5,16 +5,15 @@ __pycache__/
 .venv/
 logs/
 
-# generated datasets and MCMC traces (large, regenerable / seeded)
+# per-experiment generated artefacts (heavy, regenerable from config.yaml).
+# Trailing-slash-only patterns are not anchored, so these match at any depth:
+# experiments/<name>/data/, experiments/<sweep>/rep03/results/,
+# experiments/<sweep>/rep03/plots/, and so on.
 data/
+results/
+plots/
 *.nc
 *.zarr
-
-# bulk per-run outputs: keep only the aggregated tables and the scaling table
-results/*
-!results/agg/
-!results/agg40/
-!results/scaling_results.csv
 
 # scratch / throwaway
 scripts/throw_away/
