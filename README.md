@@ -32,38 +32,40 @@ against NMF.
 
 ## The model
 
-**Generative process** (`src/models/hdp_simulator.py`, `TreeSignatureGenerator`).
-A finite-dimensional, tree-structured approximation of a hierarchical Dirichlet
-process. A shared cohort baseline `e_0` sits at the root of every tree and each
-node's activity is a noisy copy of its parent's:
+**Generative process** (`src/models/hdp_simulator.py`, `TreeSwitchDriftGenerator`).
+A switch-plus-drift forward simulator (see `simulator_spec.md`), independent of
+the inference model below. Signatures are loaded from a named catalogue, never
+synthesised. On each tree, a binary active set per signature evolves down the
+branches as a two-state gain/loss process (flip probability rising with branch
+length), and among the active signatures the activity vector drifts by a
+mean-preserving Dirichlet step whose concentration scales with branch length:
 
 ```
-e_j ~ Dir(alpha * e_parent(j))     # Dirichlet walk down the tree
-M_j ~ NegBin(lambda, r)            # per-node mutation burden
-x_j ~ Multinomial(M_j, e_j S)      # observed 96-channel counts
+a_j ~ gain/loss process along the tree          # active set, binary per signature
+e_j ~ Dir(conc * base(e_parent, a_j))           # mean-preserving drift, a_j's support only
+M_j ~ NegBin(mean, r)                           # per-node mutation burden
+x_j ~ DirMultinomial(M_j, kappa * e_j S)        # observed 96-channel counts
 ```
 
-with `S` the `K x 96` signature matrix and `alpha` setting how tightly a child
-inherits its parent's activity.
+with `S` the `K x 96` signature matrix. Off signatures are exact zeros, so on/off
+recovery is a real question rather than an artefact of a compositional floor.
 
-**Fixed-signature inference** (`src/models/hdp_inference.py`, `FixedSigHDP`).
-`S` is known; only the per-node activities are inferred. The Dirichlet walk that
-matches the generator is hard to sample (sparse activities sit on the simplex
-boundary and create a funnel), so inference is done on a **logistic-normal walk**
-in unconstrained logit space, written non-centred, which NUTS samples cleanly:
+**Inference** (`src/models/hdp_inference.py`, `TreeHDP`). One model for both
+tracks, under a shared **ILR (sum-zero) activity walk** in unconstrained
+log-ratio space, written non-centred so NUTS samples it cleanly:
 
 ```
-eta_j = eta_parent(j) + sigma * z_j,   z_j ~ Normal(0, I),   e_j = softmax([eta_j, 0])
+eta_j = eta_parent(j) + sigma * z_j,   z_j ~ ZeroSumNormal(1),   e_j = softmax(eta_j)
 ```
 
-**De novo inference** (`src/models/hdp_inference.py`, `DeNovoHDP`).
-`S` is latent and inferred jointly with the activities, under a Dirichlet prior
-`S_k ~ Dir(beta * 1_96)`. This introduces a label-switching symmetry (handled by
-aligning every posterior draw to a reference labelling) and a shape/activity
-trade-off that, in the plain walk, makes the chains settle into several clusters.
-The fix, carried by the `denovo-v1-ilr` model used throughout, replaces the
-anchored softmax with a **symmetric sum-zero (ILR) link** and adds a
-**forest-pooled per-signature usage level** `mu_level`.
+`S` is either fixed (known signatures; component k already is true signature k,
+so there is no label switching) or latent (`S_k ~ Dir(beta * 1_96)`, inferred
+jointly with the activities, the de novo track) -- the fixed case is the same
+model with `S` clamped to a constant instead of drawn. The latent case introduces
+a label-switching symmetry (handled by aligning every posterior draw to a
+reference labelling) and a shape/activity trade-off that, without help, makes the
+chains settle into several clusters; a forest-pooled per-signature usage level
+`mu_level` keeps them from splitting on the harder de novo problem.
 
 **NMF baseline** (`scripts/nmf_baseline.py`). scikit-learn NMF on the flattened
 observed-node counts (it ignores the tree), generalised Kullback-Leibler loss,
@@ -111,7 +113,7 @@ scripts/       run from here
   run_replicates.sbatch       SLURM array: generate -> infer -> score, per replicate
   aggregate_replicates.py     replicates -> mean/std -> aggregated_summary.csv
   plot_sweep_comparison.py    recovery vs NMF, both sweeps (Figure 7)
-  plot_data_scaling_figure.py, generate_walk_figure.py
+  plot_data_scaling_figure.py
 
 configs/       bases_*/ (one base per setting), corr_sweep/ corr_sweep_40/ size_sweep/
                (replicate configs + manifests), config_fixed_realistic_data_sweep_*.yaml
@@ -125,17 +127,23 @@ report/        the lab-rotation report (Final_Report.pdf, and .tex / refs.bib so
 
 ## Reproducing the report
 
+The report's runs are pinned to git tags (`fixed-sig-v2` for the fixed-signature
+track, `denovo-v1-ilr` for de novo; see `CLAUDE.md`). Both the inference model
+(now unified into `TreeHDP`) and the data generator (rewritten to the
+switch-plus-drift design, `simulator_spec.md`) have since changed, so the data
+generation commands below only reproduce the report's numbers when run against
+the tagged commit, not the current checkout -- `git checkout <tag>` first.
+
 There are two ways in. **Option A** rebuilds the figures from the aggregated CSVs
-committed to the repository, in seconds, with no cluster. **Option B** regenerates
-those CSVs from scratch and needs the cluster (many chains, many hours).
+committed to the repository, in seconds, with no cluster, and works from the
+current checkout since it only reads those committed CSVs. **Option B**
+regenerates those CSVs from scratch and needs both the cluster (many chains,
+many hours) and the appropriate tag checked out.
 
 ### Option A — fast path (from the committed CSVs)
 
 ```bash
 cd scripts
-
-# Figure 1: the activity-walk schematic (from the simulator, no data needed)
-python generate_walk_figure.py
 
 # Figure 7: Tree-HDP vs NMF, both sweeps, from ../results/agg and ../results/agg40
 python plot_sweep_comparison.py --agg ../results/agg --agg40 ../results/agg40 --outdir ../plots
@@ -146,16 +154,11 @@ python plot_data_scaling_figure.py --scaling-csv ../results/scaling_results.csv 
 
 Table 1 is read directly from the committed `scaling_results.csv`. Figures 2 to 6
 characterise a single de novo run and need that run's trace, which is too large to
-commit, so they are part of Option B.
+commit, so they are part of Option B. Figure 1 (the activity-walk schematic)
+predates the simulator rewrite and can no longer be regenerated; see the
+figure-to-command map below.
 
 ### Option B — full pipeline
-
-**Figure 1 — activity walk.**
-
-```bash
-cd scripts
-python generate_walk_figure.py      # writes activity_walk.pdf
-```
 
 **Table 1 and the scaling figure — fixed-signature runs over forest size.**
 Each run generates its data, fits the fixed-signature model, and appends one row
@@ -241,7 +244,7 @@ python plot_sweep_comparison.py --agg ../results/agg --agg40 ../results/agg40 --
 
 | Report artefact | Produced by |
 |---|---|
-| Figure 1 (activity walk) | `generate_walk_figure.py` |
+| Figure 1 (activity walk) | retired -- generated by the pre-rewrite simulator (`generate_walk_figure.py`, removed); see `simulator_spec.md` |
 | Table 1 + scaling figure | fixed-sig runs + `scaling_metrics.py` -> `plot_data_scaling_figure.py` |
 | Figures 2-5 (de novo clusters) | de novo run + `diagnose_modes.py` -> `plot_mode_analysis.py` |
 | Figure 6 (mixing geometry) | de novo run + `diagnose_camp_path.py` -> `plot_camp_path.py` |
