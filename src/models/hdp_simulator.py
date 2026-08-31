@@ -696,21 +696,32 @@ class TreeSwitchDriftGenerator:
                 "a seed is required, either as config['seed'] or the seed argument"
             )
         self.seed = int(resolved_seed)
-        # Four independent streams, spawned from one root seed, instead of one
-        # shared Generator: rng.multinomial's cost in the underlying bit
-        # stream depends on the realized burden, so a single shared stream let
-        # burden/counts.model/counts.kappa reshuffle every downstream node's
-        # switching and levels draws (topology, once drawn, was never at
-        # risk). SeedSequence.spawn gives independent, position-independent
-        # streams -- spawning one child's entropy never depends on how much
-        # another child later consumes -- so an observation-side change here
-        # can only ever perturb observation-side output.
+        # Five independent streams, spawned from one root seed, instead of
+        # one shared Generator per stage: rng.multinomial's cost in the
+        # underlying bit stream depends on both the realized burden (n) and
+        # theta = e_j @ S (verified against real 96-channel COSMIC spectra,
+        # not just toy vectors), so a single shared stream let any
+        # observation-side change -- burden, counts.model, counts.kappa, or
+        # K itself -- reshuffle every downstream node's draws on that
+        # stream. switch-drift-v2 isolated topology/switching/levels from
+        # observation this way, but still left burden and counts sharing one
+        # observation stream, which desyncs burden under a K or
+        # counts.model change: theta depends on K, so a K change shifts
+        # counts' own multinomial cost, which shifted every subsequent
+        # node's burden draw on the shared stream. SeedSequence.spawn gives
+        # independent, position-independent streams -- spawning one child's
+        # entropy never depends on how much another child later consumes --
+        # so burden and counts.model/kappa/K now can never perturb each
+        # other.
         root_seq = np.random.SeedSequence(self.seed)
-        seq_topology, seq_switching, seq_levels, seq_observation = root_seq.spawn(4)
+        seq_topology, seq_switching, seq_levels, seq_burden, seq_counts = (
+            root_seq.spawn(5)
+        )
         self._rng_topology = np.random.default_rng(seq_topology)
         self._rng_switching = np.random.default_rng(seq_switching)
         self._rng_levels = np.random.default_rng(seq_levels)
-        self._rng_observation = np.random.default_rng(seq_observation)
+        self._rng_burden = np.random.default_rng(seq_burden)
+        self._rng_counts = np.random.default_rng(seq_counts)
 
         self.cfg = parse_generator_config(config)
         self.signature_names: List[str] = list(self.cfg.repertoire.signatures)
@@ -806,11 +817,11 @@ class TreeSwitchDriftGenerator:
                 node_state[node] = state
                 node_e[node] = e
 
-                burden = draw_burden(self.cfg.burden, self._rng_observation)
+                burden = draw_burden(self.cfg.burden, self._rng_burden)
                 p_channels = e @ self._s_matrix
                 p_channels = p_channels / p_channels.sum()
                 counts = draw_counts(
-                    burden, p_channels, self.cfg.counts, self._rng_observation
+                    burden, p_channels, self.cfg.counts, self._rng_counts
                 )
 
                 self._records.append(

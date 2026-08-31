@@ -677,3 +677,105 @@ def test_topology_invariant_to_switching_rate():
     pd.testing.assert_frame_equal(gen_a.get_tree_edges(), gen_b.get_tree_edges())
     # deliberately not equal -- see the docstring above
     assert not gen_a.get_true_active_sets().equals(gen_b.get_true_active_sets())
+
+
+# RNG stream isolation: burden invariant to counts-side config (the K rung)
+
+
+def _burden_series(gen: TreeSwitchDriftGenerator) -> pd.Series:
+    """Per-node total mutation burden, from the public API only: a count
+    row's sum equals burden exactly (multinomial and dirichlet_multinomial
+    both preserve the trial count), reindexed over every node so a
+    zero-burden node -- dropped from the count matrix -- reads as 0 rather
+    than silently falling out of the comparison."""
+    all_labels = gen.get_true_activities().index
+    counts = gen.get_mutation_count_matrix()
+    return counts.sum(axis=1).reindex(all_labels, fill_value=0).rename("burden")
+
+
+def _rng_independence_config_no_switching(**overrides) -> dict:
+    """Same large forest as _rng_independence_config, but switching disabled
+    and a five-signature repertoire. _unit_index_for_signatures requires
+    every repertoire signature to be covered by a switching unit (there is
+    no "unassigned" case -- an uncovered signature indexes unit_state[-1]),
+    so a same-seed comparison that only drops signatures from the pool, the
+    K-only change these tests need, isn't expressible with switching on."""
+    config = _rng_independence_config(**overrides)
+    config["switching"] = {"enabled": False, "branch_length_scaling": True}
+    config["repertoire"] = {
+        "source": "cosmic",
+        "path": CATALOGUE_PATH,
+        "signatures": ["SBS1", "SBS5", "SBS36", "SBS4", "SBS44"],
+    }
+    return config
+
+
+def test_burden_invariant_to_K():
+    """The ladder rung that found this bug: two configs differing only in K
+    (fewer signatures in the repertoire pool, everything else fixed) must
+    produce byte-identical burden at every node. Pre-fix, burden and counts
+    share one observation stream; rng.multinomial's cost depends on theta =
+    e_j @ S (verified against real 96-channel COSMIC spectra at realistic
+    scale, not just toy vectors), so a K change shifts every downstream
+    node's burden draw even though burden.mean/dispersion never changed --
+    only the first node processed overall was ever safe."""
+    cfg_a = _rng_independence_config_no_switching()
+    cfg_b = copy.deepcopy(cfg_a)
+    cfg_b["repertoire"]["signatures"] = cfg_a["repertoire"]["signatures"][:2]
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    pd.testing.assert_series_equal(_burden_series(gen_a), _burden_series(gen_b))
+    # sanity: counts themselves legitimately differ, so this isn't vacuous
+    assert not gen_a.get_mutation_count_matrix().equals(
+        gen_b.get_mutation_count_matrix()
+    )
+
+
+def test_burden_invariant_to_counts_model():
+    """Same invariant, directly for counts.model (dirichlet_multinomial vs
+    multinomial): the other observation-side knob that changes draw_counts'
+    own draw count and therefore, pre-fix, its cost in the shared stream."""
+    cfg_a = _rng_independence_config_no_switching()
+    cfg_b = _deep_set(cfg_a, "counts", {"model": "multinomial"})
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    pd.testing.assert_series_equal(_burden_series(gen_a), _burden_series(gen_b))
+    assert not gen_a.get_mutation_count_matrix().equals(
+        gen_b.get_mutation_count_matrix()
+    )
+
+
+def test_counts_stream_invariant_to_burden_mean():
+    """The mirror direction of the same split. burden's own draw
+    (gamma-then-poisson) is value-independent in the underlying stream --
+    verified from mean=40 to mean=4000, the full realistic range -- so this
+    direction was never actually broken, even pre-fix: sharing a stream with
+    burden never let burden.mean reshuffle counts beyond the one legitimate
+    channel (burden itself, as multinomial's trial count n). This test is
+    the check that proves burden and counts are now on genuinely separate
+    streams from both sides, not just observationally unaffected by
+    coincidence. counts.model is fixed to plain multinomial here (no extra
+    rng.dirichlet call), so draw_counts consumes the counts stream only as
+    rng.multinomial(burden, theta); theta = e_j @ S comes entirely from
+    topology/switching/levels and must stay untouched by burden.mean.
+    counts' own VALUES necessarily differ when burden.mean changes -- burden
+    is multinomial's trial count n, a real dependency, not a stream leak,
+    exactly like levels legitimately depending on the active set (see
+    test_topology_invariant_to_switching_rate). Do not "fix" this test by
+    asserting counts match too; that assertion would be wrong."""
+    cfg_a = _deep_set(
+        _rng_independence_config_no_switching(), "counts", {"model": "multinomial"}
+    )
+    cfg_b = _deep_set(cfg_a, "burden.mean", cfg_a["burden"]["mean"] * 8)
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    pd.testing.assert_frame_equal(
+        gen_a.get_true_activities(), gen_b.get_true_activities()
+    )
+    # deliberately not equal -- burden.mean changed n; see the docstring above
+    assert not gen_a.get_mutation_count_matrix().equals(
+        gen_b.get_mutation_count_matrix()
+    )
