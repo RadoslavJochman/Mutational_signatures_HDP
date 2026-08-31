@@ -30,8 +30,8 @@ the JAX sampling path (see `enable_local_gpu.sh`).
 
 The project is a git repository, and experiments are pinned to tags. Every config records a
 `git_tag` (in use so far: `fixed-sig-v1`, `fixed-sig-v2`, `denovo-v1`, `denovo-v1-ilr`,
-`denovo-v2`, `treehdp-v1`, `switch-drift-v1`, `switch-drift-v2`), and reproducing a run means
-checking out that tag before generating and fitting.
+`denovo-v2`, `treehdp-v1`, `switch-drift-v1`, `switch-drift-v2`, `switch-drift-v3`), and
+reproducing a run means checking out that tag before generating and fitting.
 Treat a tag as immutable: when the model changes in a way that would alter results, cut a new
 tag and point the new configs at it rather than editing the model under an existing tag. The
 planned unification is such a change and needs its own tag.
@@ -98,6 +98,17 @@ and parts of the models and evaluation to be replaced.
    levels, observation), so a stage's stream position no longer depends on another stage's draw
    count. This changed what a given seed produces, hence the new tag; nothing tracked depended
    on `switch-drift-v1`'s exact output.
+
+   `switch-drift-v2` isolated topology/switching/levels/observation but left burden and counts
+   sharing the one observation stream. `rng.multinomial`'s cost also depends on `theta = e_j @
+   S` (verified against real 96-channel COSMIC spectra, not a toy vector), and `theta` depends
+   on `K`, so a `K` or `counts.model` change shifted counts' own draw cost, which then desynced
+   every downstream node's burden -- exactly the entanglement a ladder-style benchmark that
+   varies `K` at fixed burden cannot tolerate. Fixed (`switch-drift-v3`): split the observation
+   stream in two, `SeedSequence(seed).spawn(5)` (topology, switching, levels, burden, counts),
+   so burden and counts.model/kappa/K can no longer perturb each other. This changed what a
+   given seed produces, hence the new tag; nothing tracked depended on `switch-drift-v2`'s exact
+   output.
 
 The sections below describe the code as it is now, so navigation stays accurate during the
 transition.
