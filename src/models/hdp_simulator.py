@@ -712,7 +712,9 @@ class TreeSwitchDriftGenerator:
         # independent, position-independent streams -- spawning one child's
         # entropy never depends on how much another child later consumes --
         # so burden and counts.model/kappa/K now can never perturb each
-        # other.
+        # other. Invariant: each generation stage draws only from its own
+        # spawned stream, never another stage's -- add a new stream for any
+        # new stage rather than appending to an existing one.
         root_seq = np.random.SeedSequence(self.seed)
         seq_topology, seq_switching, seq_levels, seq_burden, seq_counts = (
             root_seq.spawn(5)
