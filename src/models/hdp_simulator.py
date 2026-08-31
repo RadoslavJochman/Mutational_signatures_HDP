@@ -696,7 +696,21 @@ class TreeSwitchDriftGenerator:
                 "a seed is required, either as config['seed'] or the seed argument"
             )
         self.seed = int(resolved_seed)
-        self.rng = np.random.default_rng(self.seed)
+        # Four independent streams, spawned from one root seed, instead of one
+        # shared Generator: rng.multinomial's cost in the underlying bit
+        # stream depends on the realized burden, so a single shared stream let
+        # burden/counts.model/counts.kappa reshuffle every downstream node's
+        # switching and levels draws (topology, once drawn, was never at
+        # risk). SeedSequence.spawn gives independent, position-independent
+        # streams -- spawning one child's entropy never depends on how much
+        # another child later consumes -- so an observation-side change here
+        # can only ever perturb observation-side output.
+        root_seq = np.random.SeedSequence(self.seed)
+        seq_topology, seq_switching, seq_levels, seq_observation = root_seq.spawn(4)
+        self._rng_topology = np.random.default_rng(seq_topology)
+        self._rng_switching = np.random.default_rng(seq_switching)
+        self._rng_levels = np.random.default_rng(seq_levels)
+        self._rng_observation = np.random.default_rng(seq_observation)
 
         self.cfg = parse_generator_config(config)
         self.signature_names: List[str] = list(self.cfg.repertoire.signatures)
@@ -712,7 +726,9 @@ class TreeSwitchDriftGenerator:
         else:
             self._unit_of_signature = None
 
-        self.forest: List[phylox.DiNetwork] = sample_forest(self.cfg.forest, self.rng)
+        self.forest: List[phylox.DiNetwork] = sample_forest(
+            self.cfg.forest, self._rng_topology
+        )
 
         all_lengths = [
             graph[u][v]["length"] for graph in self.forest for u, v in graph.edges()
@@ -734,7 +750,7 @@ class TreeSwitchDriftGenerator:
 
     def _root_active_set(self) -> Tuple[Optional[np.ndarray], np.ndarray]:
         if self.cfg.switching.enabled:
-            state = draw_root_states(self.cfg.switching.units, self.rng)
+            state = draw_root_states(self.cfg.switching.units, self._rng_switching)
         else:
             state = None
         return state, self._active_set_from_state(state)
@@ -748,7 +764,7 @@ class TreeSwitchDriftGenerator:
                 branch_length,
                 self.cfg.switching.units,
                 self.cfg.switching,
-                self.rng,
+                self._rng_switching,
             )
         else:
             state = None
@@ -771,7 +787,7 @@ class TreeSwitchDriftGenerator:
                     state, a = self._root_active_set()
                     assert a.any(), f"clock guard violated at root '{label}'"
                     e = draw_root_activity(
-                        a, self.cfg.levels.root_concentration, self.rng
+                        a, self.cfg.levels.root_concentration, self._rng_levels
                     )
                 else:
                     p = parents[0]
@@ -785,15 +801,17 @@ class TreeSwitchDriftGenerator:
                     conc = effective_concentration(
                         self.cfg.levels, branch_length, self.l_median
                     )
-                    e = dirichlet_step(base, conc, self.cfg.levels, self.rng)
+                    e = dirichlet_step(base, conc, self.cfg.levels, self._rng_levels)
 
                 node_state[node] = state
                 node_e[node] = e
 
-                burden = draw_burden(self.cfg.burden, self.rng)
+                burden = draw_burden(self.cfg.burden, self._rng_observation)
                 p_channels = e @ self._s_matrix
                 p_channels = p_channels / p_channels.sum()
-                counts = draw_counts(burden, p_channels, self.cfg.counts, self.rng)
+                counts = draw_counts(
+                    burden, p_channels, self.cfg.counts, self._rng_observation
+                )
 
                 self._records.append(
                     _NodeRecord(

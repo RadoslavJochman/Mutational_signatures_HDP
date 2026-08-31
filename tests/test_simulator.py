@@ -559,3 +559,121 @@ def test_off_signatures_hold_with_levels_disabled():
     activities = gen.get_true_activities().to_numpy()
     active_sets = gen.get_true_active_sets().to_numpy()
     assert np.array_equal(activities == 0.0, active_sets == 0)
+
+
+# RNG stream isolation: ground truth invariant to observation-side config
+
+
+def _assert_ground_truth_identical(gen_a, gen_b):
+    """Topology, switching, and levels output must match byte-for-byte, over
+    the full forest, not a couple of rows: a stream desync corrupts every
+    node after the first one processed, so only comparing a few rows could
+    pass by luck even with the bug present."""
+    assert gen_a.get_newick_forest() == gen_b.get_newick_forest()
+    pd.testing.assert_frame_equal(gen_a.get_tree_edges(), gen_b.get_tree_edges())
+    pd.testing.assert_frame_equal(
+        gen_a.get_true_active_sets(), gen_b.get_true_active_sets()
+    )
+    pd.testing.assert_frame_equal(
+        gen_a.get_true_activities(), gen_b.get_true_activities()
+    )
+
+
+def _rng_independence_config(**overrides) -> dict:
+    """A forest big enough (3 trees, 10-16 nodes each, 30+ nodes total) that
+    the historical RNG-desync bug would certainly have corrupted a later
+    node's activities. That bug's mechanism: a node's own activity is drawn
+    before its own burden/counts, so only the very first node processed
+    overall was ever safe under it; every node after it shared a stream with
+    the preceding nodes' burden-dependent counts draws. A two-tree,
+    few-node config could pass an invariance test by luck (never reaching a
+    second node before the assertion); this one is sized so it cannot."""
+    config = _base_config(**overrides)
+    config["forest"] = {
+        "n_trees": 3,
+        "nodes_per_tree": [10, 16],
+        "depth": [3, 6],
+        "max_attempts": 200,
+        "branch_lengths": {
+            "distribution": "lognormal",
+            "params": {"mu": 0.0, "sigma": 0.6},
+        },
+    }
+    return config
+
+
+def test_ground_truth_invariant_to_burden():
+    """Two configs differing only in burden.mean must produce byte-identical
+    topology, active sets, and activities -- this is the test that would
+    have caught the RNG-desync bug: rng.multinomial's cost in the stream
+    depends on the realized burden, so a shared, non-isolated stream let
+    burden reshuffle every downstream node's switching/levels draws."""
+    cfg_a = _rng_independence_config()
+    cfg_b = _deep_set(cfg_a, "burden.mean", cfg_a["burden"]["mean"] * 4)
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    _assert_ground_truth_identical(gen_a, gen_b)
+    # sanity: burden actually did something, so the test isn't vacuous
+    assert not gen_a.get_mutation_count_matrix().equals(
+        gen_b.get_mutation_count_matrix()
+    )
+
+
+def test_ground_truth_invariant_to_kappa():
+    """Same as burden, for counts.kappa (the Dirichlet-multinomial
+    overdispersion parameter)."""
+    cfg_a = _rng_independence_config()
+    cfg_b = _deep_set(cfg_a, "counts.kappa", cfg_a["counts"]["kappa"] * 5)
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    _assert_ground_truth_identical(gen_a, gen_b)
+    assert not gen_a.get_mutation_count_matrix().equals(
+        gen_b.get_mutation_count_matrix()
+    )
+
+
+def test_ground_truth_invariant_to_counts_model():
+    """Same invariance as burden/kappa, for counts.model
+    (dirichlet_multinomial vs multinomial) -- kept as its own test rather
+    than folded into the burden test as "same shape", since switching counts
+    model changes draw_counts' own draw count the most: dirichlet_multinomial
+    does an extra rng.dirichlet call that plain multinomial never makes, on
+    top of a differently-shaped rng.multinomial call. That makes this the
+    single strongest check that the observation stream is truly isolated
+    from topology/switching/levels, not just insensitive to a same-shaped
+    parameter change."""
+    cfg_a = _rng_independence_config()
+    cfg_b = _deep_set(cfg_a, "counts", {"model": "multinomial"})
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    _assert_ground_truth_identical(gen_a, gen_b)
+    assert not gen_a.get_mutation_count_matrix().equals(
+        gen_b.get_mutation_count_matrix()
+    )
+
+
+def test_topology_invariant_to_switching_rate():
+    """Two configs differing only in a switching unit's lambda_on must
+    produce byte-identical topology. Active sets/activities are expected,
+    DELIBERATELY, to differ: carry_forward's base genuinely depends on the
+    realized active set, so a different lambda_on changes which signatures
+    are on and therefore what levels computes from them. That is a real
+    modelling dependency (branch length and the active set legitimately
+    feed the Dirichlet step, simulator_spec.md section 4), not a stream
+    leak -- and NOT a bug. Do not "fix" this test by asserting activities
+    match too; that assertion would be wrong and would mask a real stream
+    leak if one were ever reintroduced.
+    """
+    cfg_a = _rng_independence_config()
+    cfg_b = copy.deepcopy(cfg_a)
+    cfg_b["switching"]["units"][2]["lambda_on"] = 5.0
+    gen_a = TreeSwitchDriftGenerator(cfg_a, seed=RNG_SEED)
+    gen_b = TreeSwitchDriftGenerator(cfg_b, seed=RNG_SEED)
+
+    assert gen_a.get_newick_forest() == gen_b.get_newick_forest()
+    pd.testing.assert_frame_equal(gen_a.get_tree_edges(), gen_b.get_tree_edges())
+    # deliberately not equal -- see the docstring above
+    assert not gen_a.get_true_active_sets().equals(gen_b.get_true_active_sets())
