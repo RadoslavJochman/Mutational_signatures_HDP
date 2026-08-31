@@ -30,8 +30,8 @@ the JAX sampling path (see `enable_local_gpu.sh`).
 
 The project is a git repository, and experiments are pinned to tags. Every config records a
 `git_tag` (in use so far: `fixed-sig-v1`, `fixed-sig-v2`, `denovo-v1`, `denovo-v1-ilr`,
-`denovo-v2`, `treehdp-v1`, `switch-drift-v1`), and reproducing a run means checking out that
-tag before generating and fitting.
+`denovo-v2`, `treehdp-v1`, `switch-drift-v1`, `switch-drift-v2`), and reproducing a run means
+checking out that tag before generating and fitting.
 Treat a tag as immutable: when the model changes in a way that would alter results, cut a new
 tag and point the new configs at it rather than editing the model under an existing tag. The
 planned unification is such a change and needs its own tag.
@@ -88,6 +88,16 @@ and parts of the models and evaluation to be replaced.
    deleted (recoverable from the `treehdp-v1`/`switch-drift-v1` tags); this item's new sweep
    configs, once designed, replace them under `experiments/`. The full simulator design lives
    in `simulator_spec.md` (ask for it if it is not yet in the repo).
+
+   `TreeSwitchDriftGenerator` threaded one `rng` through every draw, and `rng.multinomial`'s
+   cost depends on the realized burden, so two configs differing only in an observation-side
+   parameter (`burden.mean`, `counts.kappa`, `counts.model`) reshuffled every downstream node's
+   switching and activity draws, not just its counts -- making the controlled comparisons this
+   benchmark needs impossible. Fixed (`switch-drift-v2`): four independent generators spawned
+   from one root seed via `SeedSequence(seed).spawn(4)`, one per stage (topology, switching,
+   levels, observation), so a stage's stream position no longer depends on another stage's draw
+   count. This changed what a given seed produces, hence the new tag; nothing tracked depended
+   on `switch-drift-v1`'s exact output.
 
 The sections below describe the code as it is now, so navigation stays accurate during the
 transition.
@@ -287,8 +297,9 @@ Three levels:
   and the simulator. Check bounds, symmetry, and known values for the metrics (`cosine`,
   `hellinger`, `total_variation`, `bray_curtis`); round-trips for the walk transforms
   (`softmax_last_zero`/`inv_softmax_last_zero`, `forward_walk`/`inverse_walk`); a known
-  permutation for `chain_perms_to_true`; and shapes plus seed-determinism for
-  `TreeSwitchDriftGenerator`.
+  permutation for `chain_perms_to_true`; and shapes, seed-determinism, and per-stage RNG-stream
+  isolation (ground truth invariant to `burden`/`kappa`/`counts.model`, topology invariant to
+  switching rate) for `TreeSwitchDriftGenerator`.
 - Integration, the smoke config. A tiny end-to-end run (a couple of trees, roughly 50 to 100
   draws, one chain, fixed seed) through generate then infer then score, asserting the pipeline
   runs, writes the expected files, and produces the expected trace variables. Fast enough to run
