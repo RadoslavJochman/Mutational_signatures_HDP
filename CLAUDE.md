@@ -137,6 +137,13 @@ transition.
 - `COSMIC_sig/` (the signature catalogue) and `tables/` (cross-cutting committed tables:
   `scaling_results.csv`, `agg/`, `agg40/`) live at the repo root. Scripts run from `scripts/`,
   so the configs' `../experiments` and `../COSMIC_sig` resolve to those.
+- `realdata/` is the real-data upstream tooling: turning single-cell sequencing data into
+  the per-node count matrix Tree-HDP consumes, via SECEDO (clustering plus variant
+  calling). Separate from the model/simulator work above -- it neither imports from nor is
+  imported by `src/`/`scripts/`. `realdata/external/` holds the cloned SECEDO repos
+  (gitignored, not our code); `realdata/scripts/` is our own code (chiefly VCF-to-96-channel
+  binning); `realdata/recipe/` is the documented, numbered run plan; `realdata/data/` is
+  gitignored raw/interim/output. See `realdata/README.md`.
 
 ## Running the pipeline
 

@@ -17,3 +17,6 @@ plots/
 
 # scratch / throwaway
 scripts/throw_away/
+
+# cloned external tool repos (their own git history, not ours)
+realdata/external/
