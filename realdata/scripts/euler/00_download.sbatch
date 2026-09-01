@@ -36,6 +36,16 @@ echo "Downloading dbSNP (public GRCh37 substitute for the original build-132 fil
 wget -c -O "${DBSNP_VCF}.gz" "${DBSNP_VCF_GZ_URL}"
 gunzip -f "${DBSNP_VCF}.gz"
 
+if [ ! -x "${ZULU_JDK7_DIR}/bin/java" ]; then
+    echo "Fetching Zulu JDK 7 (MuTect1 needs Java 7; no Euler module for it, and it isn't" \
+         "login-gated like Oracle's own archive -- see config.sh) into ${ZULU_JDK7_DIR}..."
+    mkdir -p "${ZULU_JDK7_DIR}"
+    wget -c -O "${SCRATCH_ROOT}/zulu7.tar.gz" "${ZULU_JDK7_URL}"
+    tar xzf "${SCRATCH_ROOT}/zulu7.tar.gz" -C "${ZULU_JDK7_DIR}" --strip-components=1
+    rm -f "${SCRATCH_ROOT}/zulu7.tar.gz"
+fi
+"${ZULU_JDK7_DIR}/bin/java" -version
+
 if [ ! -f "${COSMIC_VCF}" ]; then
     echo "COSMIC_VCF not found at ${COSMIC_VCF}."
     echo "COSMIC requires your own registered account -- download"

@@ -22,6 +22,8 @@ python3 "${EULER_SCRIPTS}/build_cluster_bams.py" \
     --min-cluster-size 500
 
 ls -la "${CLUSTER_BAMS_DIR}"
+n_clusters=$(find "${CLUSTER_BAMS_DIR}" -maxdepth 1 -name 'clone*.bam' | wc -l)
+echo "SECEDO found ${n_clusters} clusters at >= 500 cells (cluster 0/no-cluster excluded)."
 
 # Task list for stage 06 (mutect): one line per (tumour cluster, chromosome), excluding
 # NORMAL_CLUSTER_ID -- set NORMAL_CLUSTER_ID in config.sh first by inspecting the cluster

@@ -29,9 +29,9 @@ if [ -z "${NORMAL_CLUSTER_ID}" ]; then
     exit 1
 fi
 if [ ! -x "${MUTECT_JAVA}" ]; then
-    echo "MUTECT_JAVA (${MUTECT_JAVA}) not found or not executable -- MuTect1 needs a" \
-         "Java 6 JRE, not provided by either repo. Stage your own and point" \
-         "MUTECT_JAVA/MUTECT_JAR at it (see config.sh)." >&2
+    echo "MUTECT_JAVA (${MUTECT_JAVA}) not found or not executable -- MuTect1 needs" \
+         "Java 7, not provided as an Euler module. Stage 00 fetches a Zulu JDK 7 into" \
+         "\$HOME automatically (see config.sh); rerun it if this is missing." >&2
     exit 1
 fi
 if [ ! -f "${COSMIC_VCF}" ]; then

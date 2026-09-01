@@ -51,9 +51,21 @@ DBSNP_VCF_GZ_URL="https://storage.googleapis.com/gcp-public-data--broad-referenc
 DBSNP_VCF="${REF_DIR}/dbsnp_138.b37.vcf"
 COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 
-# --- MuTect1 itself: old (Java 6) and not distributed by either repo. Point these at your
-# own copies, exactly as the original mutect.sh assumed a personal ~/mutect install. ---
-MUTECT_JAVA="${MUTECT_JAVA:-${HOME}/jre1.6.0_45/bin/java}"
+# --- MuTect1 itself needs Java 7 specifically, not Java 6 as the original mutect.sh's own
+# ~/jre1.6.0_45 assumption implied (GATK/MuTect-era code relies on sun.reflect/sun.misc
+# internals that Java 9+'s module system hides -- verified this isn't just a class-file-
+# version mismatch a newer JVM would tolerate). Euler's module stack has no Java 6/7/8
+# (only openjdk 11/17/21) -- but MuTect1 was never going to be a module anyway, it's a
+# plain `java -jar`. Oracle's own JRE/JDK archive now gates old versions behind a login;
+# Azul's Zulu builds of OpenJDK don't, and cover Java 7. Verified: downloaded and ran
+# ZULU_JDK7_URL's tarball, reports "openjdk version 1.7.0_352". 00_download fetches and
+# unpacks it into ZULU_JDK7_DIR (under $HOME, not scratch -- a small reusable tool, not
+# run data, and $HOME survives a scratch purge). ---
+ZULU_JDK7_URL="https://cdn.azul.com/zulu/bin/zulu7.56.0.11-ca-jdk7.0.352-linux_x64.tar.gz"
+ZULU_JDK7_DIR="${HOME}/secedo_tools/zulu7"
+MUTECT_JAVA="${MUTECT_JAVA:-${ZULU_JDK7_DIR}/bin/java}"
+# MuTect 1.1.4 jar: needs your own copy (Broad login), exactly as the original mutect.sh
+# assumed a personal ~/mutect install. Expected at MUTECT_JAR; override to point elsewhere.
 MUTECT_JAR="${MUTECT_JAR:-${HOME}/mutect/muTect-1.1.4.jar}"
 
 # --- pseudo-normal cluster: the original script hardcodes "clone19" for slice B; which

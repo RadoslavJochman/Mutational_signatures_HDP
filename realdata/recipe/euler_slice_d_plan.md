@@ -52,19 +52,57 @@ directly, not from the earlier read-through -- recorded here rather than glossed
 
 ## Prerequisites you supply (not fetchable by either repo, unattended)
 
-- **COSMIC VCF** (`cosmic_v94_hg37_coding_and_noncoding.vcf` or your closest available
-  GRCh37 COSMIC release): needs your own registered COSMIC account; `00_download`
-  and `06_mutect` both refuse to proceed silently without it at `COSMIC_VCF`.
-- **MuTect 1.1.4 jar and a Java 6 JRE**: the original script already assumed a personal
-  `~/mutect/muTect-1.1.4.jar` and `~/jre1.6.0_45/bin/java` -- not something either repo
-  installs. Point `MUTECT_JAR`/`MUTECT_JAVA` at your own copies.
+- **COSMIC VCF**: needs your own registered COSMIC account; `00_download` and
+  `06_mutect` both refuse to proceed silently without it at `COSMIC_VCF`. Expected
+  filename/path (override by exporting `COSMIC_VCF` before submitting):
+  `${SCRATCH}/secedo_slice_d/ref/cosmic_v94_hg37_coding_and_noncoding.vcf` (or your
+  closest available GRCh37 COSMIC release, renamed to that or pointed at via
+  `COSMIC_VCF`) -- alongside the reference and dbSNP in the same scratch `ref/`
+  directory. Must be GRCh37: confirmed separately (see "Dependency check" below) that
+  the repo's own `COSMIC_sig/cosmic_signatures.csv` already is, so this is the only
+  remaining build check. Note scratch is purged/unbacked-up, so this file doesn't
+  survive an idle gap between staging it and running the pipeline -- stage it close to
+  submission, not far ahead of it.
+- **MuTect 1.1.4 jar**: needs your own copy (Broad login); the original script already
+  assumed a personal `~/mutect/muTect-1.1.4.jar`, not something either repo installs.
+  Expected path: `${HOME}/mutect/muTect-1.1.4.jar` (override via `MUTECT_JAR`).
 - **`PERSIST_DIR`**: defaults to `$HOME/secedo_runs/slice_D` in `config.sh`. Confirm
   that's where you want the final VCFs, or point it at your group's `/cluster/work`
   storage instead if you'd rather keep it off `$HOME`'s quota.
-- dbSNP is *not* on this list: `00_download` fetches a public GRCh37 substitute
-  (`dbsnp_138.b37.vcf.gz` from the Broad's public reference bucket, which supersedes the
-  original script's build-132 file) since the exact file `mutect.sh` points at isn't
-  hosted anywhere either repo documents.
+- dbSNP and the Java 7 runtime are *not* on this list any more (see below) -- both are
+  fetched automatically by `00_download`, needing no account.
+
+## Dependency check: MuTect1 + Java on Euler, and the COSMIC build
+
+Checked before launching anything, since both would have blocked the run behind the
+170 GB slice-D transfer if found late.
+
+- **Euler has no Java 6/7/8 module.** Its current module stack (and the GDC group's)
+  lists only `openjdk/11.0.23_9`, `openjdk/17.0.11_9`, `openjdk/21.0.3_9`. Not the
+  actual blocker, though: MuTect1 is a plain `java -jar`, never a module -- the original
+  `mutect.sh` already assumed a personal JRE, not an installed one.
+- **MuTect1 needs Java 7, not Java 6** as the original script's own `~/jre1.6.0_45`
+  path implied. GATK/MuTect-era code (Queue, cofoja-based contracts) relies on
+  `sun.reflect`/`sun.misc` internals that Java 9+'s module system hides -- a removed-API
+  break, not a class-file-version mismatch a newer JVM would simply tolerate.
+- **Resolved without a module or an account.** Oracle's own JRE/JDK archive now gates
+  old versions behind a login; Azul's Zulu builds of OpenJDK don't, and cover Java 7.
+  Downloaded and ran `zulu7.56.0.11-ca-jdk7.0.352-linux_x64.tar.gz` to confirm: reports
+  `openjdk version "1.7.0_352"` and launches cleanly. `00_download.sbatch` now fetches
+  and unpacks this into `$HOME/secedo_tools/zulu7` (small, reusable, kept outside
+  scratch so it survives a purge), and `config.sh` points `MUTECT_JAVA` there by
+  default. Verdict: the SECEDO-faithful MuTect1 path is viable on Euler; no need to
+  substitute GATK4 Mutect2.
+- **COSMIC build confirmed GRCh37.** `COSMIC_sig/cosmic_signatures.csv` carried no
+  build metadata in the commit that added it, so this was checked numerically:
+  diffed against COSMIC's own current release (v3.4 SBS, both GRCh37 and GRCh38,
+  fetched directly, no login needed). All 8 of our 10 signatures present in v3.4
+  (SBS1, SBS4, SBS5, SBS36, SBS37, SBS40a, SBS44, SBS92) match GRCh37 to
+  floating-point precision and are clearly distinct from GRCh38 (differs from the 3rd
+  significant digit on, even on the first channel checked). SBS105 and SBS112 aren't in
+  v3.4 (presumably added in a later COSMIC release) so weren't cross-checked directly,
+  but nothing suggests they're a different build than the rest of the same file. No
+  fix needed -- matches the reference used throughout this pipeline.
 
 ## Peak scratch usage for slice D
 
@@ -110,8 +148,17 @@ array job, so the copy still runs -- and reports what did or didn't complete -- 
 some (cluster, chromosome) tasks fail, rather than stranding a completed subset in
 scratch.
 
+## Report at completion
+
+Once the run finishes, report explicitly: **how many clusters SECEDO found** (stage 05's
+`n_clusters` line) and **the somatic SNV count per cluster**, summed across chromosomes
+(stage 07's `cluster_summary.csv`). This is the number that tells us whether slice D's
+real-data regime lands in the sparse tens-to-hundreds-of-mutations-per-node range
+Tree-HDP is built for, or somewhere else -- the actual point of running this slice.
+
 ## Not yet done
 
 - Submitting anything (`sbatch`). This pass is write-only, per instruction.
-- Sourcing the actual COSMIC VCF and MuTect 1.1.4 jar/JRE 6 -- prerequisites above.
+- Sourcing the actual COSMIC VCF and MuTect 1.1.4 jar -- prerequisites above (Java 7 is
+  now resolved, see "Dependency check").
 - Deciding `NORMAL_CLUSTER_ID` -- only knowable after stage 04/05 run on real data.

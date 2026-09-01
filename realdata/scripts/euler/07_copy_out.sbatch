@@ -40,3 +40,23 @@ if [ "${n_scratch}" -ne "${n_persist}" ]; then
 fi
 echo "Copied ${n_persist} per-cluster somatic VCFs to ${PERSIST_DIR}/mutect_vcfs. Done."
 du -sh "${PERSIST_DIR}"
+
+# The two numbers that matter for deciding whether this data fits the sparse per-node
+# count regime Tree-HDP targets: how many clusters SECEDO found, and the somatic SNV
+# count per cluster (summed across chromosomes). Written to a CSV rather than left in
+# the log, so it survives independently of this job's stdout.
+echo "Cluster summary (somatic SNVs per cluster, summed across chromosomes):"
+summary_csv="${PERSIST_DIR}/cluster_summary.csv"
+echo "cluster_id,n_somatic_snvs" > "${summary_csv}"
+n_clusters_final=0
+for bam in "${CLUSTER_BAMS_DIR}"/clone*.bam; do
+    [ -e "${bam}" ] || continue
+    cid=$(basename "${bam}" .bam | sed 's/^clone//')
+    [ "${cid}" = "${NORMAL_CLUSTER_ID}" ] && continue
+    n=$(cat "${PERSIST_DIR}/mutect_vcfs"/clone${cid}_*.vcf 2>/dev/null | grep -vc '^#' || true)
+    echo "  clone${cid}: ${n}"
+    echo "${cid},${n}" >> "${summary_csv}"
+    n_clusters_final=$((n_clusters_final + 1))
+done
+echo "${n_clusters_final} tumour clusters (normal cluster ${NORMAL_CLUSTER_ID} excluded)." \
+     "Full table: ${summary_csv}"
