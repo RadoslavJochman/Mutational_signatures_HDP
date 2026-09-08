@@ -57,11 +57,16 @@ DBSNP_VCF="${REF_DIR}/dbsnp_138.b37.vcf"
 COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 
 # --- GATK4 (Mutect2 + FilterMutectCalls + SelectVariants): runs on modern Java, so unlike
-# MuTect1 it needs no special JDK fetch -- Euler's own openjdk module stack (11/17/21)
-# covers it. Try a module first (`module spider gatk` on a login node); if Euler has none,
-# install into the pipeline's own conda/venv instead (`conda install -c bioconda gatk4` or
-# `pip install gatk`) and drop the `module load` line in 06_mutect.sbatch. Not resolved
-# here since it needs checking against the live module tree at submission time. ---
+# MuTect1 it needs no special JDK fetch. Confirmed interactively on an Euler login node:
+# gatk lives under the stack/2024-06 software stack, not the default one, so a bare
+# `module load gatk` silently no-ops. The working chain is
+#   module load stack/2024-06 gcc/12.2.0
+#   module load gatk/4.4.0.0
+# which also resolves samtools (1.17) the same way; both 00_download.sbatch and
+# 06_mutect.sbatch load this chain explicitly. If Euler's module tree changes and this
+# stops resolving, fall back to installing gatk4 into the pipeline's own conda/venv
+# (`conda install -c bioconda gatk4` or `pip install gatk`) and drop the `module load`
+# lines in those two scripts. ---
 
 # --- pseudo-normal cluster: the original script hardcodes "clone19" for slice B; which
 # cluster stands in for the matched normal is data-dependent and cannot be known before

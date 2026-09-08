@@ -56,7 +56,8 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
-module load gatk 2>/dev/null || true      # see config.sh's GATK note if this is a no-op
+module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
+module load gatk/4.4.0.0 2>/dev/null || true
 module load samtools 2>/dev/null || true  # needed here for the read-group retagging step
 
 if [ -z "${NORMAL_CLUSTER_ID}" ]; then

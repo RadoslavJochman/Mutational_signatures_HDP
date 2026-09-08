@@ -12,6 +12,8 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
+module load stack/2024-06 gcc/12.2.0 2>/dev/null || true  # samtools and gatk both live here
+
 echo "Downloading slice ${SLICE} BAM/BAI/summary into ${RAW_DIR}..."
 wget -c -O "${RAW_DIR}/breast_tissue_D_2k_possorted_bam.bam" "${BAM_URL}"
 wget -c -O "${RAW_DIR}/breast_tissue_D_2k_possorted_bam.bam.bai" "${BAI_URL}"
@@ -28,7 +30,7 @@ if [ ! -f "${REF_FASTA}" ]; then
     mv "${found}" "${REF_FASTA}"
 fi
 
-module load samtools 2>/dev/null || true  # adjust to the module name/version on Euler
+module load samtools 2>/dev/null || true  # resolves once stack/2024-06 is loaded above
 samtools faidx "${REF_FASTA}"
 
 echo "Downloading dbSNP (public GRCh37 substitute for the original build-132 file --" \
@@ -38,9 +40,7 @@ gunzip -f "${DBSNP_VCF}.gz"
 # Not consumed by 06_mutect.sbatch any more (GATK4 Mutect2 has no --dbsnp argument);
 # staged anyway in case it's wanted for a future --germline-resource-style refinement.
 
-module load gatk 2>/dev/null || true   # adjust to the module name/version on Euler; if
-                                        # Euler has none, install gatk4 into the pipeline
-                                        # conda/venv instead -- see config.sh
+module load gatk/4.4.0.0 2>/dev/null || true  # resolves once stack/2024-06 is loaded above
 if command -v gatk >/dev/null 2>&1; then
     gatk --version
     if [ ! -f "${REF_FASTA%.fa}.dict" ]; then
@@ -48,8 +48,8 @@ if command -v gatk >/dev/null 2>&1; then
         gatk CreateSequenceDictionary -R "${REF_FASTA}"
     fi
 else
-    echo "gatk not found on PATH after 'module load gatk' -- install it into the" \
-         "pipeline conda/venv (see config.sh) before running stage 06." >&2
+    echo "gatk not found on PATH after loading stack/2024-06 gcc/12.2.0 gatk/4.4.0.0 --" \
+         "see config.sh's GATK note before running stage 06." >&2
 fi
 
 if [ ! -f "${COSMIC_VCF}" ]; then
