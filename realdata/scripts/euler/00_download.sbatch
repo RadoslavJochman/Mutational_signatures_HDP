@@ -35,23 +35,31 @@ echo "Downloading dbSNP (public GRCh37 substitute for the original build-132 fil
      "see the plan doc) into ${REF_DIR}..."
 wget -c -O "${DBSNP_VCF}.gz" "${DBSNP_VCF_GZ_URL}"
 gunzip -f "${DBSNP_VCF}.gz"
+# Not consumed by 06_mutect.sbatch any more (GATK4 Mutect2 has no --dbsnp argument);
+# staged anyway in case it's wanted for a future --germline-resource-style refinement.
 
-if [ ! -x "${ZULU_JDK7_DIR}/bin/java" ]; then
-    echo "Fetching Zulu JDK 7 (MuTect1 needs Java 7; no Euler module for it, and it isn't" \
-         "login-gated like Oracle's own archive -- see config.sh) into ${ZULU_JDK7_DIR}..."
-    mkdir -p "${ZULU_JDK7_DIR}"
-    wget -c -O "${SCRATCH_ROOT}/zulu7.tar.gz" "${ZULU_JDK7_URL}"
-    tar xzf "${SCRATCH_ROOT}/zulu7.tar.gz" -C "${ZULU_JDK7_DIR}" --strip-components=1
-    rm -f "${SCRATCH_ROOT}/zulu7.tar.gz"
+module load gatk 2>/dev/null || true   # adjust to the module name/version on Euler; if
+                                        # Euler has none, install gatk4 into the pipeline
+                                        # conda/venv instead -- see config.sh
+if command -v gatk >/dev/null 2>&1; then
+    gatk --version
+    if [ ! -f "${REF_FASTA%.fa}.dict" ]; then
+        echo "Creating the reference sequence dictionary GATK4 needs alongside the .fai..."
+        gatk CreateSequenceDictionary -R "${REF_FASTA}"
+    fi
+else
+    echo "gatk not found on PATH after 'module load gatk' -- install it into the" \
+         "pipeline conda/venv (see config.sh) before running stage 06." >&2
 fi
-"${ZULU_JDK7_DIR}/bin/java" -version
 
 if [ ! -f "${COSMIC_VCF}" ]; then
     echo "COSMIC_VCF not found at ${COSMIC_VCF}."
     echo "COSMIC requires your own registered account -- download"
     echo "cosmic_v94_hg37_coding_and_noncoding.vcf (or your closest available GRCh37"
-    echo "COSMIC release) by hand and place it there, or export COSMIC_VCF=<path> before"
-    echo "resubmitting stage 06 (mutect). Not fetched automatically."
+    echo "COSMIC release) by hand and place it there, or export COSMIC_VCF=<path>."
+    echo "Not fetched automatically. Note: unused by 06_mutect.sbatch as of the Mutect2"
+    echo "switch (no equivalent to MuTect1's --cosmic) -- staged for provenance/future use"
+    echo "only, no longer a prerequisite for stage 06 to run."
 fi
 
 echo "Slice ${SLICE} download complete."

@@ -8,19 +8,22 @@
 #
 # Must-have (a): scratch is transient and unbacked-up, so copy the run's outputs to
 # persistent storage as soon as stage 06 finishes -- do not leave the only copy here.
-# Copies the per-cluster somatic VCFs (the actual deliverable) plus the supporting
-# call-stats/coverage files, the secedo clustering assignment and per-cluster
-# reference-relative VCFs, and this run's logs, so the run is reproducible-by-inspection
-# without needing scratch to still exist.
+# Copies the per-cluster somatic VCFs (the actual deliverable), the secedo clustering
+# assignment and per-cluster reference-relative VCFs, and this run's logs, so the run is
+# reproducible-by-inspection without needing scratch to still exist.
+#
+# MuTect1's call-stats .txt/.coverage side files are gone now that stage 06 runs
+# Mutect2 -- there is no equivalent output to copy, so only the final filtered VCFs are
+# collected here (the intermediate clone*.raw.vcf.gz/clone*.filtered.vcf.gz stay in
+# scratch, not copied out).
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
 mkdir -p "${PERSIST_DIR}/mutect_vcfs" "${PERSIST_DIR}/secedo_clustering" "${PERSIST_DIR}/logs"
 
-echo "Copying per-cluster somatic VCFs and call-stats to ${PERSIST_DIR}/mutect_vcfs..."
-cp "${MUTECT_DIR}"/clone*.vcf "${MUTECT_DIR}"/clone*.txt "${MUTECT_DIR}"/clone*.coverage \
-    "${PERSIST_DIR}/mutect_vcfs/"
+echo "Copying per-cluster somatic VCFs to ${PERSIST_DIR}/mutect_vcfs..."
+cp "${MUTECT_DIR}"/clone*.vcf "${PERSIST_DIR}/mutect_vcfs/"
 
 echo "Copying secedo clustering assignment and reference-relative VCFs to" \
      "${PERSIST_DIR}/secedo_clustering..."

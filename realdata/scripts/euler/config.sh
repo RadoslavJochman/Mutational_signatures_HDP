@@ -1,9 +1,8 @@
 # Shared paths and settings for the slice-D-only Euler run. Sourced by every job script
 # below, so the pipeline stages can never disagree on where things live.
 #
-# Adjust PERSIST_DIR, COSMIC_VCF, MUTECT_JAR, and MUTECT_JAVA before submitting -- these
-# four are not fetchable by any script in either SECEDO repo (see
-# realdata/recipe/euler_slice_d_plan.md, "Prerequisites you supply").
+# Adjust PERSIST_DIR before submitting -- not fetchable by any script in either SECEDO
+# repo (see realdata/recipe/euler_slice_d_plan.md, "Prerequisites you supply").
 
 set -euo pipefail
 
@@ -44,29 +43,25 @@ SUMMARY_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2
 REF_FASTA_GZ_URL="https://ftp.ensembl.org/pub/grch37/release-113/fasta/homo_sapiens/dna/Homo_sapiens.GRCh37.dna.primary_assembly.fa.gz"
 REF_FASTA="${REF_DIR}/GRCh37.p13.genome.fa"
 
-# --- MuTect1 reference inputs: not hosted by either repo, see the plan doc.
-# dbSNP is a public substitute (b138 supersedes b132); COSMIC needs your own COSMIC
-# account and cannot be fetched unattended -- stage it at COSMIC_VCF yourself first. ---
+# --- dbSNP and COSMIC: staged for the original MuTect1 recipe, not hosted by either repo
+# (see the plan doc). Neither is consumed by GATK4 Mutect2/FilterMutectCalls -- MuTect1's
+# --dbsnp/--cosmic were inputs to its own LOD-threshold classifier (stricter at dbSNP
+# sites, relaxed at COSMIC hotspots), a mechanism GATK4 replaced with germline-resource
+# population-AF filtering and Panels of Normals, neither of which COSMIC or this dbSNP
+# file can serve as (they'd need an AF INFO field; COSMIC's is a mutation catalogue, not
+# population frequencies). Left defined and staged (harmless, and dbSNP or a like-shaped
+# resource may still be useful for --germline-resource once we add one) but unused by
+# 06_mutect.sbatch as of the Mutect2 switch -- see the plan doc's Mutect1->Mutect2 note. ---
 DBSNP_VCF_GZ_URL="https://storage.googleapis.com/gcp-public-data--broad-references/hg19/v0/dbsnp_138.b37.vcf.gz"
 DBSNP_VCF="${REF_DIR}/dbsnp_138.b37.vcf"
 COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 
-# --- MuTect1 itself needs Java 7 specifically, not Java 6 as the original mutect.sh's own
-# ~/jre1.6.0_45 assumption implied (GATK/MuTect-era code relies on sun.reflect/sun.misc
-# internals that Java 9+'s module system hides -- verified this isn't just a class-file-
-# version mismatch a newer JVM would tolerate). Euler's module stack has no Java 6/7/8
-# (only openjdk 11/17/21) -- but MuTect1 was never going to be a module anyway, it's a
-# plain `java -jar`. Oracle's own JRE/JDK archive now gates old versions behind a login;
-# Azul's Zulu builds of OpenJDK don't, and cover Java 7. Verified: downloaded and ran
-# ZULU_JDK7_URL's tarball, reports "openjdk version 1.7.0_352". 00_download fetches and
-# unpacks it into ZULU_JDK7_DIR (under $HOME, not scratch -- a small reusable tool, not
-# run data, and $HOME survives a scratch purge). ---
-ZULU_JDK7_URL="https://cdn.azul.com/zulu/bin/zulu7.56.0.11-ca-jdk7.0.352-linux_x64.tar.gz"
-ZULU_JDK7_DIR="${HOME}/secedo_tools/zulu7"
-MUTECT_JAVA="${MUTECT_JAVA:-${ZULU_JDK7_DIR}/bin/java}"
-# MuTect 1.1.4 jar: needs your own copy (Broad login), exactly as the original mutect.sh
-# assumed a personal ~/mutect install. Expected at MUTECT_JAR; override to point elsewhere.
-MUTECT_JAR="${MUTECT_JAR:-${HOME}/mutect/muTect-1.1.4.jar}"
+# --- GATK4 (Mutect2 + FilterMutectCalls + SelectVariants): runs on modern Java, so unlike
+# MuTect1 it needs no special JDK fetch -- Euler's own openjdk module stack (11/17/21)
+# covers it. Try a module first (`module spider gatk` on a login node); if Euler has none,
+# install into the pipeline's own conda/venv instead (`conda install -c bioconda gatk4` or
+# `pip install gatk`) and drop the `module load` line in 06_mutect.sbatch. Not resolved
+# here since it needs checking against the live module tree at submission time. ---
 
 # --- pseudo-normal cluster: the original script hardcodes "clone19" for slice B; which
 # cluster stands in for the matched normal is data-dependent and cannot be known before

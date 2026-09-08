@@ -1,8 +1,8 @@
 #!/bin/bash
 # Orchestrates the slice-D pipeline as a chain of dependent sbatch submissions. NOT run
 # automatically by anything -- review config.sh (PERSIST_DIR, NORMAL_CLUSTER_ID after
-# stage 05, COSMIC_VCF, MUTECT_JAVA/MUTECT_JAR) and this file, then submit by hand, one
-# stage at a time or all at once via --dependency chaining as written here.
+# stage 05, gatk on PATH -- see config.sh's GATK note) and this file, then submit by hand,
+# one stage at a time or all at once via --dependency chaining as written here.
 #
 # NORMAL_CLUSTER_ID cannot be known before stage 05 runs, so this script pauses there:
 # rerun it (cheap, samtools merge only) after setting NORMAL_CLUSTER_ID to continue into
@@ -15,7 +15,12 @@ j00=$(sbatch --parsable 00_download.sbatch)
 j01=$(sbatch --parsable --dependency=afterok:${j00} 01_preprocess.sbatch)
 
 n_cells=$(find "${SCRATCH}/secedo_slice_d/cell_bams" -maxdepth 1 -name '*.bam' 2>/dev/null | wc -l)
-n_cells=${n_cells:-1999}  # placeholder until stage 01 has actually run
+# wc -l always prints a number, even "0" for an empty/missing directory, so a bash
+# ${n_cells:-1999} default never fires here -- check explicitly instead. (An "&&"-chained
+# form would abort under set -e when the check is false, so use if/fi instead.)
+if [ "${n_cells}" -le 0 ]; then
+    n_cells=1999  # placeholder until stage 01 has actually run
+fi
 j02=$(sbatch --parsable --dependency=afterok:${j01} --array=0-$((n_cells - 1))%200 \
     02_split_chrom.sbatch)
 
