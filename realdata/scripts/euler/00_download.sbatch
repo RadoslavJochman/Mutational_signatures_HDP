@@ -11,6 +11,7 @@
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
+module load eth_proxy 2>/dev/null || true   # compute nodes reach the internet only via the ETH proxy
 
 module load stack/2024-06 gcc/12.2.0 2>/dev/null || true  # samtools and gatk both live here
 
