@@ -14,7 +14,7 @@
 # (1-22, X, Y), for parallelising pileup creation exactly as the original does.
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 module load samtools 2>/dev/null || true
 
 mapfile -t cell_bams < <(find "${CELL_BAMS_DIR}" -maxdepth 1 -name '*.bam' | sort)

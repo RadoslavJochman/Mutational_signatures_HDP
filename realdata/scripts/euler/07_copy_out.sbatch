@@ -18,7 +18,7 @@
 # scratch, not copied out).
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 
 mkdir -p "${PERSIST_DIR}/mutect_vcfs" "${PERSIST_DIR}/secedo_clustering" "${PERSIST_DIR}/logs"
 

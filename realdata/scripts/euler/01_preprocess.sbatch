@@ -13,7 +13,7 @@
 # no synthetic tag list is needed.
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 module load samtools 2>/dev/null || true
 
 RAW_BAM="${RAW_DIR}/breast_tissue_D_2k_possorted_bam.bam"

@@ -54,7 +54,7 @@
 # 05 writes tasks.tsv (its exact size depends on how many clusters slice D produces).
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 
 module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
 module load gatk/4.4.0.0 2>/dev/null || true

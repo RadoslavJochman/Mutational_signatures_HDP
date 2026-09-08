@@ -11,7 +11,7 @@
 # secedo's own clustering + pileup .map output plus the per-cell BAMs from stage 01.
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 module load samtools 2>/dev/null || true
 
 python3 "${EULER_SCRIPTS}/build_cluster_bams.py" \

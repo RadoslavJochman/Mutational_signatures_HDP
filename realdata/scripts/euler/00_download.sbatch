@@ -10,7 +10,7 @@
 # scratch. Slice D only -- do not adapt this loop back to "A B C D E".
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 
 module load stack/2024-06 gcc/12.2.0 2>/dev/null || true  # samtools and gatk both live here
 

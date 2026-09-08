@@ -23,7 +23,7 @@
 # --min_different=3 (see clustering.sh's own comment); 24GB (20 x 1200M) leaves margin.
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 module load openblas 2>/dev/null || true  # adjust to the module name/version on Euler
 
 "${SECEDO_BIN}" -i "${PILEUP_DIR}/" -o "${CLUSTERING_DIR}/" --num_threads 20 \
