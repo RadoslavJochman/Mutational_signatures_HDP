@@ -1,10 +1,11 @@
 # Single-slice (D) run on Euler: SLURM translation, gaps, and space budget
 
 Scope: slice D only, through somatic calling with GATK4 Mutect2 (originally MuTect1; see
-"Correction: MuTect1 -> Mutect2" below), producing per-cluster somatic VCFs. Slices A, B,
-C, E are untouched. Scripts live in `realdata/scripts/euler/` (`config.sh` plus
-`00_download.sbatch` through `07_copy_out.sbatch`, `submit_all.sh`,
-`build_cluster_bams.py`). Nothing has been submitted -- `sbatch` has not been run.
+"Correction: MuTect1 -> Mutect2" below) and on into the tree and spectra TreeHDP consumes
+(stage 8, below). Slices A, B, C, E are untouched. Scripts live in
+`realdata/scripts/euler/` (`config.sh` plus `00_download.sbatch` through
+`08_build_tree.sbatch`, `submit_all.sh`, `build_cluster_bams.py`, `build_tree.py`).
+Nothing has been submitted -- `sbatch` has not been run.
 
 ## What changed going from the LSF originals to SLURM
 
@@ -238,6 +239,53 @@ Once the run finishes, report explicitly: **how many clusters SECEDO found** (st
 (stage 07's `cluster_summary.csv`). This is the number that tells us whether slice D's
 real-data regime lands in the sparse tens-to-hundreds-of-mutations-per-node range
 Tree-HDP is built for, or somewhere else -- the actual point of running this slice.
+
+## Stage 8: tree and spectra for TreeHDP
+
+`08_build_tree.sbatch` (thin wrapper around `build_tree.py`, following the stage-05
+split) turns stage 07's per-cluster somatic VCFs into the two inputs `TreeHDP`
+consumes. Not chained into `submit_all.sh`'s dependency block -- run by hand once 07
+has copied the VCFs out.
+
+- **Inputs**: `${PERSIST_DIR}/mutect_vcfs/clone<c>_<chrom>.vcf` (all tumour clusters x
+  chromosomes, PASS + SNP-only, stage 07's output), `REF_FASTA` (trinucleotide context),
+  `COSMIC_sig/cosmic_signatures.csv` (channel-order check only), `NORMAL_CLUSTER_ID`
+  (from `config.sh`, set after stage 05).
+- **Outputs**, written to `${PERSIST_DIR}/tree_input/`:
+  - `tree.nwk` -- one rooted, labelled-internal-node Newick tree.
+  - `spectra.csv` -- per-cluster 96-channel spectra, ready to load as `TreeHDP`'s
+    `data_matrix` via `pd.read_csv(index_col=0)`.
+  - `clone_snv_matrix.csv` -- the clone x SNV binary presence matrix the tree was built
+    from (provenance, and SCITE's genotype input).
+  - `tree_diagnostics.txt` -- per-edge mutation-containment fractions, the
+    perfect-phylogeny (three-gamete) violation count, SNVs skipped in binning, and the
+    SCITE topology cross-check if a SCITE binary was available.
+
+Two contracts this stage exists to uphold (see `build_tree.py`'s module docstring and
+`_BaseTreeHDP` in `src/models/hdp_inference.py` for the model-side half of each):
+
+- **Pseudo-normal as latent root.** `NORMAL_CLUSTER_ID` is the single root of
+  `tree.nwk` and is deliberately absent from `spectra.csv` -- it has no VCF (excluded
+  from stage 05's `tasks.tsv`), so it becomes a spectrum-less latent root, which the
+  model handles natively rather than needing a synthesised spectrum. Node labels in the
+  Newick, `spectra.csv`'s index, the SECEDO cluster IDs, and Mutect2's `-normal` are one
+  ID system throughout.
+- **cosmic_signatures.csv channel order.** `spectra.csv`'s 96 columns are in
+  cosmic_signatures.csv's exact channel order, because the model does
+  `dot(activities, signatures)` and aligns observed counts to signature columns
+  positionally. `build_tree.py` asserts this against `cosmic_signatures.csv` before
+  writing anything and refuses to run if it does not hold; cosmic_signatures.csv itself
+  carries no channel labels (only `Channel_0..Channel_95`), so this order was recovered
+  empirically against the file's own signature shapes (SBS1's CpG C>T peaks, SBS4's
+  C>A bias, SBS5/SBS92's T>C bias) -- see the module docstring for the check.
+
+Tree construction is accumulation by mutation-set containment (a total, always-succeeding
+perfect-phylogeny approximation, not an error-aware caller): tumour clones are placed in
+ascending order of mutation count, each under the already-placed node (root included)
+sharing the most mutations with it. `tree_diagnostics.txt`'s containment fractions and
+three-gamete violation count are what say whether this clean construction is trustworthy
+for slice D's actual calls, or whether an error-aware method (SCITE, if available, gives
+a second opinion) is needed instead.
 
 ## Not yet done
 

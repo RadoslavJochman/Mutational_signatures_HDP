@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=secedo-D-buildtree
+#SBATCH --time=01:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem-per-cpu=4G
+#SBATCH --output=%x-%j.log
+#
+# Ours -- turns stage 07's per-cluster somatic VCFs into the two inputs TreeHDP
+# consumes: a rooted Newick tree (pseudo-normal as the spectrum-less latent
+# root, labelled-internal-node form) and a per-cluster 96-channel spectra
+# matrix in cosmic_signatures.csv's channel order. See build_tree.py's module
+# docstring for the tree-construction and channel-binning contracts, and
+# the plan doc's stage-8 entry for what this reads and writes.
+#
+# Needs a python environment with pandas, numpy, networkx, phylox, and pysam
+# installed (the repo's own .venv works if present on this cluster). pysam is
+# the one dependency this stage adds beyond what run_inference.py needs --
+# pinned in requirements.txt.
+
+set -euo pipefail
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
+
+if [ -z "${NORMAL_CLUSTER_ID}" ]; then
+    echo "NORMAL_CLUSTER_ID not set in config.sh -- see stage 05." >&2
+    exit 1
+fi
+
+TREE_OUT_DIR="${PERSIST_DIR}/tree_input"
+mkdir -p "${TREE_OUT_DIR}"
+
+python3 "${EULER_SCRIPTS}/build_tree.py" \
+    --vcf-dir "${PERSIST_DIR}/mutect_vcfs" \
+    --normal-id "${NORMAL_CLUSTER_ID}" \
+    --ref-fasta "${REF_FASTA}" \
+    --cosmic-signatures "${REPO_ROOT}/COSMIC_sig/cosmic_signatures.csv" \
+    --out-dir "${TREE_OUT_DIR}"
+
+echo "Wrote tree.nwk, spectra.csv, clone_snv_matrix.csv, tree_diagnostics.txt" \
+     "to ${TREE_OUT_DIR}."
