@@ -3,7 +3,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
-#SBATCH --mem-per-cpu=2200M
+#SBATCH --mem-per-cpu=4G
 #SBATCH --output=%x-%j.log
 #
 # Translates preprocessing/{1_run_filtering,2_run_filteringCB,3_run_splittingByCB}.sh
@@ -33,7 +33,9 @@ samtools index "${CB_FILTERED}"
 echo "Reads with CB tag: $(samtools view -c "${CB_FILTERED}")"
 
 echo "[3/3] Splitting by CB tag..."
-samtools sort -t CB -m 2G -@ 10 -T "${PREPROC_DIR}/sort_tmp" "${CB_FILTERED}" \
+# -m is per-thread and samtools overshoots it, so SLURM mem must exceed m x threads
+# with headroom (2G x 10 threads OOM-killed on the 1.57B-read CB-filtered BAM).
+samtools sort -t CB -m 1G -@ 10 -T "${PREPROC_DIR}/sort_tmp" "${CB_FILTERED}" \
     > "${CB_SORTED}"
 
 # allowed-barcode list: the header-stripped first column of 10x's own per-cell summary
