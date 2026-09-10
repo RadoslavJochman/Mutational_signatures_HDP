@@ -14,16 +14,20 @@ set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 module load samtools 2>/dev/null || true
 
+# No --min-cluster-size here: SECEDO's own --min_cluster_size (500) already applied
+# during clustering (stage 04), as its stop-splitting threshold, not a keep-cluster
+# filter -- its finished clusters are all smaller than that. Re-applying 500 as a
+# floor here discarded every real cluster and built zero BAMs. Every populated
+# cluster gets a BAM (the python default --min-cluster-size 1).
 python3 "${EULER_SCRIPTS}/build_cluster_bams.py" \
     --map-file "${PILEUP_DIR}/chromosome_1.map" \
     --clustering-file "${CLUSTERING_DIR}/clustering" \
     --cell-bams-dir "${CELL_BAMS_DIR}" \
-    --out-dir "${CLUSTER_BAMS_DIR}" \
-    --min-cluster-size 500
+    --out-dir "${CLUSTER_BAMS_DIR}"
 
 ls -la "${CLUSTER_BAMS_DIR}"
 n_clusters=$(find "${CLUSTER_BAMS_DIR}" -maxdepth 1 -name 'clone*.bam' | wc -l)
-echo "SECEDO found ${n_clusters} clusters at >= 500 cells (cluster 0/no-cluster excluded)."
+echo "SECEDO found ${n_clusters} populated clusters (cluster 0/no-cluster excluded)."
 
 # Task list for stage 06 (mutect): one line per (tumour cluster, chromosome), excluding
 # NORMAL_CLUSTER_ID -- set NORMAL_CLUSTER_ID in config.sh first by inspecting the cluster
