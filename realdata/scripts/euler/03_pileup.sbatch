@@ -17,6 +17,7 @@
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
+module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
 module load openblas 2>/dev/null || true  # adjust to the module name/version on Euler
 
 chroms=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X)

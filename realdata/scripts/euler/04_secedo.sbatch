@@ -24,6 +24,7 @@
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
+module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
 module load openblas 2>/dev/null || true  # adjust to the module name/version on Euler
 
 "${SECEDO_BIN}" -i "${PILEUP_DIR}/" -o "${CLUSTERING_DIR}/" --num_threads 20 \
