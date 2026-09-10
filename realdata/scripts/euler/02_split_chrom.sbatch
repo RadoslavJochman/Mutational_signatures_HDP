@@ -45,6 +45,7 @@ for idx in $(seq "${start}" "${end}"); do
     pref="${filename%.*}"
 
     echo "Splitting ${source_bam}..."
+    [ -f "${source_bam}.bai" ] || samtools index "${source_bam}"
     for chrom in {1..22} X Y; do
         chunk="${CELL_BAMS_SPLIT_DIR}/${pref}_chr${chrom}.bam"
         samtools view -b "${source_bam}" "${chrom}" > "${chunk}"
