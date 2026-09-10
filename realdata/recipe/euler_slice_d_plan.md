@@ -279,6 +279,19 @@ Two contracts this stage exists to uphold (see `build_tree.py`'s module docstrin
   empirically against the file's own signature shapes (SBS1's CpG C>T peaks, SBS4's
   C>A bias, SBS5/SBS92's T>C bias) -- see the module docstring for the check.
 
+**Provenance note on cosmic_signatures.csv's channel order.** The file's 96 columns
+are named `Channel_0..Channel_95` -- positional placeholders with no biological
+identity recorded in the file itself, and no generating script or notebook exists in
+this repo to consult either. The order was independently verified against COSMIC's
+official v3.4 SBS GRCh37 reference (`cog.sanger.ac.uk`), by name-matching the 8
+signatures shared between the two files (`SBS105`, `SBS112` are absent from v3.4 and
+not individually checkable this way) across all 96 channels: the order is 5'-major
+(outer 5' base A,C,G,T; then substitution C>A,C>G,C>T,T>A,T>C,T>G; then 3' base
+A,C,G,T), i.e. the alphabetical order of COSMIC's own `Type` strings (`A[C>A]A` ..
+`T[T>G]T`), matching to floating-point exactness on all 8 checked signatures.
+`build_tree.py` implements exactly this order, so `spectra.csv` aligns positionally
+with the fixed-signatures matrix.
+
 Tree construction is accumulation by mutation-set containment (a total, always-succeeding
 perfect-phylogeny approximation, not an error-aware caller): tumour clones are placed in
 ascending order of mutation count, each under the already-placed node (root included)
