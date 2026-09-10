@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=secedo-D-pileup
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
-#SBATCH --mem-per-cpu=500M
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=10G
 #SBATCH --array=0-22
 #SBATCH --output=%x-%a.log
 #
@@ -14,6 +14,13 @@
 # running the pileup binary, then removes the copy -- same pattern as the original,
 # which keeps any one task's transient footprint to one chromosome's slice of the data
 # rather than the whole per-chromosome-split directory.
+#
+# Memory: the pileup binary loads all ~1916 per-cell BAMs for the chromosome at once
+# and builds its data structures across them, so peak memory scales with cell count and
+# chromosome size -- the original 20 x 500M = 10G was undersized and OOM-killed
+# chromosome 2 (smaller than chromosome 1) ~30% through. 8 x 10G = 80G, sized for
+# chromosome 1 (the largest), with fewer CPUs since the step is memory-bound and 20
+# CPUs also triggered QOSMaxCpuPerUserLimit throttling.
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
@@ -32,7 +39,7 @@ n=$(find "${tmp_dir}" -name '*.bam' | wc -l)
 echo "Found ${n} per-cell BAMs for chromosome ${chrom}."
 
 echo "Running pileup for chromosome ${chrom}..."
-"${PILEUP_BIN}" -i "${tmp_dir}/" -o "${PILEUP_DIR}/chromosome" --num_threads 20 \
+"${PILEUP_BIN}" -i "${tmp_dir}/" -o "${PILEUP_DIR}/chromosome" --num_threads 8 \
     --log_level=trace --min_base_quality 20 --max_coverage 1000 --chromosomes "${chrom}"
 
 rm -rf "${tmp_dir}"
