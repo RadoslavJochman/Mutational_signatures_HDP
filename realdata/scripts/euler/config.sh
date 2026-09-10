@@ -31,7 +31,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SECEDO_BUILD="${REPO_ROOT}/realdata/external/secedo/build"
 PILEUP_BIN="${SECEDO_BUILD}/pileup"
 SECEDO_BIN="${SECEDO_BUILD}/secedo"
-FLAGS_BREAST="${REPO_ROOT}/realdata/external/secedo-evaluation/breast_cancer/flags_breast"
 EULER_SCRIPTS="${REPO_ROOT}/realdata/scripts/euler"
 
 # --- 10x download URLs (slice D only -- do not loop over A/B/C/E) ---

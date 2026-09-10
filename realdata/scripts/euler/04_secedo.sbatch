@@ -27,8 +27,13 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
 module load openblas 2>/dev/null || true  # adjust to the module name/version on Euler
 
+# No --flagfile: the original's flags_breast lived in the SECEDO code dir on grlab
+# project space (/cluster/work/grlab/projects/projects2019-secedo/code/flags_breast),
+# not in secedo-evaluation, so it was never part of this checkout. It held only
+# default values, which the explicit flags below already override, so it's
+# intentionally dropped rather than reconstructed.
 "${SECEDO_BIN}" -i "${PILEUP_DIR}/" -o "${CLUSTERING_DIR}/" --num_threads 20 \
-    --log_level=trace --flagfile "${FLAGS_BREAST}" \
+    --log_level=trace \
     --homozygous_filtered_rate=0.5 --seq_error_rate=0.05 --min_cluster_size 500 \
     --reference_genome="${REF_FASTA}" \
     --clustering_type SPECTRAL6 --max_coverage 300
