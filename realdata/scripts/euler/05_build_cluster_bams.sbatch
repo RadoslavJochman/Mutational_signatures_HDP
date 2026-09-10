@@ -12,6 +12,7 @@
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
+module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
 module load samtools 2>/dev/null || true
 
 # No --min-cluster-size here: SECEDO's own --min_cluster_size (500) already applied
