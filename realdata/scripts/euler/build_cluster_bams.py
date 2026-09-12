@@ -12,10 +12,51 @@ this repo doesn't otherwise use it, and update mutect.sh's input filenames to ma
 """
 
 import argparse
+import re
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+
+def reheader_to_coordinate_sorted(bam_path: Path) -> None:
+    """Rewrite a merged BAM's @HD line to declare SO:coordinate.
+
+    samtools merge leaves @HD SO:unknown on its output even when every input is
+    coordinate-sorted and merged in order (as here), because it does not track
+    sort order through the merge. GATK Mutect2 refuses to merge two such BAMs
+    (tumour/normal) -- htsjdk's MergingSamRecordIterator throws
+    NullPointerException: this.comparator is null -- unless each declares a sort
+    order. This is a header-only correction, not a re-sort: the records are
+    already coordinate-sorted, so we just say so.
+    """
+    header = subprocess.run(
+        ["samtools", "view", "-H", str(bam_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    new_header, n = re.subn(
+        r"^@HD.*$", "@HD\tVN:1.6\tSO:coordinate", header, count=1, flags=re.MULTILINE
+    )
+    if n == 0:
+        # No @HD line at all: prepend one.
+        new_header = "@HD\tVN:1.6\tSO:coordinate\n" + header
+
+    hdr_file = bam_path.with_suffix(".hdr")
+    reheadered = bam_path.with_suffix(".reh.bam")
+    try:
+        hdr_file.write_text(new_header)
+        with open(reheadered, "wb") as out:
+            subprocess.run(
+                ["samtools", "reheader", str(hdr_file), str(bam_path)],
+                check=True,
+                stdout=out,
+            )
+        reheadered.replace(bam_path)
+    finally:
+        hdr_file.unlink(missing_ok=True)
+        reheadered.unlink(missing_ok=True)
 
 
 def read_map(map_file: Path) -> dict[int, str]:
@@ -73,6 +114,7 @@ def main() -> None:
             print(" ".join(cmd))
             continue
         subprocess.run(cmd, check=True)
+        reheader_to_coordinate_sorted(out_bam)
         subprocess.run(["samtools", "index", str(out_bam)], check=True)
 
 
