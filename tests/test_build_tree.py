@@ -240,7 +240,7 @@ def test_build_snv_presence_matrix_and_mutation_sets_roundtrip():
 
 
 # --------------------------------------------------------------------------- #
-# SCITE cross-check plumbing (optional path; binary itself is not exercised)
+# SCITE plumbing (primary tree builder; the binary itself is not exercised)
 # --------------------------------------------------------------------------- #
 
 
@@ -252,18 +252,116 @@ def test_write_scite_matrix(tmp_path):
     assert np.array_equal(loaded, matrix.values)
 
 
-def test_parse_scite_gv_edges_and_collapse(tmp_path):
-    # 2 mutations (nodes 1, 2), root = 3, samples c0 -> node 4, c1 -> node 5.
-    # Attachment: 4 hangs off 2 which hangs off 1 which hangs off the root;
-    # 5 hangs directly off 1 -- so both samples share ancestor mutation 1.
-    gv_path = tmp_path / "scite_out_ml0.gv"
-    gv_path.write_text("digraph G {\n3 -> 1;\n1 -> 2;\n2 -> 4;\n1 -> 5;\n}\n")
+def test_write_scite_mutation_names(tmp_path):
+    out = tmp_path / "names.txt"
+    bt.write_scite_mutation_names(["1:100:C>T", "1:200:C>A"], out)
+    assert out.read_text().splitlines() == ["1:100:C>T", "1:200:C>A"]
 
-    parent_of = bt.parse_scite_gv_edges(gv_path)
-    assert parent_of == {1: 3, 2: 1, 4: 2, 5: 1}
 
-    tree = bt.collapse_attachment_to_clone_tree(parent_of, ["c0", "c1"], n_mutations=2)
-    assert set(tree.successors("__root__")) == {"c0", "c1"}
+def test_build_scite_input_matrix_orientation_and_normal_column():
+    cluster_to_snvs = {
+        "7": {("1", 100, "C", "T")},
+        "8": {("1", 100, "C", "T"), ("1", 200, "C", "A")},
+    }
+    snv_matrix = bt.build_snv_presence_matrix(cluster_to_snvs)
+    full, column_order = bt.build_scite_input_matrix(snv_matrix, normal_id="4")
+
+    assert column_order == ["4", "7", "8"]  # pseudo-normal sorted in by cluster ID
+    assert list(full.columns) == column_order
+    assert full.shape == (2, 3)  # 2 SNVs (rows) x 3 samples (columns)
+    assert (full["4"] == 0).all()  # pseudo-normal is the all-zero reference
+    assert list(full["7"]) == list(snv_matrix["7"])
+    assert list(full["8"]) == list(snv_matrix["8"])
+
+
+def test_find_scite_binary_precedence(monkeypatch):
+    assert bt.find_scite_binary("explicit/path") == "explicit/path"
+
+    monkeypatch.setenv("SCITE_BIN", "env/path")
+    assert bt.find_scite_binary(None) == "env/path"
+
+    monkeypatch.delenv("SCITE_BIN")
+    default = Path(bt.find_scite_binary(None))
+    assert default == REPO_ROOT / "realdata" / "external" / "scite" / "scite"
+
+
+def test_run_scite_builds_expected_command_and_returns_newick_path(
+    tmp_path, monkeypatch
+):
+    calls = {}
+
+    def fake_run(cmd, check, stdout, stderr):
+        calls["cmd"] = cmd
+        out_prefix = cmd[cmd.index("-o") + 1]
+        Path(f"{out_prefix}_ml0.newick").write_text("(1,2)root;\n")
+
+    monkeypatch.setattr(bt.subprocess, "run", fake_run)
+
+    newick_path = bt.run_scite(
+        tmp_path / "geno.txt",
+        n_mutations=2,
+        n_samples=2,
+        out_prefix=tmp_path / "scite_out",
+        log_path=tmp_path / "scite.log",
+        scite_bin="scite",
+        names_path=tmp_path / "names.txt",
+    )
+    assert newick_path == tmp_path / "scite_out_ml0.newick"
+    assert newick_path.exists()
+    cmd = calls["cmd"]
+    assert cmd[0] == "scite"
+    assert "-s" in cmd  # MAP, always requested
+    assert cmd[cmd.index("-seed") + 1] == "42"  # fixed default, for reproducibility
+    assert cmd[cmd.index("-names") + 1] == str(tmp_path / "names.txt")
+    assert (tmp_path / "scite.log").exists()  # stdout/stderr captured
+
+
+def test_run_scite_raises_if_newick_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(bt.subprocess, "run", lambda *a, **k: None)
+    with pytest.raises(FileNotFoundError):
+        bt.run_scite(
+            tmp_path / "geno.txt",
+            n_mutations=2,
+            n_samples=2,
+            out_prefix=tmp_path / "scite_out",
+            log_path=tmp_path / "scite.log",
+            scite_bin="scite",
+        )
+
+
+def test_parse_scite_newick(tmp_path):
+    p = tmp_path / "scite_out_ml0.newick"
+    p.write_text("(1,2)root;\n")
+    tree = bt.parse_scite_newick(p)
+    labels = {d.get("label") for _, d in tree.nodes(data=True)}
+    assert labels == {"root", "1", "2"}
+
+
+def test_collapse_scite_tree_to_clones(tmp_path):
+    # SCITE mutation tree: root -> sample-leaf "1" (cluster c0) -> sample-leaf
+    # "2" (cluster c1); root -> sample-leaf "3" (the pseudo-normal). Neither
+    # cluster's own ID appears in the newick (no per-sample naming in this
+    # SCITE build), so this also exercises the column-index fallback.
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("((2)1,3)root;\n")
+    scite_tree = bt.parse_scite_newick(newick_path)
+
+    column_order = ["c0", "c1", "n"]
+    clone_tree = bt.collapse_scite_tree_to_clones(
+        scite_tree, column_order, normal_id="n"
+    )
+
+    assert set(clone_tree.predecessors("c0")) == {"n"}  # no sample ancestor -> root
+    assert set(clone_tree.predecessors("c1")) == {"c0"}  # nested under c0's leaf
+    assert bt.digraph_to_newick(clone_tree, "n") == "((c1)c0)n;"
+
+
+def test_collapse_scite_tree_to_clones_raises_on_missing_leaf(tmp_path):
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("(1,3)root;\n")  # cluster c1 (column 2) has no leaf
+    scite_tree = bt.parse_scite_newick(newick_path)
+    with pytest.raises(ValueError, match="c1"):
+        bt.collapse_scite_tree_to_clones(scite_tree, ["c0", "c1", "n"], normal_id="n")
 
 
 def test_compare_topologies_agrees_on_identical_chains():

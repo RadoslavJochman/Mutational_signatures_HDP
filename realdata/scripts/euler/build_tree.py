@@ -20,13 +20,38 @@ Contract (from `src/models/hdp_inference.py`'s `_BaseTreeHDP`, do not "fix" thes
       counts to signature columns positionally. ``main`` asserts this before
       doing anything else and fails loudly if it does not hold.
 
-Tree construction is accumulation by mutation-set containment: a total, always-
-succeeding perfect-phylogeny approximation, not an error-aware caller. Process
-tumour clones from fewest to most mutations; each clone's parent is the already-
-placed node (root included, with the empty set) maximising shared mutations,
-tied-broken by fewest parent-only mutations, then fewest parent mutations, then
-cluster ID. This puts observed clones at internal nodes wherever containment
-holds and degrades to a star under the root when it does not.
+Tree construction is via SCITE (Jahn et al.), the intended method for this
+pipeline: SCITE samples a mutation history from the clone x SNV presence
+matrix (plus an all-zero pseudo-normal reference column, so the model's
+spectrum-less root has somewhere to attach) and writes its MAP mutation tree,
+samples attached as leaves, as Newick. That tree is collapsed to the clone
+tree this script emits: each tumour clone's parent is the nearest sample-leaf
+ancestor in SCITE's tree (walking up through the unlabelled mutation nodes),
+falling back to the pseudo-normal when no such ancestor exists before the top
+of SCITE's tree. The clone tree is always re-rooted at the pseudo-normal
+explicitly -- its exact attachment point inside SCITE's own tree is never used
+to derive edges -- so the result is a single tree rooted at the pseudo-normal
+regardless of exactly where SCITE placed the all-zero column.
+
+SCITE is required, not optional: if the binary is unavailable, or its run or
+Newick parse fails, ``main`` exits non-zero rather than emit the accumulation
+tree below as tree.nwk. ``--allow-containment-fallback`` overrides this for
+debugging only.
+
+Accumulation by mutation-set containment (below) is now a cross-check, not the
+primary construction, because on the real differential calls it produced 581k
+three-gamete violations, 0.27-0.36 edge containment, and an implausible linear
+chain -- untrustworthy as the emitted tree. It is still built every run and
+reported in tree_diagnostics.txt, alongside its topology agreement with
+SCITE's tree, as a sanity signal.
+
+Tree construction by mutation-set containment (cross-check only, see above): a
+total, always-succeeding perfect-phylogeny approximation, not an error-aware
+caller. Process tumour clones from fewest to most mutations; each clone's parent
+is the already-placed node (root included, with the empty set) maximising shared
+mutations, tied-broken by fewest parent-only mutations, then fewest parent
+mutations, then cluster ID. This puts observed clones at internal nodes wherever
+containment holds and degrades to a star under the root when it does not.
 
 Channel ordering was recovered empirically (cosmic_signatures.csv carries no
 channel labels, only ``Channel_0..Channel_95``): SBS1's four dominant channels
@@ -36,11 +61,6 @@ under the same hypothesis. That fixes the axis as index = five*24 + subtype*4 +
 three, five/three in A,C,G,T order and subtype in C>A,C>G,C>T,T>A,T>C,T>G order
 -- the alphabetical sort of COSMIC's own ``A[C>A]A`` .. ``T[T>G]T`` labels.
 ``main`` still asserts cosmic_signatures.csv's columns match before trusting it.
-
-SCITE cross-check (optional, non-blocking): if a SCITE binary is on ``PATH`` or
-named by ``$SCITE_BIN``, run it on the same genotype matrix and compare its
-attachment tree's topology to the accumulation tree's; otherwise log one line
-and continue. Never blocks the primary outputs.
 """
 
 from __future__ import annotations
@@ -48,12 +68,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, FrozenSet, Hashable, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, Hashable, Iterable, List, Optional, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -356,21 +375,28 @@ def three_gamete_violations(mutation_sets: Dict[str, Set[Hashable]]) -> int:
 
 def write_diagnostics(
     path: Path,
-    tree: nx.DiGraph,
+    containment_tree: nx.DiGraph,
     mutation_sets: Dict[str, Set[Hashable]],
     skip_counts: Dict[str, int],
     n_violations: int,
-    scite_agreement: Optional[float],
+    scite_ok: bool,
+    scite_error: Optional[str],
+    topology_agreement: Optional[float],
 ) -> None:
-    """Per-edge containment, three-gamete violations, and binning skip counts.
-
-    Numbers only, no verdicts -- whether the clean accumulation construction is
-    trustworthy, or the calls need an error-aware method, is a judgement call
-    for whoever reads this, not something this script decides.
+    """SCITE is primary (tree.nwk); mutation-set containment is the cross-check
+    reported here, not what gets emitted. Numbers only, no verdicts.
     """
-    lines = ["# Stage 08 tree diagnostics\n\n", "## Edge containment\n"]
+    lines = ["# Stage 08 tree diagnostics\n\n", "## Primary tree: SCITE\n"]
+    if scite_ok:
+        lines.append(
+            "SCITE ran and parsed cleanly; tree.nwk is its collapsed clone tree.\n"
+        )
+    else:
+        lines.append(f"SCITE failed: {scite_error}\n")
+
+    lines.append("\n## Cross-check: mutation-set containment\n")
     for parent, child in sorted(
-        tree.edges(), key=lambda e: (_sort_key(e[0]), _sort_key(e[1]))
+        containment_tree.edges(), key=lambda e: (_sort_key(e[0]), _sort_key(e[1]))
     ):
         frac = containment_fraction(mutation_sets, parent, child)
         frac_str = (
@@ -380,12 +406,15 @@ def write_diagnostics(
     lines.append(f"\nThree-gamete (perfect-phylogeny) violations: {n_violations}\n")
     total_skipped = sum(skip_counts.values())
     lines.append(f"SNVs skipped in binning: {total_skipped} {dict(skip_counts)}\n")
-    if scite_agreement is None:
-        lines.append("SCITE cross-check: not run (binary unavailable or run failed).\n")
+    if topology_agreement is None:
+        lines.append(
+            "SCITE-vs-containment topology agreement: not computed "
+            "(SCITE tree unavailable).\n"
+        )
     else:
         lines.append(
-            "SCITE topology agreement (pairwise ancestor/descendant): "
-            f"{scite_agreement:.3f}\n"
+            "SCITE-vs-containment topology agreement (pairwise ancestor/descendant): "
+            f"{topology_agreement:.3f}\n"
         )
     Path(path).write_text("".join(lines))
 
@@ -431,63 +460,202 @@ def bin_cluster_spectra(
 
 
 # --------------------------------------------------------------------------- #
-# SCITE cross-check (optional, non-blocking)
+# SCITE (primary tree builder)
 # --------------------------------------------------------------------------- #
 
 
-def find_scite_binary(explicit: Optional[str] = None) -> Optional[str]:
-    return explicit or os.environ.get("SCITE_BIN") or shutil.which("scite")
+def find_scite_binary(explicit: Optional[str] = None) -> str:
+    """Resolve the SCITE binary: ``explicit`` (the ``--scite-bin`` CLI arg), else
+    ``$SCITE_BIN``, else the repo's own build at ``realdata/external/scite/scite``.
+
+    Always returns a path string (never None) so the caller can report a clear
+    "not found" error against a concrete path rather than an absent binary.
+    """
+    if explicit:
+        return explicit
+    if os.environ.get("SCITE_BIN"):
+        return os.environ["SCITE_BIN"]
+    return str(Path(__file__).resolve().parents[2] / "external" / "scite" / "scite")
+
+
+def build_scite_input_matrix(
+    snv_matrix: pd.DataFrame, normal_id: str
+) -> Tuple[pd.DataFrame, List[str]]:
+    """SCITE's mutations (rows) x samples (columns) matrix: ``snv_matrix``'s
+    tumour columns plus an all-zero pseudo-normal reference column, in one
+    combined column order (this module's usual numeric-then-lexicographic
+    cluster sort).
+
+    The pseudo-normal has no VCF and so no column in ``snv_matrix``; adding it
+    as an all-zero column gives SCITE somewhere to attach it. Downstream,
+    ``collapse_scite_tree_to_clones`` re-roots the clone tree at the
+    pseudo-normal explicitly rather than trusting where SCITE attaches an
+    all-zero genotype, so this need not land exactly at SCITE's own tree root.
+    """
+    column_order = sorted(list(snv_matrix.columns) + [normal_id], key=_sort_key)
+    tumour_cols = [c for c in column_order if c != normal_id]
+    full = snv_matrix.reindex(columns=tumour_cols).copy()
+    full[normal_id] = 0
+    return full[column_order], column_order
 
 
 def write_scite_matrix(snv_matrix: pd.DataFrame, path: Path) -> None:
     """SCITE genotype format: mutations (rows) x samples (columns), 0/1,
-    whitespace-separated."""
+    whitespace-separated. This is format (a), so no ``-transpose`` is passed."""
     np.savetxt(path, snv_matrix.values, fmt="%d")
 
 
-_GV_EDGE_RE = re.compile(r"^\s*(\d+)\s*->\s*(\d+)\s*;?\s*$")
+def write_scite_mutation_names(snv_ids: Iterable[str], path: Path) -> None:
+    """One SNV id per line, in row order -- SCITE's optional ``-names`` file.
 
-
-def parse_scite_gv_edges(gv_path: Path) -> Dict[int, int]:
-    """Parse a SCITE .gv tree into {child_node_id: parent_node_id}."""
-    parent_of: Dict[int, int] = {}
-    for line in Path(gv_path).read_text().splitlines():
-        m = _GV_EDGE_RE.match(line)
-        if m:
-            u, v = int(m.group(1)), int(m.group(2))
-            parent_of[v] = u
-    return parent_of
-
-
-def collapse_attachment_to_clone_tree(
-    parent_of: Dict[int, int], cluster_ids: List[str], n_mutations: int
-) -> nx.DiGraph:
-    """Collapse a SCITE '-a' sample-attachment tree to a clone tree over cluster_ids.
-
-    SCITE's default '-a' numbering: nodes 1..n_mutations are mutations,
-    n_mutations+1 is the mutation-tree root, and n_mutations+1+i (0-based i) is
-    the attachment point of the i-th genotype-matrix column. Each sample leaf
-    walks up to the nearest ancestor that is itself a sample leaf, or the
-    root, giving a parent assignment comparable to build_clone_tree's output.
+    Passing this doubles as disambiguation: it makes SCITE's mutation-node
+    labels real SNV ids rather than plain integers, so they cannot collide
+    with the column-index-based sample-leaf labels ``collapse_scite_tree_to_
+    clones`` looks for.
     """
-    root_id = n_mutations + 1
-    sample_node = {i: root_id + 1 + i for i in range(len(cluster_ids))}
-    node_to_cluster = {
-        node: cid for cid, node in zip(cluster_ids, sample_node.values())
-    }
+    Path(path).write_text("\n".join(snv_ids) + "\n")
+
+
+def run_scite(
+    matrix_path: Path,
+    n_mutations: int,
+    n_samples: int,
+    out_prefix: Path,
+    log_path: Path,
+    scite_bin: str,
+    fd: float = 1e-3,
+    ad: float = 0.15,
+    restarts: int = 5,
+    chain_length: int = 1_000_000,
+    seed: int = 42,
+    names_path: Optional[Path] = None,
+) -> Path:
+    """Run SCITE and return the path to its ``<outbase>_ml0.newick`` output.
+
+    Always passes ``-s`` (MAP): the pipeline needs one point-estimate tree,
+    not a posterior sample of trees. ``-seed`` is fixed by default for
+    reproducibility. Raises ``subprocess.CalledProcessError`` if SCITE exits
+    non-zero, and ``FileNotFoundError`` if it exits cleanly but the expected
+    Newick file is missing -- both are the caller's cue to fail the whole
+    stage rather than fall back to the containment tree.
+    """
+    cmd = [
+        scite_bin,
+        "-i", str(matrix_path),
+        "-n", str(n_mutations),
+        "-m", str(n_samples),
+        "-r", str(restarts),
+        "-l", str(chain_length),
+        "-fd", str(fd),
+        "-ad", str(ad),
+        "-s",
+        "-seed", str(seed),
+        "-o", str(out_prefix),
+    ]  # fmt: skip
+    if names_path is not None:
+        cmd += ["-names", str(names_path)]
+    with open(log_path, "w") as log:
+        log.write("command: " + " ".join(cmd) + "\n\n")
+        log.flush()
+        subprocess.run(cmd, check=True, stdout=log, stderr=subprocess.STDOUT)
+    newick_path = Path(f"{out_prefix}_ml0.newick")
+    if not newick_path.exists():
+        raise FileNotFoundError(
+            f"SCITE exited cleanly but {newick_path} was not written; see {log_path}"
+        )
+    return newick_path
+
+
+def parse_scite_newick(newick_path: Path) -> nx.DiGraph:
+    """Parse a SCITE mutation-tree Newick file into a DiGraph.
+
+    This is SCITE's own mutation tree, not the model's labelled-internal-node
+    clone tree: most internal nodes are unlabelled mutations, and the sample
+    columns are attached as leaves anywhere in it. Uses phylox's general
+    Newick parser directly (unlike ``parse_newick_like_model``, which enforces
+    the model loader's stricter contract) since this tree's shape is
+    arbitrary.
+    """
+    newick_str = Path(newick_path).read_text().strip()
+    return phylox.DiNetwork.from_newick(newick_str)
+
+
+def _scite_sample_label_schemes(column_order: List[str]) -> List[Dict[str, str]]:
+    """Ordered, whole-column candidate labelling schemes for SCITE's sample
+    leaves: cluster_id -> the leaf label that scheme predicts for it.
+
+    Tried as complete, self-consistent schemes rather than per-sample
+    candidates independently: this SCITE build's CLI has no per-sample naming
+    flag (only ``-names`` for mutations), so a sample's own cluster identity
+    is not expected to appear in the Newick, and the 0-based and 1-based
+    column-index spellings share overlapping label spaces (index 1 in one
+    scheme is index 0 in the shifted one) -- picking candidates per sample
+    independently could match different samples under different, mutually
+    inconsistent schemes and silently misassign a leaf instead of failing.
+    Matching one scheme against every column at once avoids that.
+    """
+    n = len(column_order)
+    schemes = [dict(zip(column_order, column_order))]  # cluster ID, verbatim
+    for start in (1, 0):  # 1-based first: SCITE's own samples are 1..m
+        indices = range(start, start + n)
+        schemes.append({cid: str(i) for cid, i in zip(column_order, indices)})
+        schemes.append({cid: f"s{i}" for cid, i in zip(column_order, indices)})
+        schemes.append({cid: f"S{i}" for cid, i in zip(column_order, indices)})
+    return schemes
+
+
+def collapse_scite_tree_to_clones(
+    scite_tree: nx.DiGraph, column_order: List[str], normal_id: str
+) -> nx.DiGraph:
+    """Collapse SCITE's mutation tree to the clone tree over ``column_order``,
+    rooted at the pseudo-normal.
+
+    Each non-normal cluster's parent is the nearest sample-leaf ancestor,
+    walking up through the unlabelled mutation nodes; a cluster with no
+    sample-leaf ancestor before the top of SCITE's tree attaches directly
+    under the pseudo-normal. The pseudo-normal's own position inside SCITE's
+    tree is never consulted -- it is added as the root outright -- so the
+    result is always a single tree rooted at the pseudo-normal regardless of
+    exactly where SCITE attached the all-zero reference column.
+    """
+    label_to_nodes: Dict[str, List[Hashable]] = defaultdict(list)
+    for node, data in scite_tree.nodes(data=True):
+        label = data.get("label")
+        if label is not None:
+            label_to_nodes[label].append(node)
+
+    sample_node: Optional[Dict[str, Hashable]] = None
+    for scheme in _scite_sample_label_schemes(column_order):
+        candidate = {
+            cid: label_to_nodes[label][0]
+            for cid, label in scheme.items()
+            if label in label_to_nodes
+        }
+        if len(candidate) == len(column_order):
+            sample_node = candidate
+            break
+    if sample_node is None:
+        raise ValueError(
+            "no consistent sample-leaf labelling scheme (cluster ID, or a "
+            "0-/1-based column index with an optional s/S prefix) covers all "
+            f"of {column_order}; leaf labels found in the SCITE newick: "
+            f"{sorted(label_to_nodes)}"
+        )
+
+    node_to_cluster = {node: cid for cid, node in sample_node.items()}
+    parent_of: Dict[Hashable, Hashable] = {}
+    for u, v in scite_tree.edges():
+        parent_of[v] = u
 
     tree = nx.DiGraph()
-    tree.add_node("__root__")
-    for i, cid in enumerate(cluster_ids):
-        node = sample_node[i]
-        ancestor = parent_of.get(node)
-        while (
-            ancestor is not None
-            and ancestor not in node_to_cluster
-            and ancestor != root_id
-        ):
+    tree.add_node(normal_id)
+    for cid in column_order:
+        if cid == normal_id:
+            continue
+        ancestor = parent_of.get(sample_node[cid])
+        while ancestor is not None and ancestor not in node_to_cluster:
             ancestor = parent_of.get(ancestor)
-        parent_cluster = node_to_cluster.get(ancestor, "__root__")
+        parent_cluster = node_to_cluster.get(ancestor, normal_id)
         tree.add_edge(parent_cluster, cid)
     return tree
 
@@ -521,42 +689,6 @@ def compare_topologies(
     return agree / total if total else float("nan")
 
 
-def run_scite(
-    matrix_path: Path,
-    n_mutations: int,
-    n_samples: int,
-    out_prefix: Path,
-    fd: float,
-    ad: float,
-    scite_bin: str,
-) -> Optional[Path]:
-    """Run SCITE and return the '-a' attachment .gv path, or None if it
-    produced none."""
-    cmd = [
-        scite_bin,
-        "-i",
-        str(matrix_path),
-        "-n",
-        str(n_mutations),
-        "-m",
-        str(n_samples),
-        "-r",
-        "1",
-        "-l",
-        "100000",
-        "-fd",
-        str(fd),
-        "-ad",
-        str(ad),
-        "-a",
-        "-o",
-        str(out_prefix),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
-    candidates = sorted(out_prefix.parent.glob(f"{out_prefix.name}*ml0.gv"))
-    return candidates[0] if candidates else None
-
-
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -582,10 +714,22 @@ def main() -> None:
     p.add_argument(
         "--scite-bin",
         default=None,
-        help="path to the scite binary; defaults to $SCITE_BIN or PATH",
+        help="path to the scite binary; defaults to $SCITE_BIN, then "
+        "realdata/external/scite/scite",
     )
-    p.add_argument("--scite-fd", type=float, default=1e-3)
-    p.add_argument("--scite-ad", type=float, default=0.1)
+    p.add_argument("--scite-fd", type=float, default=1e-3, help="false positive rate")
+    p.add_argument("--scite-ad", type=float, default=0.15, help="dropout rate")
+    p.add_argument("--scite-restarts", type=int, default=5)
+    p.add_argument("--scite-chain-length", type=int, default=1_000_000)
+    p.add_argument(
+        "--scite-seed", type=int, default=42, help="fixed for reproducibility"
+    )
+    p.add_argument(
+        "--allow-containment-fallback",
+        action="store_true",
+        help="debugging only: emit the known-bad containment tree as tree.nwk "
+        "if SCITE is unavailable or fails, instead of exiting non-zero",
+    )
     args = p.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -617,8 +761,68 @@ def main() -> None:
     snv_matrix.to_csv(args.out_dir / "clone_snv_matrix.csv")
 
     mutation_sets = mutation_sets_from_matrix(snv_matrix)
-    tree = build_clone_tree(mutation_sets, args.normal_id)
-    newick_str = digraph_to_newick(tree, args.normal_id)
+
+    # Cross-check, always built (see write_diagnostics), never emitted as
+    # tree.nwk unless --allow-containment-fallback is passed and SCITE fails.
+    containment_tree = build_clone_tree(mutation_sets, args.normal_id)
+    n_violations = three_gamete_violations(mutation_sets)
+
+    scite_bin = find_scite_binary(args.scite_bin)
+    scite_ok = False
+    scite_error: Optional[str] = None
+    scite_tree: Optional[nx.DiGraph] = None
+    if not os.access(scite_bin, os.X_OK):
+        scite_error = f"SCITE binary not found or not executable: {scite_bin!r}"
+    else:
+        try:
+            full_matrix, column_order = build_scite_input_matrix(
+                snv_matrix, args.normal_id
+            )
+            matrix_path = args.out_dir / "scite_genotype_matrix.txt"
+            write_scite_matrix(full_matrix, matrix_path)
+            names_path = args.out_dir / "scite_mutation_names.txt"
+            write_scite_mutation_names(snv_matrix.index, names_path)
+            newick_path = run_scite(
+                matrix_path,
+                n_mutations=full_matrix.shape[0],
+                n_samples=full_matrix.shape[1],
+                out_prefix=args.out_dir / "scite_out",
+                log_path=args.out_dir / "scite_run.log",
+                scite_bin=scite_bin,
+                fd=args.scite_fd,
+                ad=args.scite_ad,
+                restarts=args.scite_restarts,
+                chain_length=args.scite_chain_length,
+                seed=args.scite_seed,
+                names_path=names_path,
+            )
+            scite_mutation_tree = parse_scite_newick(newick_path)
+            scite_tree = collapse_scite_tree_to_clones(
+                scite_mutation_tree, column_order, args.normal_id
+            )
+            scite_ok = True
+        except Exception as exc:
+            scite_error = str(exc)
+
+    if scite_ok:
+        primary_tree = scite_tree
+    elif args.allow_containment_fallback:
+        print(
+            f"WARNING: SCITE failed ({scite_error}); emitting the containment "
+            "tree as tree.nwk because --allow-containment-fallback was passed. "
+            "This is a known-bad topology on real data -- debugging only.",
+            file=sys.stderr,
+        )
+        primary_tree = containment_tree
+    else:
+        sys.exit(
+            f"SCITE tree construction failed: {scite_error}\n"
+            "Refusing to fall back to the mutation-set containment tree, which "
+            "is known untrustworthy on this data (see the module docstring). "
+            "Pass --allow-containment-fallback to override for debugging."
+        )
+
+    newick_str = digraph_to_newick(primary_tree, args.normal_id)
     verify_newick(newick_str, set(cluster_to_snvs), args.normal_id)
     (args.out_dir / "tree.nwk").write_text(newick_str + "\n")
 
@@ -628,51 +832,22 @@ def main() -> None:
         spectra, skip_counts = bin_cluster_spectra(cluster_to_snvs, fasta)
     spectra.to_csv(args.out_dir / "spectra.csv")
 
-    n_violations = three_gamete_violations(mutation_sets)
-
-    scite_agreement = None
-    scite_bin = find_scite_binary(args.scite_bin)
-    if scite_bin is None:
-        print(
-            "SCITE binary not found (set --scite-bin, $SCITE_BIN, or put scite on "
-            "PATH); skipping the topology cross-check.",
-            file=sys.stderr,
+    topology_agreement = None
+    if scite_ok:
+        clusters_sorted = sorted(cluster_to_snvs, key=_sort_key)
+        topology_agreement = compare_topologies(
+            scite_tree, containment_tree, clusters_sorted
         )
-    else:
-        try:
-            clusters_sorted = sorted(cluster_to_snvs, key=_sort_key)
-            matrix_path = args.out_dir / "scite_genotype_matrix.txt"
-            write_scite_matrix(snv_matrix.reindex(columns=clusters_sorted), matrix_path)
-            gv_path = run_scite(
-                matrix_path,
-                n_mutations=snv_matrix.shape[0],
-                n_samples=len(clusters_sorted),
-                out_prefix=args.out_dir / "scite_out",
-                fd=args.scite_fd,
-                ad=args.scite_ad,
-                scite_bin=scite_bin,
-            )
-            if gv_path is not None:
-                parent_of = parse_scite_gv_edges(gv_path)
-                scite_tree = collapse_attachment_to_clone_tree(
-                    parent_of, clusters_sorted, snv_matrix.shape[0]
-                )
-                scite_agreement = compare_topologies(tree, scite_tree, clusters_sorted)
-        except Exception as exc:
-            # SCITE is a non-blocking cross-check, not a dependency: any failure
-            # here (binary missing, parse error, ...) is logged and skipped.
-            print(
-                f"SCITE cross-check failed, continuing without it: {exc}",
-                file=sys.stderr,
-            )
 
     write_diagnostics(
         args.out_dir / "tree_diagnostics.txt",
-        tree,
+        containment_tree,
         mutation_sets,
         skip_counts,
         n_violations,
-        scite_agreement,
+        scite_ok,
+        scite_error,
+        topology_agreement,
     )
 
     print(
