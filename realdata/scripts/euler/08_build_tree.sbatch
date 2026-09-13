@@ -29,7 +29,18 @@ fi
 TREE_OUT_DIR="${PERSIST_DIR}/tree_input"
 mkdir -p "${TREE_OUT_DIR}"
 
-python3 "${EULER_SCRIPTS}/build_tree.py" \
+# pysam's htslib libs may need the stack at runtime, same as the other stages.
+module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
+
+# SLURM jobs don't inherit an interactively-activated conda/venv, so use the
+# repo's own venv interpreter explicitly rather than ambient python3.
+PY="${REPO_ROOT}/.venv/bin/python"
+if [ ! -x "${PY}" ]; then
+    echo "ERROR: ${PY} not found. Create the repo venv with pandas/numpy/networkx/phylox/pysam, or edit this to point at the right interpreter." >&2
+    exit 1
+fi
+
+"${PY}" "${EULER_SCRIPTS}/build_tree.py" \
     --vcf-dir "${PERSIST_DIR}/mutect_vcfs" \
     --normal-id "${NORMAL_CLUSTER_ID}" \
     --ref-fasta "${REF_FASTA}" \
