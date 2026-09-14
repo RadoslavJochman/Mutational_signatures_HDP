@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=secedo-D-buildtree
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem-per-cpu=4G
@@ -49,11 +49,23 @@ fi
 # SCITE is the primary tree builder; build_tree.py refuses to fall back to the
 # containment tree if it is missing or fails. Override any of these from the
 # environment if the defaults don't suit a given run.
+#
+# build_tree.py only feeds SCITE the topology-informative SNVs (present in
+# 2..k-1 of the tumour clusters; see filter_informative_snvs), which is what
+# makes these defaults workable -- the unfiltered ~7500-SNV set at the old
+# 5 x 1,000,000 defaults ran past 8h. SCITE_MAX_MUTATIONS is an additional
+# safety valve on top of that filter, unset (no cap) unless overridden.
 SCITE_BIN="${SCITE_BIN:-${REPO_ROOT}/realdata/external/scite/scite}"
 SCITE_FD="${SCITE_FD:-1e-3}"
 SCITE_AD="${SCITE_AD:-0.15}"
-SCITE_RESTARTS="${SCITE_RESTARTS:-5}"
-SCITE_CHAIN_LENGTH="${SCITE_CHAIN_LENGTH:-1000000}"
+SCITE_RESTARTS="${SCITE_RESTARTS:-3}"
+SCITE_CHAIN_LENGTH="${SCITE_CHAIN_LENGTH:-100000}"
+SCITE_MAX_MUTATIONS="${SCITE_MAX_MUTATIONS:-}"
+
+SCITE_MAX_MUTATIONS_ARGS=()
+if [ -n "${SCITE_MAX_MUTATIONS}" ]; then
+    SCITE_MAX_MUTATIONS_ARGS=(--scite-max-mutations "${SCITE_MAX_MUTATIONS}")
+fi
 
 "${PY}" "${EULER_SCRIPTS}/build_tree.py" \
     --vcf-dir "${PERSIST_DIR}/mutect_vcfs" \
@@ -65,7 +77,8 @@ SCITE_CHAIN_LENGTH="${SCITE_CHAIN_LENGTH:-1000000}"
     --scite-fd "${SCITE_FD}" \
     --scite-ad "${SCITE_AD}" \
     --scite-restarts "${SCITE_RESTARTS}" \
-    --scite-chain-length "${SCITE_CHAIN_LENGTH}"
+    --scite-chain-length "${SCITE_CHAIN_LENGTH}" \
+    ${SCITE_MAX_MUTATIONS_ARGS[@]+"${SCITE_MAX_MUTATIONS_ARGS[@]}"}
 
 echo "Wrote tree.nwk, spectra.csv, clone_snv_matrix.csv, tree_diagnostics.txt" \
      "to ${TREE_OUT_DIR}."

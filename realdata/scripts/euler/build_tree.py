@@ -382,6 +382,7 @@ def write_diagnostics(
     scite_ok: bool,
     scite_error: Optional[str],
     topology_agreement: Optional[float],
+    filter_stats: Optional[Dict[str, int]] = None,
 ) -> None:
     """SCITE is primary (tree.nwk); mutation-set containment is the cross-check
     reported here, not what gets emitted. Numbers only, no verdicts.
@@ -393,6 +394,12 @@ def write_diagnostics(
         )
     else:
         lines.append(f"SCITE failed: {scite_error}\n")
+
+    lines.append("\n## SNV filtering for SCITE\n")
+    if filter_stats is None:
+        lines.append("Not computed (SCITE was not attempted).\n")
+    else:
+        lines.extend(format_filter_stats(filter_stats))
 
     lines.append("\n## Cross-check: mutation-set containment\n")
     for parent, child in sorted(
@@ -499,6 +506,86 @@ def build_scite_input_matrix(
     return full[column_order], column_order
 
 
+def filter_informative_snvs(
+    snv_matrix: pd.DataFrame, min_informative: int = 10
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """Keep only SNVs with tree-topology signal: present in at least 2 and at
+    most (n_tumour_clusters - 1) of ``snv_matrix``'s columns.
+
+    SCITE's MCMC cost scales with mutation count, and on the real differential
+    calls (~7500 SNVs) a run at full size took over 8h. Most of that bulk
+    carries no branching signal: a mutation present in every tumour cluster
+    sits above all of them alike (uninformative for resolving their order), and
+    one private to a single cluster is a leaf with nothing left to split.
+    Neither constrains the tree SCITE has to search over.
+
+    ``snv_matrix`` must hold tumour-cluster columns only, as
+    ``build_snv_presence_matrix`` produces (the pseudo-normal has no VCF and so
+    never appears here) -- this is what keeps the pseudo-normal out of the
+    prevalence count, per the module contract.
+
+    Returns the filtered matrix and a stats dict (``total``, ``informative``,
+    ``all_present``, ``singleton``) for the SCITE log and diagnostics. Warns to
+    stderr, but does not fail, if the informative count drops below
+    ``min_informative`` -- a small set makes for a poorly resolved tree, not a
+    broken one.
+    """
+    n_clusters = snv_matrix.shape[1]
+    prevalence = snv_matrix.sum(axis=1)
+    all_present = int((prevalence == n_clusters).sum())
+    singleton = int((prevalence == 1).sum())
+    informative = (prevalence >= 2) & (prevalence <= n_clusters - 1)
+    filtered = snv_matrix.loc[informative]
+
+    stats = {
+        "total": int(snv_matrix.shape[0]),
+        "informative": int(filtered.shape[0]),
+        "all_present": all_present,
+        "singleton": singleton,
+    }
+    if stats["informative"] < min_informative:
+        print(
+            f"WARNING: only {stats['informative']} topology-informative SNVs "
+            f"(< {min_informative}); SCITE's tree may be poorly resolved. "
+            "Proceeding anyway.",
+            file=sys.stderr,
+        )
+    return filtered, stats
+
+
+def subsample_top_variance(matrix: pd.DataFrame, max_mutations: int) -> pd.DataFrame:
+    """Safety valve on top of ``filter_informative_snvs``: cap at
+    ``max_mutations`` rows, keeping those with the highest presence variance
+    across columns (prevalence closest to half the samples is most
+    informative for splitting them). A no-op if already at or under the cap.
+
+    Ties are broken by original row order (a stable sort), so the result is
+    deterministic for a given input.
+    """
+    if matrix.shape[0] <= max_mutations:
+        return matrix
+    variance = matrix.var(axis=1, ddof=0)
+    keep = variance.sort_values(ascending=False, kind="mergesort").index[:max_mutations]
+    return matrix.loc[matrix.index.isin(keep)]
+
+
+def format_filter_stats(stats: Dict[str, int]) -> List[str]:
+    """Render ``filter_informative_snvs``' (plus an optional subsampling) stats
+    dict as text lines, shared between the SCITE run log and tree_diagnostics.txt."""
+    lines = [
+        f"Total SNVs: {stats['total']}\n",
+        f"Topology-informative (kept): {stats['informative']}\n",
+        f"Dropped, present in all clusters: {stats['all_present']}\n",
+        f"Dropped, private to one cluster (singleton): {stats['singleton']}\n",
+    ]
+    if "subsampled_from" in stats:
+        lines.append(
+            f"Subsampled by presence variance: {stats['subsampled_from']} -> "
+            f"{stats['used']}\n"
+        )
+    return lines
+
+
 def write_scite_matrix(snv_matrix: pd.DataFrame, path: Path) -> None:
     """SCITE genotype format: mutations (rows) x samples (columns), 0/1,
     whitespace-separated. This is format (a), so no ``-transpose`` is passed."""
@@ -525,19 +612,26 @@ def run_scite(
     scite_bin: str,
     fd: float = 1e-3,
     ad: float = 0.15,
-    restarts: int = 5,
-    chain_length: int = 1_000_000,
+    restarts: int = 3,
+    chain_length: int = 100_000,
     seed: int = 42,
     names_path: Optional[Path] = None,
+    log_header: str = "",
 ) -> Path:
     """Run SCITE and return the path to its ``<outbase>_ml0.newick`` output.
 
     Always passes ``-s`` (MAP): the pipeline needs one point-estimate tree,
     not a posterior sample of trees. ``-seed`` is fixed by default for
-    reproducibility. Raises ``subprocess.CalledProcessError`` if SCITE exits
-    non-zero, and ``FileNotFoundError`` if it exits cleanly but the expected
-    Newick file is missing -- both are the caller's cue to fail the whole
-    stage rather than fall back to the containment tree.
+    reproducibility. The defaults for ``restarts``/``chain_length`` are sized
+    for the topology-informative subset ``filter_informative_snvs`` produces,
+    not the full SNV set -- SCITE's MCMC cost scales with mutation count, and
+    the full ~7500-SNV set at the old defaults (5 restarts x 1,000,000 steps)
+    took over 8h. ``log_header`` is written to ``log_path`` before the command
+    line, for the informative-SNV filtering stats. Raises
+    ``subprocess.CalledProcessError`` if SCITE exits non-zero, and
+    ``FileNotFoundError`` if it exits cleanly but the expected Newick file is
+    missing -- both are the caller's cue to fail the whole stage rather than
+    fall back to the containment tree.
     """
     cmd = [
         scite_bin,
@@ -555,6 +649,8 @@ def run_scite(
     if names_path is not None:
         cmd += ["-names", str(names_path)]
     with open(log_path, "w") as log:
+        if log_header:
+            log.write(log_header)
         log.write("command: " + " ".join(cmd) + "\n\n")
         log.flush()
         subprocess.run(cmd, check=True, stdout=log, stderr=subprocess.STDOUT)
@@ -719,10 +815,33 @@ def main() -> None:
     )
     p.add_argument("--scite-fd", type=float, default=1e-3, help="false positive rate")
     p.add_argument("--scite-ad", type=float, default=0.15, help="dropout rate")
-    p.add_argument("--scite-restarts", type=int, default=5)
-    p.add_argument("--scite-chain-length", type=int, default=1_000_000)
+    p.add_argument(
+        "--scite-restarts",
+        type=int,
+        default=3,
+        help="sized for the topology-informative subset, not the full SNV set",
+    )
+    p.add_argument(
+        "--scite-chain-length",
+        type=int,
+        default=100_000,
+        help="sized for the topology-informative subset, not the full SNV set",
+    )
     p.add_argument(
         "--scite-seed", type=int, default=42, help="fixed for reproducibility"
+    )
+    p.add_argument(
+        "--scite-min-informative",
+        type=int,
+        default=10,
+        help="warn (not fail) if fewer topology-informative SNVs survive filtering",
+    )
+    p.add_argument(
+        "--scite-max-mutations",
+        type=int,
+        default=None,
+        help="safety valve: cap the informative SNV set to this many, keeping "
+        "the highest presence-variance rows, before feeding SCITE",
     )
     p.add_argument(
         "--allow-containment-fallback",
@@ -767,6 +886,19 @@ def main() -> None:
     containment_tree = build_clone_tree(mutation_sets, args.normal_id)
     n_violations = three_gamete_violations(mutation_sets)
 
+    # SCITE's MCMC cost scales with mutation count; only the topology-
+    # informative SNVs go to SCITE. The full matrix above still backs
+    # clone_snv_matrix.csv and the containment cross-check.
+    informative_matrix, filter_stats = filter_informative_snvs(
+        snv_matrix, min_informative=args.scite_min_informative
+    )
+    if args.scite_max_mutations is not None:
+        filter_stats["subsampled_from"] = informative_matrix.shape[0]
+        informative_matrix = subsample_top_variance(
+            informative_matrix, args.scite_max_mutations
+        )
+    filter_stats["used"] = informative_matrix.shape[0]
+
     scite_bin = find_scite_binary(args.scite_bin)
     scite_ok = False
     scite_error: Optional[str] = None
@@ -776,12 +908,12 @@ def main() -> None:
     else:
         try:
             full_matrix, column_order = build_scite_input_matrix(
-                snv_matrix, args.normal_id
+                informative_matrix, args.normal_id
             )
             matrix_path = args.out_dir / "scite_genotype_matrix.txt"
             write_scite_matrix(full_matrix, matrix_path)
             names_path = args.out_dir / "scite_mutation_names.txt"
-            write_scite_mutation_names(snv_matrix.index, names_path)
+            write_scite_mutation_names(informative_matrix.index, names_path)
             newick_path = run_scite(
                 matrix_path,
                 n_mutations=full_matrix.shape[0],
@@ -795,6 +927,7 @@ def main() -> None:
                 chain_length=args.scite_chain_length,
                 seed=args.scite_seed,
                 names_path=names_path,
+                log_header="".join(format_filter_stats(filter_stats)) + "\n",
             )
             scite_mutation_tree = parse_scite_newick(newick_path)
             scite_tree = collapse_scite_tree_to_clones(
@@ -848,6 +981,7 @@ def main() -> None:
         scite_ok,
         scite_error,
         topology_agreement,
+        filter_stats,
     )
 
     print(

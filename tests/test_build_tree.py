@@ -274,6 +274,59 @@ def test_build_scite_input_matrix_orientation_and_normal_column():
     assert list(full["8"]) == list(snv_matrix["8"])
 
 
+def test_filter_informative_snvs_keeps_only_branching_mutations():
+    # 3 tumour clusters (7, 8, 9), no pseudo-normal column (as build_snv_
+    # presence_matrix always produces): "1:100:C>T" sits in all 3 (uninformative,
+    # shared), "1:300:C>G" sits in only 1 (a private leaf), "1:200:C>A" sits in
+    # 2 of 3 -- the one with branching signal.
+    cluster_to_snvs = {
+        "7": {("1", 100, "C", "T"), ("1", 200, "C", "A")},
+        "8": {("1", 100, "C", "T"), ("1", 200, "C", "A"), ("1", 300, "C", "G")},
+        "9": {("1", 100, "C", "T")},
+    }
+    snv_matrix = bt.build_snv_presence_matrix(cluster_to_snvs)
+
+    filtered, stats = bt.filter_informative_snvs(snv_matrix, min_informative=0)
+
+    assert set(filtered.index) == {"1:200:C>A"}
+    assert stats == {"total": 3, "informative": 1, "all_present": 1, "singleton": 1}
+
+    # Wrongly including a pseudo-normal all-zero column would inflate the
+    # cluster count and misclassify the all-tumour-shared mutation as
+    # informative -- confirming the count must only ever see tumour columns.
+    with_normal, _ = bt.build_scite_input_matrix(snv_matrix, normal_id="4")
+    wrong_filtered, wrong_stats = bt.filter_informative_snvs(
+        with_normal, min_informative=0
+    )
+    assert "1:100:C>T" in wrong_filtered.index  # misclassified once normal is in
+    assert wrong_stats["all_present"] == 0  # nothing spans all 4 columns now
+
+
+def test_filter_informative_snvs_warns_below_floor(capsys):
+    matrix = pd.DataFrame({"1": [1], "2": [0], "3": [1]}, index=["m1"])
+    _, stats = bt.filter_informative_snvs(matrix, min_informative=10)
+    assert stats["informative"] == 1
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_subsample_top_variance_keeps_highest_variance_rows():
+    matrix = pd.DataFrame(
+        {
+            "1": [1, 1, 1],
+            "2": [1, 0, 1],
+            "3": [0, 0, 1],
+            "4": [0, 0, 0],
+        },
+        index=["balanced", "skewed", "near_balanced"],
+    )
+    # balanced: prevalence 2/4 (highest variance); skewed: 1/4; near_balanced: 3/4
+    kept = bt.subsample_top_variance(matrix, max_mutations=1)
+    assert list(kept.index) == ["balanced"]
+
+    same = bt.subsample_top_variance(matrix, max_mutations=matrix.shape[0])
+    assert same.equals(matrix)
+
+
 def test_find_scite_binary_precedence(monkeypatch):
     assert bt.find_scite_binary("explicit/path") == "explicit/path"
 
