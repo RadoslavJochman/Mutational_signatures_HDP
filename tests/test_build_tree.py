@@ -417,6 +417,188 @@ def test_collapse_scite_tree_to_clones_raises_on_missing_leaf(tmp_path):
         bt.collapse_scite_tree_to_clones(scite_tree, ["c0", "c1", "n"], normal_id="n")
 
 
+# --------------------------------------------------------------------------- #
+# Deep/degenerate SCITE trees: recursion safety and topology classification
+# --------------------------------------------------------------------------- #
+
+
+def test_deep_linear_scite_tree_parses_and_collapses_without_recursion_error(tmp_path):
+    """A ~2000-node unbranched SCITE mutation tree, samples nested along the
+    single path -- mirrors the real differential calls' ~1434-node linear
+    chain (leaves "1","2","3" resolve via the column-index fallback, since
+    that build put no cluster identity in the newick either). Neither parsing
+    nor collapsing may recurse per tree node, or this blows Python's default
+    1000-frame recursion limit.
+    """
+    depth = 2000
+    inner = "1"
+    inner = f"({inner})2"
+    for i in range(depth):
+        inner = f"({inner})m{i}"
+    inner = f"({inner})3"
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text(inner + ";\n")
+
+    scite_tree = bt.parse_scite_newick(newick_path)  # must not raise RecursionError
+    assert bt.is_unbranched_chain(scite_tree) is True
+
+    column_order = ["c0", "c1", "c2"]
+    clone_tree = bt.collapse_scite_tree_to_clones(
+        scite_tree, column_order, normal_id="c2"
+    )  # must not raise RecursionError either
+
+    assert set(clone_tree.nodes()) == set(column_order)
+    assert bt.is_unbranched_chain(clone_tree) is True
+    assert bt.is_degenerate_result(scite_tree, clone_tree) is True
+
+
+def test_branching_scite_tree_classified_as_branching_and_writes_a_normal_tree(
+    tmp_path,
+):
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("(1,2,3)root;\n")
+    scite_tree = bt.parse_scite_newick(newick_path)
+    assert bt.is_unbranched_chain(scite_tree) is False
+
+    column_order = ["c0", "c1", "n"]
+    clone_tree = bt.collapse_scite_tree_to_clones(
+        scite_tree, column_order, normal_id="n"
+    )
+
+    assert bt.classify_topology(clone_tree) == "branching"
+    assert bt.is_degenerate_result(scite_tree, clone_tree) is False
+
+    newick_str = bt.digraph_to_newick(clone_tree, "n")
+    bt.verify_newick(newick_str, cluster_ids={"c0", "c1"}, normal_id="n")  # no raise
+    assert newick_str == "(c0,c1)n;"
+
+
+def test_is_unbranched_chain():
+    assert bt.is_unbranched_chain(nx.DiGraph([("a", "b"), ("b", "c")])) is True
+    assert bt.is_unbranched_chain(nx.DiGraph([("a", "b"), ("a", "c")])) is False
+    single = nx.DiGraph()
+    single.add_node("a")
+    assert bt.is_unbranched_chain(single) is True
+
+
+def test_chain_depth_if_linear():
+    chain = nx.DiGraph([("a", "b"), ("b", "c")])
+    assert bt.chain_depth_if_linear(chain) == 2
+    branching = nx.DiGraph([("a", "b"), ("a", "c")])
+    assert bt.chain_depth_if_linear(branching) is None
+    two_roots = nx.DiGraph([("a", "b")])
+    two_roots.add_node("z")  # a second in-degree-0 node -- not a single path
+    assert bt.chain_depth_if_linear(two_roots) is None
+
+
+def test_classify_topology():
+    assert bt.classify_topology(None) == "unavailable"
+    assert bt.classify_topology(nx.DiGraph([("a", "b"), ("b", "c")])) == (
+        "linear chain (depth 2)"
+    )
+    assert bt.classify_topology(nx.DiGraph([("a", "b"), ("a", "c")])) == "branching"
+
+
+def test_parse_scite_optimal_fraction(tmp_path):
+    log_path = tmp_path / "scite_run.log"
+    log_path.write_text(
+        "some other output\nbest tree found in 83.5% of optimal steps\n"
+    )
+    assert bt.parse_scite_optimal_fraction(log_path) == pytest.approx(0.835)
+
+    empty_log = tmp_path / "empty.log"
+    empty_log.write_text("nothing relevant here\n")
+    assert bt.parse_scite_optimal_fraction(empty_log) is None
+
+    assert bt.parse_scite_optimal_fraction(tmp_path / "missing.log") is None
+
+
+def test_parse_scite_gv_edges_and_collapse_attachment(tmp_path):
+    # 2 mutations (nodes 1, 2), root = 3, samples c0 -> node 4, c1 -> node 5.
+    # Attachment: 4 hangs off 2 which hangs off 1 which hangs off the root;
+    # 5 hangs directly off 1 -- so both samples share ancestor mutation 1.
+    gv_path = tmp_path / "scite_out_ml0.gv"
+    gv_path.write_text("digraph G {\n3 -> 1;\n1 -> 2;\n2 -> 4;\n1 -> 5;\n}\n")
+
+    parent_of = bt.parse_scite_gv_edges(gv_path)
+    assert parent_of == {1: 3, 2: 1, 4: 2, 5: 1}
+
+    clone_tree = bt.collapse_attachment_to_clone_tree(
+        parent_of, ["c0", "c1"], n_mutations=2, normal_id="n"
+    )
+    assert set(clone_tree.predecessors("c0")) == {"n"}
+    assert set(clone_tree.predecessors("c1")) == {"n"}
+
+
+def test_collapse_from_samples_file(tmp_path):
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("((m2)m1)root;\n")  # no sample identity in the newick
+    scite_tree = bt.parse_scite_newick(newick_path)
+
+    samples_path = tmp_path / "scite_out.samples"
+    samples_path.write_text("c0 m1\nc1 m2\nn root\n")
+
+    clone_tree = bt.collapse_from_samples_file(
+        samples_path, scite_tree, ["c0", "c1", "n"], normal_id="n"
+    )
+    assert set(clone_tree.predecessors("c1")) == {"c0"}
+    assert set(clone_tree.predecessors("c0")) == {"n"}
+
+
+def test_collapse_from_samples_file_raises_on_unresolved_label(tmp_path):
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("((m2)m1)root;\n")
+    scite_tree = bt.parse_scite_newick(newick_path)
+
+    samples_path = tmp_path / "scite_out.samples"
+    samples_path.write_text("c0 not_a_real_label\n")
+
+    with pytest.raises(ValueError):
+        bt.collapse_from_samples_file(
+            samples_path, scite_tree, ["c0", "c1", "n"], normal_id="n"
+        )
+
+
+def test_resolve_scite_clone_tree_prefers_newick_then_falls_back_to_gv(tmp_path):
+    # Newick alone has no sample identity (mutation labels only) -- resolution
+    # must fall back to the companion .gv file next to it.
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("((m2)m1)root;\n")
+    scite_tree = bt.parse_scite_newick(newick_path)
+
+    out_prefix = tmp_path / "scite_out"
+    gv_path = tmp_path / "scite_out_ml0.gv"
+    # SCITE '-a' numbering for n_mutations=2: root=3, sample0(c0)=4, sample1(c1)=5.
+    gv_path.write_text("digraph G {\n3 -> 1;\n1 -> 2;\n2 -> 4;\n1 -> 5;\n}\n")
+
+    clone_tree, source = bt.resolve_scite_clone_tree(
+        scite_tree, out_prefix, n_mutations=2, column_order=["c0", "c1"], normal_id="c0"
+    )
+    assert "GraphViz" in source
+    assert set(clone_tree.nodes()) == {"c0", "c1"}
+
+
+def test_resolve_scite_clone_tree_raises_when_nothing_resolves(tmp_path):
+    newick_path = tmp_path / "scite_out_ml0.newick"
+    newick_path.write_text("((m2)m1)root;\n")  # no sample identity anywhere
+    scite_tree = bt.parse_scite_newick(newick_path)
+    out_prefix = tmp_path / "scite_out"  # no companion .gv or .samples file exists
+
+    with pytest.raises(ValueError, match="unresolved"):
+        bt.resolve_scite_clone_tree(
+            scite_tree,
+            out_prefix,
+            n_mutations=2,
+            column_order=["c0", "c1"],
+            normal_id="c0",
+        )
+
+
+def test_is_degenerate_result_true_when_attachments_unresolved():
+    scite_tree = nx.DiGraph([("root", "m1"), ("m1", "m2")])
+    assert bt.is_degenerate_result(scite_tree, None) is True
+
+
 def test_compare_topologies_agrees_on_identical_chains():
     tree_a = nx.DiGraph([("root", "c0"), ("c0", "c1")])
     tree_b = nx.DiGraph([("root2", "c0"), ("c0", "c1")])

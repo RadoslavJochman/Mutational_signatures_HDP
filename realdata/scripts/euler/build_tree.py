@@ -23,22 +23,45 @@ Contract (from `src/models/hdp_inference.py`'s `_BaseTreeHDP`, do not "fix" thes
 Tree construction is via SCITE (Jahn et al.), the intended method for this
 pipeline: SCITE samples a mutation history from the clone x SNV presence
 matrix (plus an all-zero pseudo-normal reference column, so the model's
-spectrum-less root has somewhere to attach) and writes its MAP mutation tree,
-samples attached as leaves, as Newick. That tree is collapsed to the clone
-tree this script emits: each tumour clone's parent is the nearest sample-leaf
-ancestor in SCITE's tree (walking up through the unlabelled mutation nodes),
-falling back to the pseudo-normal when no such ancestor exists before the top
-of SCITE's tree. The clone tree is always re-rooted at the pseudo-normal
-explicitly -- its exact attachment point inside SCITE's own tree is never used
-to derive edges -- so the result is a single tree rooted at the pseudo-normal
-regardless of exactly where SCITE placed the all-zero column.
+spectrum-less root has somewhere to attach) and writes its MAP mutation tree
+as Newick. Not every SCITE build puts sample identity in that newick, though
+-- on the real differential calls it held only mutation indices, with sample
+attachments recorded in SCITE's other output instead -- so
+``resolve_scite_clone_tree`` tries, in order, the newick's own leaf labels, a
+companion ``.gv`` file (SCITE's classic '-a' integer node numbering), and a
+companion ``.samples`` file, reporting whichever one actually resolved every
+cluster. However attachments are found, the clone tree is collapsed the same
+way: each tumour clone's parent is the nearest sample-leaf ancestor in SCITE's
+tree (walking up through the unlabelled mutation nodes), falling back to the
+pseudo-normal when no such ancestor exists before the top of SCITE's tree. The
+clone tree is always re-rooted at the pseudo-normal explicitly -- its exact
+attachment point inside SCITE's own tree is never used to derive edges -- so
+the result is a single tree rooted at the pseudo-normal regardless of exactly
+where SCITE attached the all-zero reference column.
 
-SCITE is required, not optional: if the binary is unavailable, or its run or
-Newick parse fails, ``main`` exits non-zero rather than emit the accumulation
-tree below as tree.nwk. ``--allow-containment-fallback`` overrides this for
-debugging only.
+SCITE's mutation tree on the real differential calls was also a single
+unbranched chain of ~1434 nodes, which overflowed Python's default recursion
+limit when parsed (phylox's Newick parser recurses once per nesting level).
+``parse_scite_newick`` raises the limit before parsing, and every tree walk
+this module does over SCITE's output (attachment resolution, degeneracy
+classification) is an explicit loop, never recursion, so tree depth cannot
+crash the process.
 
-Accumulation by mutation-set containment (below) is now a cross-check, not the
+SCITE is required, not optional, but a degenerate result is a documented
+finding, not a bug: if the binary never produces a parseable mutation tree at
+all, ``main`` exits non-zero rather than emit the accumulation tree below as
+tree.nwk (``--allow-containment-fallback`` overrides this for debugging only).
+If SCITE does parse but the induced clone tree is an unbranched chain, its raw
+mutation tree is itself a chain, or sample attachments cannot be resolved from
+any output, that is classified as degenerate: whatever tree can be formed
+(SCITE's, chain-shaped, or the containment tree if attachments were wholly
+unresolvable) is still written to tree.nwk, tree_diagnostics.txt records the
+finding plainly, and ``main`` exits non-zero regardless, pointing at those
+diagnostics -- unless ``--allow-degenerate-tree`` is passed, for downstream
+plumbing tests that need exit 0. spectra.csv is written either way: the
+spectra are valid independent of whether the tree resolved.
+
+Accumulation by mutation-set containment (below) is a cross-check, not the
 primary construction, because on the real differential calls it produced 581k
 three-gamete violations, 0.27-0.36 edge containment, and an implausible linear
 chain -- untrustworthy as the emitted tree. It is still built every run and
@@ -379,21 +402,40 @@ def write_diagnostics(
     mutation_sets: Dict[str, Set[Hashable]],
     skip_counts: Dict[str, int],
     n_violations: int,
-    scite_ok: bool,
     scite_error: Optional[str],
     topology_agreement: Optional[float],
     filter_stats: Optional[Dict[str, int]] = None,
+    scite_tree: Optional[nx.DiGraph] = None,
+    scite_clone_tree: Optional[nx.DiGraph] = None,
+    attachment_source: Optional[str] = None,
+    attachment_error: Optional[str] = None,
+    optimal_fraction: Optional[float] = None,
 ) -> None:
-    """SCITE is primary (tree.nwk); mutation-set containment is the cross-check
-    reported here, not what gets emitted. Numbers only, no verdicts.
+    """SCITE is primary (tree.nwk) when it yields a trustworthy, branching
+    clone tree; mutation-set containment is always reported as the
+    cross-check. Numbers only, plus the one plain-language finding line the
+    degenerate case calls for (see the module docstring) -- everything else
+    stays a number, not a verdict.
+
+    ``scite_tree`` is SCITE's raw mutation newick (set once it parses, even
+    if attachments could not be resolved from it); ``scite_clone_tree`` is
+    the induced 6-cluster tree (set only once attachments were resolved from
+    some source, named in ``attachment_source``).
     """
     lines = ["# Stage 08 tree diagnostics\n\n", "## Primary tree: SCITE\n"]
-    if scite_ok:
+    if scite_tree is None:
         lines.append(
-            "SCITE ran and parsed cleanly; tree.nwk is its collapsed clone tree.\n"
+            f"SCITE failed to produce a parseable mutation tree: {scite_error}\n"
+        )
+    elif scite_clone_tree is None:
+        lines.append(
+            "SCITE's mutation tree parsed, but sample attachments could not "
+            f"be resolved from any of its output: {attachment_error}\n"
         )
     else:
-        lines.append(f"SCITE failed: {scite_error}\n")
+        lines.append(
+            f"SCITE ran and parsed cleanly (attachments from {attachment_source}).\n"
+        )
 
     lines.append("\n## SNV filtering for SCITE\n")
     if filter_stats is None:
@@ -416,13 +458,44 @@ def write_diagnostics(
     if topology_agreement is None:
         lines.append(
             "SCITE-vs-containment topology agreement: not computed "
-            "(SCITE tree unavailable).\n"
+            "(SCITE clone tree unavailable).\n"
         )
     else:
         lines.append(
             "SCITE-vs-containment topology agreement (pairwise ancestor/descendant): "
             f"{topology_agreement:.3f}\n"
         )
+
+    if scite_tree is not None:
+        lines.append("\n## Topology result\n")
+        lines.append(f"SCITE mutation tree: {classify_topology(scite_tree)}\n")
+        lines.append(
+            f"SCITE-induced clone tree: {classify_topology(scite_clone_tree)}\n"
+        )
+        if optimal_fraction is not None:
+            lines.append(f"SCITE MCMC optimal-step fraction: {optimal_fraction:.3f}\n")
+        containment_topology = classify_topology(containment_tree)
+        lines.append(f"Containment cross-check: {containment_topology}\n")
+
+        if is_degenerate_result(scite_tree, scite_clone_tree):
+            if is_unbranched_chain(containment_tree):
+                conclusion = (
+                    "both methods produced non-branching topologies; the "
+                    "per-cluster differential (tumour-vs-pseudo-normal) SNV "
+                    "calls do not support a branching phylogeny."
+                )
+            else:
+                conclusion = (
+                    "SCITE produced a non-branching (or unresolved) topology, "
+                    "though the containment cross-check did branch; treat "
+                    "tree.nwk as unresolved rather than corroborated."
+                )
+            lines.append(f"\nFINDING: {conclusion}\n")
+            lines.append(
+                "tree.nwk below is written for pipeline completeness but is "
+                "DEGENERATE/UNTRUSTWORTHY -- a straight chain (or the "
+                "containment fallback), not a resolved phylogeny.\n"
+            )
     Path(path).write_text("".join(lines))
 
 
@@ -670,9 +743,20 @@ def parse_scite_newick(newick_path: Path) -> nx.DiGraph:
     columns are attached as leaves anywhere in it. Uses phylox's general
     Newick parser directly (unlike ``parse_newick_like_model``, which enforces
     the model loader's stricter contract) since this tree's shape is
-    arbitrary.
+    arbitrary -- on the real differential calls it was a single unbranched
+    chain of ~1434 nodes.
+
+    phylox's parser recurses once per nesting level, and Python's default
+    1000-frame recursion limit is smaller than that real chain's depth, so
+    parsing it raised RecursionError. The number of "(" characters is a safe
+    upper bound on nesting depth for any Newick string regardless of shape, so
+    the limit is raised before parsing rather than caught after.
     """
     newick_str = Path(newick_path).read_text().strip()
+    depth_estimate = newick_str.count("(") + 1
+    needed = max(10000, 5 * depth_estimate)
+    if sys.getrecursionlimit() < needed:
+        sys.setrecursionlimit(needed)
     return phylox.DiNetwork.from_newick(newick_str)
 
 
@@ -700,19 +784,12 @@ def _scite_sample_label_schemes(column_order: List[str]) -> List[Dict[str, str]]
     return schemes
 
 
-def collapse_scite_tree_to_clones(
-    scite_tree: nx.DiGraph, column_order: List[str], normal_id: str
-) -> nx.DiGraph:
-    """Collapse SCITE's mutation tree to the clone tree over ``column_order``,
-    rooted at the pseudo-normal.
-
-    Each non-normal cluster's parent is the nearest sample-leaf ancestor,
-    walking up through the unlabelled mutation nodes; a cluster with no
-    sample-leaf ancestor before the top of SCITE's tree attaches directly
-    under the pseudo-normal. The pseudo-normal's own position inside SCITE's
-    tree is never consulted -- it is added as the root outright -- so the
-    result is always a single tree rooted at the pseudo-normal regardless of
-    exactly where SCITE attached the all-zero reference column.
+def _sample_nodes_from_newick_labels(
+    scite_tree: nx.DiGraph, column_order: List[str]
+) -> Dict[str, Hashable]:
+    """Resolve each ``column_order`` cluster's attachment node from the
+    mutation newick's own leaf labels, via ``_scite_sample_label_schemes``.
+    Raises ValueError if no single scheme covers every column.
     """
     label_to_nodes: Dict[str, List[Hashable]] = defaultdict(list)
     for node, data in scite_tree.nodes(data=True):
@@ -720,7 +797,6 @@ def collapse_scite_tree_to_clones(
         if label is not None:
             label_to_nodes[label].append(node)
 
-    sample_node: Optional[Dict[str, Hashable]] = None
     for scheme in _scite_sample_label_schemes(column_order):
         candidate = {
             cid: label_to_nodes[label][0]
@@ -728,32 +804,311 @@ def collapse_scite_tree_to_clones(
             if label in label_to_nodes
         }
         if len(candidate) == len(column_order):
-            sample_node = candidate
-            break
-    if sample_node is None:
-        raise ValueError(
-            "no consistent sample-leaf labelling scheme (cluster ID, or a "
-            "0-/1-based column index with an optional s/S prefix) covers all "
-            f"of {column_order}; leaf labels found in the SCITE newick: "
-            f"{sorted(label_to_nodes)}"
-        )
+            return candidate
+    raise ValueError(
+        "no consistent sample-leaf labelling scheme (cluster ID, or a "
+        "0-/1-based column index with an optional s/S prefix) covers all "
+        f"of {column_order}; leaf labels found in the SCITE newick: "
+        f"{sorted(label_to_nodes)}"
+    )
 
+
+def _walk_to_nearest_sample_or_root(
+    parent_of: Dict[Hashable, Hashable],
+    sample_node: Dict[str, Hashable],
+    normal_id: str,
+) -> nx.DiGraph:
+    """Shared tail of every collapse path: given each cluster's already-
+    resolved attachment node, plus a parent-lookup over that same node space,
+    walk up -- iteratively, a plain while loop, so a long chain costs
+    iterations, never stack depth -- to the nearest other sample-leaf
+    ancestor, or the pseudo-normal root.
+
+    The pseudo-normal's own attachment node (``sample_node[normal_id]``) is
+    never consulted for this walk -- it is added as the root outright -- so
+    the result is always a single tree rooted at the pseudo-normal regardless
+    of exactly where SCITE attached the all-zero reference column.
+    """
     node_to_cluster = {node: cid for cid, node in sample_node.items()}
-    parent_of: Dict[Hashable, Hashable] = {}
-    for u, v in scite_tree.edges():
-        parent_of[v] = u
-
     tree = nx.DiGraph()
     tree.add_node(normal_id)
-    for cid in column_order:
+    for cid, node in sample_node.items():
         if cid == normal_id:
             continue
-        ancestor = parent_of.get(sample_node[cid])
+        ancestor = parent_of.get(node)
         while ancestor is not None and ancestor not in node_to_cluster:
             ancestor = parent_of.get(ancestor)
         parent_cluster = node_to_cluster.get(ancestor, normal_id)
         tree.add_edge(parent_cluster, cid)
     return tree
+
+
+def _collapse_from_sample_nodes(
+    scite_tree: nx.DiGraph, sample_node: Dict[str, Hashable], normal_id: str
+) -> nx.DiGraph:
+    """``_walk_to_nearest_sample_or_root`` starting from a parsed newick
+    DiGraph rather than an already-built parent-lookup dict."""
+    parent_of: Dict[Hashable, Hashable] = {}
+    for u, v in scite_tree.edges():
+        parent_of[v] = u
+    return _walk_to_nearest_sample_or_root(parent_of, sample_node, normal_id)
+
+
+def collapse_scite_tree_to_clones(
+    scite_tree: nx.DiGraph, column_order: List[str], normal_id: str
+) -> nx.DiGraph:
+    """Collapse SCITE's mutation tree to the clone tree over ``column_order``,
+    rooted at the pseudo-normal, using sample identity found in the newick's
+    own leaf labels. Raises ValueError if that identity is not there at all
+    (some SCITE builds only put mutation indices in the newick and record
+    attachments elsewhere) -- see ``resolve_scite_clone_tree`` for the
+    fallback chain over SCITE's other outputs.
+    """
+    sample_node = _sample_nodes_from_newick_labels(scite_tree, column_order)
+    return _collapse_from_sample_nodes(scite_tree, sample_node, normal_id)
+
+
+_GV_EDGE_RE = re.compile(r"^\s*(\d+)\s*->\s*(\d+)\s*;?\s*$")
+
+
+def parse_scite_gv_edges(gv_path: Path) -> Dict[int, int]:
+    """Parse a SCITE '.gv' (GraphViz) tree into {child_node_id: parent_node_id},
+    both SCITE's own integer node ids -- unrelated to phylox's parsed-newick
+    node ids, so this is never mixed with ``scite_tree``'s node identities.
+    Line-based, so there is nothing here that could recurse.
+    """
+    parent_of: Dict[int, int] = {}
+    for line in Path(gv_path).read_text().splitlines():
+        m = _GV_EDGE_RE.match(line)
+        if m:
+            u, v = int(m.group(1)), int(m.group(2))
+            parent_of[v] = u
+    return parent_of
+
+
+def collapse_attachment_to_clone_tree(
+    parent_of: Dict[int, int],
+    column_order: List[str],
+    n_mutations: int,
+    normal_id: str,
+) -> nx.DiGraph:
+    """Collapse a SCITE '-a'-style attachment tree (SCITE's classic integer
+    node numbering: mutations 1..n_mutations, the mutation-tree root at
+    n_mutations+1, and sample i -- 0-based, in ``column_order``'s order -- at
+    node n_mutations+2+i) to the clone tree, rooted explicitly at the
+    pseudo-normal exactly as ``_collapse_from_sample_nodes`` does.
+
+    Used when the mutation newick itself carries no sample identity and a
+    companion ``.gv`` file is the only source of attachments (see
+    ``resolve_scite_clone_tree``).
+    """
+    root_id = n_mutations + 1
+    sample_node = {cid: root_id + 1 + i for i, cid in enumerate(column_order)}
+    return _walk_to_nearest_sample_or_root(parent_of, sample_node, normal_id)
+
+
+def _sample_nodes_from_samples_file(
+    samples_path: Path, scite_tree: nx.DiGraph, column_order: List[str]
+) -> Dict[str, Hashable]:
+    """Resolve attachments from a companion ``<out_prefix>*.samples`` file:
+    one ``<sample> <attachment label>`` pair per line, whitespace-separated.
+    ``<sample>`` is matched against ``column_order`` the same way a newick
+    leaf would be (cluster ID, or a 0-/1-based index with an optional s/S
+    prefix); ``<attachment label>`` is looked up directly among the mutation
+    newick's own node labels (meaningful text, since ``-names`` replaces
+    SCITE's numeric mutation ids with the real SNV ids).
+
+    This file's exact format is not documented anywhere this pipeline has
+    access to, so this is a best-effort reader: any line that does not
+    resolve raises ValueError, which the caller treats the same as the file
+    not existing at all.
+    """
+    label_to_nodes: Dict[str, List[Hashable]] = defaultdict(list)
+    for node, data in scite_tree.nodes(data=True):
+        label = data.get("label")
+        if label is not None:
+            label_to_nodes[label].append(node)
+
+    token_to_cid: Dict[str, str] = {}
+    for scheme in _scite_sample_label_schemes(column_order):
+        for cid, token in scheme.items():
+            token_to_cid.setdefault(token, cid)
+
+    sample_node: Dict[str, Hashable] = {}
+    for line in Path(samples_path).read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise ValueError(f"malformed line in {samples_path}: {line!r}")
+        sample_token, attach_label = parts
+        cid = token_to_cid.get(sample_token)
+        if cid is None or attach_label not in label_to_nodes:
+            raise ValueError(
+                f"line {line!r} in {samples_path} does not resolve to a "
+                "known cluster and a known attachment label"
+            )
+        sample_node[cid] = label_to_nodes[attach_label][0]
+
+    if set(sample_node) != set(column_order):
+        raise ValueError(
+            f"{samples_path} did not cover every cluster in {column_order}: "
+            f"got {sorted(sample_node)}"
+        )
+    return sample_node
+
+
+def collapse_from_samples_file(
+    samples_path: Path, scite_tree: nx.DiGraph, column_order: List[str], normal_id: str
+) -> nx.DiGraph:
+    """Collapse using attachments read from a companion ``.samples`` file (see
+    ``_sample_nodes_from_samples_file``)."""
+    sample_node = _sample_nodes_from_samples_file(
+        samples_path, scite_tree, column_order
+    )
+    return _collapse_from_sample_nodes(scite_tree, sample_node, normal_id)
+
+
+def resolve_scite_clone_tree(
+    scite_tree: nx.DiGraph,
+    out_prefix: Path,
+    n_mutations: int,
+    column_order: List[str],
+    normal_id: str,
+) -> Tuple[nx.DiGraph, str]:
+    """Build the clone tree from whichever SCITE output actually carries
+    sample attachments -- not always the mutation newick itself. On the real
+    differential calls, SCITE's newick held only mutation indices; sample
+    attachments live in its other output instead.
+
+    Tries, in order: (1) the newick's own leaf labels; (2) a companion
+    ``<out_prefix>*.gv`` file, using SCITE's classic '-a' integer node
+    numbering; (3) a companion ``<out_prefix>*.samples`` file. Returns
+    ``(clone_tree, source)`` on the first that resolves every column in
+    ``column_order``. Raises ValueError, naming every source tried, if none
+    do -- the caller must treat that as a degenerate/unresolved result and
+    never fabricate a tree (see the module docstring).
+    """
+    errors: List[str] = []
+
+    try:
+        return (
+            collapse_scite_tree_to_clones(scite_tree, column_order, normal_id),
+            "the mutation newick's own leaf labels",
+        )
+    except ValueError as exc:
+        errors.append(f"newick leaf labels: {exc}")
+
+    gv_paths = sorted(out_prefix.parent.glob(f"{out_prefix.name}*.gv"))
+    for gv_path in gv_paths:
+        try:
+            parent_of = parse_scite_gv_edges(gv_path)
+            clone_tree = collapse_attachment_to_clone_tree(
+                parent_of, column_order, n_mutations, normal_id
+            )
+            return clone_tree, f"the GraphViz side file ({gv_path.name})"
+        except (KeyError, ValueError) as exc:
+            errors.append(f"{gv_path.name}: {exc}")
+    if not gv_paths:
+        errors.append(f"no {out_prefix.name}*.gv side file found")
+
+    samples_paths = sorted(out_prefix.parent.glob(f"{out_prefix.name}*.samples"))
+    for samples_path in samples_paths:
+        try:
+            clone_tree = collapse_from_samples_file(
+                samples_path, scite_tree, column_order, normal_id
+            )
+            return clone_tree, f"the samples side file ({samples_path.name})"
+        except (OSError, ValueError) as exc:
+            errors.append(f"{samples_path.name}: {exc}")
+    if not samples_paths:
+        errors.append(f"no {out_prefix.name}*.samples side file found")
+
+    raise ValueError(
+        f"sample attachments unresolved for {column_order} in any SCITE "
+        "output; tried " + "; ".join(errors)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Topology classification (chain vs branching, iterative)
+# --------------------------------------------------------------------------- #
+
+
+def is_unbranched_chain(tree: nx.DiGraph) -> bool:
+    """True if every node in ``tree`` has at most one child -- a straight
+    line down from the root, no branching anywhere. A plain out-degree scan,
+    so no depth limit of any kind applies."""
+    return all(tree.out_degree(n) <= 1 for n in tree.nodes())
+
+
+def chain_depth_if_linear(tree: nx.DiGraph) -> Optional[int]:
+    """If ``tree`` is a single unbranched path from a unique root, return its
+    depth (edge count from root to the tip); otherwise None.
+
+    Walks root -> child -> child -> ... in an explicit while loop, never
+    recursion, so this is safe on a chain of any length -- including the
+    ~1434-node one seen on the real differential calls.
+    """
+    if not is_unbranched_chain(tree):
+        return None
+    roots = [n for n, d in tree.in_degree() if d == 0]
+    if len(roots) != 1:
+        return None
+    depth = 0
+    node = roots[0]
+    seen = {node}
+    while True:
+        children = list(tree.successors(node))
+        if not children:
+            return depth
+        node = children[0]
+        if node in seen:  # malformed/cyclic input guard; not expected from a tree
+            return None
+        seen.add(node)
+        depth += 1
+
+
+def classify_topology(tree: Optional[nx.DiGraph]) -> str:
+    """'linear chain (depth N)', 'branching', or 'unavailable' (``tree`` is
+    None) -- the one-line topology summary used throughout the diagnostics."""
+    if tree is None:
+        return "unavailable"
+    depth = chain_depth_if_linear(tree)
+    return f"linear chain (depth {depth})" if depth is not None else "branching"
+
+
+def is_degenerate_result(
+    scite_tree: nx.DiGraph, scite_clone_tree: Optional[nx.DiGraph]
+) -> bool:
+    """True if SCITE did not yield a trustworthy, branching clone tree, given
+    it at least produced a parseable mutation tree (``scite_tree``; a harder
+    failure than this -- SCITE never even ran or parsed -- is handled
+    separately in ``main``, before this is called): sample attachments could
+    not be resolved from any output at all, the raw mutation tree is itself a
+    straight chain, or the resolved clone tree is.
+    """
+    if scite_clone_tree is None:
+        return True
+    if is_unbranched_chain(scite_tree):
+        return True
+    return is_unbranched_chain(scite_clone_tree)
+
+
+_OPTIMAL_FRACTION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%[^\n]*optimal", re.IGNORECASE)
+
+
+def parse_scite_optimal_fraction(log_path: Path) -> Optional[float]:
+    """Best-effort extraction of an "X% ... optimal" figure from SCITE's own
+    stdout/stderr (captured in ``run_scite``'s log). Returns None, not an
+    error, if no such line is found -- the exact wording is undocumented and
+    may not appear in every SCITE build or version.
+    """
+    if not Path(log_path).exists():
+        return None
+    match = _OPTIMAL_FRACTION_RE.search(Path(log_path).read_text())
+    return float(match.group(1)) / 100.0 if match else None
 
 
 def compare_topologies(
@@ -846,8 +1201,18 @@ def main() -> None:
     p.add_argument(
         "--allow-containment-fallback",
         action="store_true",
-        help="debugging only: emit the known-bad containment tree as tree.nwk "
-        "if SCITE is unavailable or fails, instead of exiting non-zero",
+        help="debugging only: emit the containment tree as tree.nwk if SCITE "
+        "never produces a parseable mutation tree at all, instead of exiting "
+        "non-zero (does not apply to a degenerate-but-complete SCITE result; "
+        "see --allow-degenerate-tree)",
+    )
+    p.add_argument(
+        "--allow-degenerate-tree",
+        action="store_true",
+        help="exit 0 (for downstream plumbing tests) even when the result is "
+        "degenerate -- a non-branching topology or unresolved sample "
+        "attachments -- instead of exiting non-zero after writing "
+        "tree_diagnostics.txt and tree.nwk",
     )
     args = p.parse_args()
 
@@ -900,12 +1265,17 @@ def main() -> None:
     filter_stats["used"] = informative_matrix.shape[0]
 
     scite_bin = find_scite_binary(args.scite_bin)
-    scite_ok = False
     scite_error: Optional[str] = None
-    scite_tree: Optional[nx.DiGraph] = None
+    scite_tree: Optional[nx.DiGraph] = None  # SCITE's raw mutation newick
+    scite_clone_tree: Optional[nx.DiGraph] = None  # induced tree over column_order
+    attachment_source: Optional[str] = None
+    attachment_error: Optional[str] = None
+    optimal_fraction: Optional[float] = None
+
     if not os.access(scite_bin, os.X_OK):
         scite_error = f"SCITE binary not found or not executable: {scite_bin!r}"
     else:
+        scite_log_path = args.out_dir / "scite_run.log"
         try:
             full_matrix, column_order = build_scite_input_matrix(
                 informative_matrix, args.normal_id
@@ -914,12 +1284,13 @@ def main() -> None:
             write_scite_matrix(full_matrix, matrix_path)
             names_path = args.out_dir / "scite_mutation_names.txt"
             write_scite_mutation_names(informative_matrix.index, names_path)
+            out_prefix = args.out_dir / "scite_out"
             newick_path = run_scite(
                 matrix_path,
                 n_mutations=full_matrix.shape[0],
                 n_samples=full_matrix.shape[1],
-                out_prefix=args.out_dir / "scite_out",
-                log_path=args.out_dir / "scite_run.log",
+                out_prefix=out_prefix,
+                log_path=scite_log_path,
                 scite_bin=scite_bin,
                 fd=args.scite_fd,
                 ad=args.scite_ad,
@@ -929,36 +1300,63 @@ def main() -> None:
                 names_path=names_path,
                 log_header="".join(format_filter_stats(filter_stats)) + "\n",
             )
-            scite_mutation_tree = parse_scite_newick(newick_path)
-            scite_tree = collapse_scite_tree_to_clones(
-                scite_mutation_tree, column_order, args.normal_id
-            )
-            scite_ok = True
+            # Iterative from here on: parse_scite_newick raises its own
+            # recursion limit before calling phylox, and every walk over the
+            # result (resolve_scite_clone_tree, is_degenerate_result) is a
+            # plain loop, so a fully linear mutation tree (as seen on the real
+            # differential calls, ~1434 nodes) cannot overflow the stack.
+            scite_tree = parse_scite_newick(newick_path)
+            optimal_fraction = parse_scite_optimal_fraction(scite_log_path)
         except Exception as exc:
             scite_error = str(exc)
 
-    if scite_ok:
-        primary_tree = scite_tree
-    elif args.allow_containment_fallback:
-        print(
-            f"WARNING: SCITE failed ({scite_error}); emitting the containment "
-            "tree as tree.nwk because --allow-containment-fallback was passed. "
-            "This is a known-bad topology on real data -- debugging only.",
-            file=sys.stderr,
-        )
-        primary_tree = containment_tree
+        if scite_tree is not None:
+            try:
+                scite_clone_tree, attachment_source = resolve_scite_clone_tree(
+                    scite_tree,
+                    out_prefix,
+                    n_mutations=full_matrix.shape[0],
+                    column_order=column_order,
+                    normal_id=args.normal_id,
+                )
+            except ValueError as exc:
+                attachment_error = str(exc)
+
+    degenerate = False
+    if scite_tree is None:
+        # SCITE never produced even a parseable mutation tree -- a harder
+        # failure than a degenerate-but-complete result (see the module
+        # docstring); --allow-degenerate-tree does not apply here.
+        if args.allow_containment_fallback:
+            print(
+                f"WARNING: SCITE failed ({scite_error}); emitting the containment "
+                "tree as tree.nwk because --allow-containment-fallback was passed. "
+                "This is a known-bad topology on real data -- debugging only.",
+                file=sys.stderr,
+            )
+            primary_tree = containment_tree
+        else:
+            sys.exit(
+                f"SCITE tree construction failed: {scite_error}\n"
+                "Refusing to fall back to the mutation-set containment tree, which "
+                "is known untrustworthy on this data (see the module docstring). "
+                "Pass --allow-containment-fallback to override for debugging."
+            )
     else:
-        sys.exit(
-            f"SCITE tree construction failed: {scite_error}\n"
-            "Refusing to fall back to the mutation-set containment tree, which "
-            "is known untrustworthy on this data (see the module docstring). "
-            "Pass --allow-containment-fallback to override for debugging."
+        degenerate = is_degenerate_result(scite_tree, scite_clone_tree)
+        # Attachments unresolved leaves nothing SCITE-derived to write, so the
+        # containment tree is the only tree left to form at all; a resolved
+        # (even chain-shaped) SCITE clone tree is still SCITE's real result.
+        primary_tree = (
+            scite_clone_tree if scite_clone_tree is not None else containment_tree
         )
 
     newick_str = digraph_to_newick(primary_tree, args.normal_id)
     verify_newick(newick_str, set(cluster_to_snvs), args.normal_id)
     (args.out_dir / "tree.nwk").write_text(newick_str + "\n")
 
+    # Written regardless of the tree outcome above -- the spectra are valid
+    # even when the tree is degenerate or SCITE failed outright.
     import pysam
 
     with pysam.FastaFile(str(args.ref_fasta)) as fasta:
@@ -966,10 +1364,10 @@ def main() -> None:
     spectra.to_csv(args.out_dir / "spectra.csv")
 
     topology_agreement = None
-    if scite_ok:
+    if scite_clone_tree is not None:
         clusters_sorted = sorted(cluster_to_snvs, key=_sort_key)
         topology_agreement = compare_topologies(
-            scite_tree, containment_tree, clusters_sorted
+            scite_clone_tree, containment_tree, clusters_sorted
         )
 
     write_diagnostics(
@@ -978,10 +1376,14 @@ def main() -> None:
         mutation_sets,
         skip_counts,
         n_violations,
-        scite_ok,
         scite_error,
         topology_agreement,
         filter_stats,
+        scite_tree=scite_tree,
+        scite_clone_tree=scite_clone_tree,
+        attachment_source=attachment_source,
+        attachment_error=attachment_error,
+        optimal_fraction=optimal_fraction,
     )
 
     print(
@@ -991,6 +1393,16 @@ def main() -> None:
     print("Somatic SNV count per cluster:")
     for cid in sorted(cluster_to_snvs, key=_sort_key):
         print(f"  clone{cid}: {len(cluster_to_snvs[cid])}")
+
+    if scite_tree is not None and degenerate and not args.allow_degenerate_tree:
+        diagnostics_path = args.out_dir / "tree_diagnostics.txt"
+        sys.exit(
+            "Degenerate result: neither SCITE nor the containment cross-check "
+            "found a branching topology (or SCITE's sample attachments could "
+            f"not be resolved); see {diagnostics_path}. tree.nwk was still "
+            "written there, marked degenerate. Pass --allow-degenerate-tree "
+            "to exit 0 anyway."
+        )
 
 
 if __name__ == "__main__":
