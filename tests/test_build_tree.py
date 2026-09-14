@@ -190,36 +190,76 @@ def test_bin_cluster_spectra_skips_ambiguous_and_ref_mismatch():
 # --------------------------------------------------------------------------- #
 
 
-_VCF_TEXT = """\
+_FORCED_VCF_TEXT = """\
 ##fileformat=VCFv4.2
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO
-1\t100\t.\tC\tT\t.\tPASS\t.
-1\t200\t.\tC\tT\t.\tlow_allele_frac\t.
-1\t300\t.\tCA\tT\t.\tPASS\t.
-1\t400\t.\tC\tT,G\t.\tPASS\t.
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE
+1\t100\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/1:8,12:0.600:20
+1\t200\t.\tC\tT\t.\tgermline\t.\tGT:AD:AF:DP\t0/0:20,1:0.048:21
+1\t300\t.\tCA\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/1:5,5:0.500:10
+1\t400\t.\tC\tT,G\t.\tPASS\t.\tGT:AD:AF:DP\t0/1/2:10,3,2:0.300,0.200:15
+1\t500\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t./.:.:.:0
 """
 
 
-def test_parse_vcf_snvs(tmp_path):
-    vcf_path = tmp_path / "clone1_1.vcf"
-    vcf_path.write_text(_VCF_TEXT)
-    snvs = bt.parse_vcf_snvs(vcf_path)
-    assert snvs == {
-        ("1", 100, "C", "T"),  # PASS SNP, kept
-        ("1", 400, "C", "T"),  # multiallelic, single-base alts split and kept
-        ("1", 400, "C", "G"),
+def test_parse_format_values():
+    assert bt.parse_format_values("GT:AD:AF:DP", "0/1:8,12:0.600:20") == {
+        "GT": "0/1",
+        "AD": "8,12",
+        "AF": "0.600",
+        "DP": "20",
     }
-    # position 200 (non-PASS) and 300 (indel) are excluded
 
 
-def test_discover_cluster_vcfs(tmp_path):
-    for name in ["clone1_1.vcf", "clone1_2.vcf", "clone5_X.vcf", "clone9_1.vcf"]:
-        (tmp_path / name).write_text(_VCF_TEXT)
+def test_parse_forced_vcf_calls(tmp_path):
+    vcf_path = tmp_path / "clone7_1.forced.vcf"
+    vcf_path.write_text(_FORCED_VCF_TEXT)
+    calls = bt.parse_forced_vcf_calls(vcf_path)
+
+    assert calls[("1", 100, "C", "T")] == (pytest.approx(0.6), 12)
+    assert calls[("1", 200, "C", "T")] == (
+        pytest.approx(0.048),
+        1,
+    )  # non-PASS still parsed
+    assert ("1", 300, "C", "T") not in calls  # multi-base REF (indel) excluded
+    assert calls[("1", 400, "C", "T")] == (
+        pytest.approx(0.3),
+        3,
+    )  # multi-allelic, split
+    assert calls[("1", 400, "C", "G")] == (pytest.approx(0.2), 2)
+    assert calls[("1", 500, "C", "T")] == (0.0, 0)  # "." fields -> zero, not raised
+
+
+def test_resolve_presence_calls_thresholds_vaf_and_alt_reads():
+    cluster_to_calls = {
+        "7": {("1", 100, "C", "T"): (0.6, 12), ("1", 200, "C", "T"): (0.048, 1)},
+        "8": {("1", 100, "C", "T"): (0.02, 5)},  # enough reads, VAF too low
+    }
+    presence = bt.resolve_presence_calls(
+        cluster_to_calls, min_vaf=0.05, min_alt_reads=2
+    )
+    assert presence["7"] == {("1", 100, "C", "T")}  # the 200 site fails both thresholds
+    assert presence["8"] == set()
+
+
+def test_discover_forced_cluster_vcfs(tmp_path):
+    for name in [
+        "clone1_1.forced.vcf",
+        "clone1_2.forced.vcf",
+        "clone5_X.forced.vcf",
+        "clone9_1.forced.vcf",
+    ]:
+        (tmp_path / name).write_text(_FORCED_VCF_TEXT)
     (tmp_path / "not_a_clone_vcf.txt").write_text("")
+    (tmp_path / "clone1_1.disc.vcf").write_text(
+        _FORCED_VCF_TEXT
+    )  # pass-1 output, ignored
 
-    found = bt.discover_cluster_vcfs(tmp_path, normal_id="9")
-    assert set(found) == {"1", "5"}
-    assert sorted(f.name for f in found["1"]) == ["clone1_1.vcf", "clone1_2.vcf"]
+    found = bt.discover_forced_cluster_vcfs(tmp_path)
+    assert set(found) == {"1", "5", "9"}  # every cluster, none excluded
+    assert sorted(f.name for f in found["1"]) == [
+        "clone1_1.forced.vcf",
+        "clone1_2.forced.vcf",
+    ]
 
 
 def test_build_snv_presence_matrix_and_mutation_sets_roundtrip():
@@ -258,25 +298,26 @@ def test_write_scite_mutation_names(tmp_path):
     assert out.read_text().splitlines() == ["1:100:C>T", "1:200:C>A"]
 
 
-def test_build_scite_input_matrix_orientation_and_normal_column():
+def test_build_scite_input_matrix_orientation_no_root_column():
     cluster_to_snvs = {
         "7": {("1", 100, "C", "T")},
         "8": {("1", 100, "C", "T"), ("1", 200, "C", "A")},
     }
     snv_matrix = bt.build_snv_presence_matrix(cluster_to_snvs)
-    full, column_order = bt.build_scite_input_matrix(snv_matrix, normal_id="4")
+    full, column_order = bt.build_scite_input_matrix(snv_matrix)
 
-    assert column_order == ["4", "7", "8"]  # pseudo-normal sorted in by cluster ID
+    # No germline-root reference column: unlike the old pseudo-normal design,
+    # SCITE's input is exactly the real clusters -- it roots its own tree.
+    assert column_order == ["7", "8"]
     assert list(full.columns) == column_order
-    assert full.shape == (2, 3)  # 2 SNVs (rows) x 3 samples (columns)
-    assert (full["4"] == 0).all()  # pseudo-normal is the all-zero reference
+    assert full.shape == (2, 2)  # 2 SNVs (rows) x 2 samples (columns)
     assert list(full["7"]) == list(snv_matrix["7"])
     assert list(full["8"]) == list(snv_matrix["8"])
 
 
 def test_filter_informative_snvs_keeps_only_branching_mutations():
-    # 3 tumour clusters (7, 8, 9), no pseudo-normal column (as build_snv_
-    # presence_matrix always produces): "1:100:C>T" sits in all 3 (uninformative,
+    # 3 clusters (7, 8, 9), no germline-root column (as build_snv_presence_
+    # matrix always produces): "1:100:C>T" sits in all 3 (uninformative,
     # shared), "1:300:C>G" sits in only 1 (a private leaf), "1:200:C>A" sits in
     # 2 of 3 -- the one with branching signal.
     cluster_to_snvs = {
@@ -291,14 +332,15 @@ def test_filter_informative_snvs_keeps_only_branching_mutations():
     assert set(filtered.index) == {"1:200:C>A"}
     assert stats == {"total": 3, "informative": 1, "all_present": 1, "singleton": 1}
 
-    # Wrongly including a pseudo-normal all-zero column would inflate the
-    # cluster count and misclassify the all-tumour-shared mutation as
-    # informative -- confirming the count must only ever see tumour columns.
-    with_normal, _ = bt.build_scite_input_matrix(snv_matrix, normal_id="4")
+    # Wrongly including an all-zero germline-root column would inflate the
+    # cluster count and misclassify the all-cluster-shared mutation as
+    # informative -- confirming the count must only ever see real clusters.
+    with_root = snv_matrix.copy()
+    with_root[bt.GERMLINE_ROOT_ID] = 0
     wrong_filtered, wrong_stats = bt.filter_informative_snvs(
-        with_normal, min_informative=0
+        with_root, min_informative=0
     )
-    assert "1:100:C>T" in wrong_filtered.index  # misclassified once normal is in
+    assert "1:100:C>T" in wrong_filtered.index  # misclassified once the root is in
     assert wrong_stats["all_present"] == 0  # nothing spans all 4 columns now
 
 

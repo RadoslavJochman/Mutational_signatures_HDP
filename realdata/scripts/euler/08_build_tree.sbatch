@@ -6,12 +6,12 @@
 #SBATCH --mem-per-cpu=4G
 #SBATCH --output=%x-%j.log
 #
-# Ours -- turns stage 07's per-cluster somatic VCFs into the two inputs TreeHDP
-# consumes: a rooted Newick tree (pseudo-normal as the spectrum-less latent
-# root, labelled-internal-node form) and a per-cluster 96-channel spectra
-# matrix in cosmic_signatures.csv's channel order. See build_tree.py's module
-# docstring for the tree-construction and channel-binning contracts, and
-# the plan doc's stage-8 entry for what this reads and writes.
+# Ours -- turns stage 06b's per-cluster force-called VCFs into the two inputs TreeHDP
+# consumes: a rooted Newick tree (an implicit, spectrum-less germline root --
+# GERMLINE_ROOT_ID, not a pseudo-normal cluster -- labelled-internal-node form) and a
+# per-cluster 96-channel spectra matrix in cosmic_signatures.csv's channel order. See
+# build_tree.py's module docstring for the tree-construction and channel-binning
+# contracts, and the plan doc's stage-8 entry for what this reads and writes.
 #
 # SCITE is the primary tree builder (build_tree.py exits non-zero if it is
 # unavailable or fails); mutation-set containment is a cross-check reported
@@ -25,11 +25,6 @@
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
-
-if [ -z "${NORMAL_CLUSTER_ID}" ]; then
-    echo "NORMAL_CLUSTER_ID not set in config.sh -- see stage 05." >&2
-    exit 1
-fi
 
 TREE_OUT_DIR="${PERSIST_DIR}/tree_input"
 mkdir -p "${TREE_OUT_DIR}"
@@ -69,7 +64,8 @@ fi
 
 "${PY}" "${EULER_SCRIPTS}/build_tree.py" \
     --vcf-dir "${PERSIST_DIR}/mutect_vcfs" \
-    --normal-id "${NORMAL_CLUSTER_ID}" \
+    --presence-min-vaf "${PRESENCE_MIN_VAF}" \
+    --presence-min-alt-reads "${PRESENCE_MIN_ALT_READS}" \
     --ref-fasta "${REF_FASTA}" \
     --cosmic-signatures "${REPO_ROOT}/COSMIC_sig/cosmic_signatures.csv" \
     --out-dir "${TREE_OUT_DIR}" \

@@ -9,35 +9,51 @@ Contract (from `src/models/hdp_inference.py`'s `_BaseTreeHDP`, do not "fix" thes
     - Newick is labelled-internal-node form, e.g. ``((c2,c3)c1)normal;``. Observed
       ancestral clones sit at internal nodes carrying their cluster-ID label; the
       ancestor-as-tip idiom is not used.
-    - The pseudo-normal is the single root of every tree and is deliberately
-      absent from the spectra matrix -- it has no VCF (excluded from stage 05's
-      tasks.tsv), so it becomes a spectrum-less latent root, which the model
-      handles natively.
-    - Node labels in the Newick, the spectra index, the SECEDO cluster IDs, and
-      Mutect2's ``-normal`` are one ID system throughout.
+    - The tree is rooted at ``GERMLINE_ROOT_ID``, an implicit, spectrum-less latent
+      node standing for the germline/empty-mutation state -- not a pseudo-normal
+      cluster (see below). It carries no spectrum and is never a column in the
+      presence matrix or the spectra table, which the model handles natively.
+    - Node labels in the Newick, the spectra index, and the SECEDO cluster IDs are one
+      ID system throughout.
     - The 96 spectra columns are in cosmic_signatures.csv's exact channel order,
       because the model does ``dot(activities, signatures)`` and aligns observed
       counts to signature columns positionally. ``main`` asserts this before
       doing anything else and fails loudly if it does not hold.
 
+Calling design: tumour-only + gnomAD germline-resource, not tumour-vs-pseudo-normal.
+Every SECEDO cluster is a tumour cluster now; there is no cluster standing in for the
+matched normal (stage 06's old design), because a sibling cluster is not guaranteed
+diploid/background and that design made 85% of SNVs cluster-private -- unable to support
+a tree. Absolute somatic status from gnomAD subtraction alone still does not make six
+independently-assembled clusters' calls consistent with each other, so stage 06b
+force-calls every cluster at the union of every cluster's pass-1 discovery sites, per
+chromosome; this script reads that force-called output (``*.forced.vcf``), not the
+pass-1 discovery VCFs directly. A site counts as PRESENT in a cluster if its
+force-called record has VAF >= ``--presence-min-vaf`` and ALT read depth >=
+``--presence-min-alt-reads`` (defaults from config.sh's PRESENCE_MIN_VAF/
+PRESENCE_MIN_ALT_READS); ABSENT otherwise. All six clusters carry a 96-channel
+spectrum (binned from their own present sites) and a column in the presence matrix --
+none is held back as a pseudo-normal.
+
 Tree construction is via SCITE (Jahn et al.), the intended method for this
 pipeline: SCITE samples a mutation history from the clone x SNV presence
-matrix (plus an all-zero pseudo-normal reference column, so the model's
-spectrum-less root has somewhere to attach) and writes its MAP mutation tree
-as Newick. Not every SCITE build puts sample identity in that newick, though
--- on the real differential calls it held only mutation indices, with sample
-attachments recorded in SCITE's other output instead -- so
-``resolve_scite_clone_tree`` tries, in order, the newick's own leaf labels, a
-companion ``.gv`` file (SCITE's classic '-a' integer node numbering), and a
-companion ``.samples`` file, reporting whichever one actually resolved every
-cluster. However attachments are found, the clone tree is collapsed the same
-way: each tumour clone's parent is the nearest sample-leaf ancestor in SCITE's
-tree (walking up through the unlabelled mutation nodes), falling back to the
-pseudo-normal when no such ancestor exists before the top of SCITE's tree. The
-clone tree is always re-rooted at the pseudo-normal explicitly -- its exact
-attachment point inside SCITE's own tree is never used to derive edges -- so
-the result is a single tree rooted at the pseudo-normal regardless of exactly
-where SCITE attached the all-zero reference column.
+matrix over all six clusters (no extra reference column -- SCITE roots its
+own mutation tree; there is no pseudo-normal cluster to give it a dedicated
+attachment point) and writes its MAP mutation tree as Newick. Not every SCITE
+build puts sample identity in that newick, though -- on the real differential
+calls it held only mutation indices, with sample attachments recorded in
+SCITE's other output instead -- so ``resolve_scite_clone_tree`` tries, in
+order, the newick's own leaf labels, a companion ``.gv`` file (SCITE's
+classic '-a' integer node numbering), and a companion ``.samples`` file,
+reporting whichever one actually resolved every cluster. However attachments
+are found, the clone tree is collapsed the same way: each tumour clone's
+parent is the nearest sample-leaf ancestor in SCITE's tree (walking up
+through the unlabelled mutation nodes), falling back to the germline root
+when no such ancestor exists before the top of SCITE's tree. The clone tree
+is always re-rooted at the germline root explicitly -- SCITE's own mutation
+tree has no node standing for it at all, so nothing about where SCITE rooted
+its own tree is ever consulted -- so the result is always a single tree
+rooted at ``GERMLINE_ROOT_ID``.
 
 SCITE's mutation tree on the real differential calls was also a single
 unbranched chain of ~1434 nodes, which overflowed Python's default recursion
@@ -62,11 +78,17 @@ plumbing tests that need exit 0. spectra.csv is written either way: the
 spectra are valid independent of whether the tree resolved.
 
 Accumulation by mutation-set containment (below) is a cross-check, not the
-primary construction, because on the real differential calls it produced 581k
-three-gamete violations, 0.27-0.36 edge containment, and an implausible linear
-chain -- untrustworthy as the emitted tree. It is still built every run and
-reported in tree_diagnostics.txt, alongside its topology agreement with
-SCITE's tree, as a sanity signal.
+primary construction: under the old tumour-vs-pseudo-normal design it produced
+581k three-gamete violations, 0.27-0.36 edge containment, and an implausible
+linear chain on the real differential calls -- untrustworthy as the emitted
+tree. Those numbers are from that design and not necessarily representative
+of the force-called, tumour-only + gnomAD calls this script now reads; the
+containment cross-check and its diagnostics stay regardless, since a
+consistently-genotyped presence matrix can still fail the perfect-phylogeny
+test for genuine biological reasons (parallel/convergent mutation, allelic
+dropout), and that is exactly what this cross-check is for. It is still built
+every run and reported in tree_diagnostics.txt, alongside its topology
+agreement with SCITE's tree, as a sanity signal.
 
 Tree construction by mutation-set containment (cross-check only, see above): a
 total, always-succeeding perfect-phylogeny approximation, not an error-aware
@@ -109,9 +131,20 @@ BASE_IDX = {b: i for i, b in enumerate(BASES)}
 SUBTYPE_IDX = {s: i for i, s in enumerate(SUBTYPES)}
 COMPLEMENT = {"A": "T", "C": "G", "G": "C", "T": "A"}
 
+# The tree's root: an implicit, spectrum-less latent node for the germline/
+# empty-mutation state. Not a real cluster (no VCF, no BAM, no column in the
+# presence matrix or spectra table) -- there is no pseudo-normal under
+# tumour-only + gnomAD calling, so this plays the same structural role the
+# pseudo-normal cluster ID used to (the tree's unique root, the "parent"
+# containment measures every founder mutation against) without being an
+# actual SECEDO cluster.
+GERMLINE_ROOT_ID = "germline"
+
 SNVKey = Tuple[str, int, str, str]  # chrom, 1-based pos, ref, alt
 
-_VCF_NAME_RE = re.compile(r"^clone(?P<cluster>[^_]+)_(?P<chrom>.+)\.vcf$")
+_FORCED_VCF_NAME_RE = re.compile(
+    r"^clone(?P<cluster>[^_]+)_(?P<chrom>.+)\.forced\.vcf$"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,48 +193,102 @@ def snv_channel(five: str, ref: str, alt: str, three: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def parse_vcf_snvs(vcf_path: Path) -> Set[SNVKey]:
-    """Parse PASS, single-base substitutions out of one VCF into (chrom, pos, ref,
-    alt) keys.
+def _safe_float(x: str) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
 
-    Defensive re-check of PASS/SNP-only, not a new filter: stage 06 already
-    restricts to FilterMutectCalls PASS plus SelectVariants SNP-type.
-    Multi-allelic ALT fields are split; only single-base alleles are kept.
+
+def _safe_int(x: str) -> int:
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_format_values(format_str: str, sample_str: str) -> Dict[str, str]:
+    """{FORMAT key: raw sample value}, as found in one VCF genotype column pair
+    (the ``FORMAT`` and single-sample columns of a single-sample VCF record)."""
+    return dict(zip(format_str.split(":"), sample_str.split(":")))
+
+
+def parse_forced_vcf_calls(vcf_path: Path) -> Dict[SNVKey, Tuple[float, int]]:
+    """Parse one force-called, single-sample VCF (stage 06b's pass 2) into
+    ``{snv_key: (vaf, alt_reads)}`` for every single-base-substitution ALT
+    allele at every record.
+
+    Every record, PASS or not: pass 2 force-calls every cluster at every
+    union site regardless of whether that cluster independently supports it,
+    and presence is decided in Python directly off VAF/ALT-read depth (see
+    ``resolve_presence_calls``), not off the FILTER column.
+
+    SUB-DECISION: AF/AD extraction assumes GATK4 Mutect2's own FORMAT layout
+    -- AD is ``ref_depth,alt_depth_1[,alt_depth_2...]`` (one more entry than
+    ALT alleles, ref first) and AF is ``alt_af_1[,alt_af_2...]`` (one entry
+    per ALT allele, no ref entry) -- paired positionally with the record's own
+    (possibly multi-allelic) ALT list. A record whose AD or AF cannot be
+    parsed this way (wrong field count, non-numeric, "." for no coverage) is
+    treated as zero VAF / zero ALT reads rather than raising: force-calling a
+    site with no supporting reads at all is an expected "absent here"
+    outcome, not a malformed file.
     """
-    snvs: Set[SNVKey] = set()
+    calls: Dict[SNVKey, Tuple[float, int]] = {}
     with open(vcf_path) as fh:
         for line in fh:
             if line.startswith("#"):
                 continue
             fields = line.rstrip("\n").split("\t")
-            if len(fields) < 5:
+            if len(fields) < 10:
                 continue
             chrom, pos, _id, ref, alt_field = fields[:5]
-            filt = fields[6] if len(fields) > 6 else "PASS"
-            if filt not in ("PASS", "."):
-                continue
+            format_str, sample_str = fields[8], fields[9]
             ref = ref.upper()
             if len(ref) != 1 or ref not in "ACGT":
                 continue
-            for alt in alt_field.split(","):
+            fmt = parse_format_values(format_str, sample_str)
+            ad_raw = fmt.get("AD", "").split(",")
+            af_raw = fmt.get("AF", "").split(",")
+            for i, alt in enumerate(alt_field.split(",")):
                 alt = alt.upper()
-                if len(alt) == 1 and alt in "ACGT":
-                    snvs.add((chrom, int(pos), ref, alt))
-    return snvs
+                if len(alt) != 1 or alt not in "ACGT":
+                    continue
+                vaf = _safe_float(af_raw[i]) if i < len(af_raw) else 0.0
+                alt_reads = _safe_int(ad_raw[i + 1]) if i + 1 < len(ad_raw) else 0
+                calls[(chrom, int(pos), ref, alt)] = (vaf, alt_reads)
+    return calls
 
 
-def discover_cluster_vcfs(vcf_dir: Path, normal_id: str) -> Dict[str, List[Path]]:
-    """Group ``clone<cluster>_<chrom>.vcf`` files by cluster, excluding the
-    pseudo-normal."""
+def resolve_presence_calls(
+    cluster_to_calls: Dict[str, Dict[SNVKey, Tuple[float, int]]],
+    min_vaf: float,
+    min_alt_reads: int,
+) -> Dict[str, Set[SNVKey]]:
+    """A force-called site is PRESENT in a cluster if its VAF >= ``min_vaf``
+    AND ALT read depth >= ``min_alt_reads``; ABSENT otherwise -- including
+    sites the cluster's own record never reached these thresholds at.
+    """
+    return {
+        cluster: {
+            key
+            for key, (vaf, alt_reads) in calls.items()
+            if vaf >= min_vaf and alt_reads >= min_alt_reads
+        }
+        for cluster, calls in cluster_to_calls.items()
+    }
+
+
+def discover_forced_cluster_vcfs(vcf_dir: Path) -> Dict[str, List[Path]]:
+    """Group ``clone<cluster>_<chrom>.forced.vcf`` files (stage 06b's pass-2
+    force-call output) by cluster. No cluster is excluded: tumour-only +
+    gnomAD calling has no pseudo-normal cluster to leave out.
+    """
     out: Dict[str, List[Path]] = defaultdict(list)
-    for f in sorted(vcf_dir.glob("clone*_*.vcf")):
-        m = _VCF_NAME_RE.match(f.name)
+    for f in sorted(vcf_dir.glob("clone*_*.forced.vcf")):
+        m = _FORCED_VCF_NAME_RE.match(f.name)
         if not m:
             continue
-        cluster = m.group("cluster")
-        if cluster == str(normal_id):
-            continue
-        out[cluster].append(f)
+        out[m.group("cluster")].append(f)
     return dict(out)
 
 
@@ -253,7 +340,8 @@ def build_clone_tree(
 ) -> nx.DiGraph:
     """Perfect-phylogeny-by-containment clone tree, total over noisy calls.
 
-    Root is the pseudo-normal with the empty set. Tumour clones are placed in
+    Root is the germline state (the empty mutation set, ``normal_id`` here
+    being the tree-root label, not a real cluster). Tumour clones are placed in
     ascending order of mutation count; each clone's parent is the already-placed
     node maximising shared mutations, tie-broken by fewest parent-only
     mutations, then fewest parent mutations, then cluster ID. The root is
@@ -321,9 +409,10 @@ def parse_newick_like_model(newick_str: str) -> nx.DiGraph:
 def verify_newick(newick_str: str, cluster_ids: Set[str], normal_id: str) -> None:
     """Round-trip check: parse the way the model does and confirm the contract holds.
 
-    Raises AssertionError if the pseudo-normal is not the unique root, or if
-    the parsed node labels are not exactly the tumour cluster IDs plus the
-    pseudo-normal, each appearing once.
+    ``normal_id`` is the tree-root label (``GERMLINE_ROOT_ID`` in ``main``),
+    not a real cluster. Raises AssertionError if it is not the unique root, or
+    if the parsed node labels are not exactly the cluster IDs plus the root,
+    each appearing once.
     """
     graph = parse_newick_like_model(newick_str)
     expected = set(cluster_ids) | {normal_id}
@@ -331,7 +420,7 @@ def verify_newick(newick_str: str, cluster_ids: Set[str], normal_id: str) -> Non
     if len(labels) != len(expected):
         raise AssertionError(
             f"parsed {len(labels)} node labels, expected {len(expected)} "
-            f"(cluster IDs plus the pseudo-normal); a label collision or "
+            f"(cluster IDs plus the germline root); a label collision or "
             f"missing cluster is likely: {sorted(labels)} vs {sorted(expected)}"
         )
     if set(labels) != expected:
@@ -343,7 +432,7 @@ def verify_newick(newick_str: str, cluster_ids: Set[str], normal_id: str) -> Non
         raise AssertionError(f"expected exactly one root, got {roots}")
     if roots[0] != normal_id:
         raise AssertionError(
-            f"root is {roots[0]!r}, expected pseudo-normal {normal_id!r}"
+            f"root is {roots[0]!r}, expected germline root {normal_id!r}"
         )
 
 
@@ -358,8 +447,8 @@ def containment_fraction(
     """|muts(parent) ∩ muts(child)| / |muts(parent)|, or None if parent has no
     mutations.
 
-    ``parent`` may be the pseudo-normal root, which is never a key in
-    ``mutation_sets`` (it has no VCF); treated as the empty set.
+    ``parent`` may be the germline root, which is never a key in
+    ``mutation_sets`` (it is not a real cluster); treated as the empty set.
     """
     parent_muts = mutation_sets.get(parent, set())
     if not parent_muts:
@@ -481,8 +570,8 @@ def write_diagnostics(
             if is_unbranched_chain(containment_tree):
                 conclusion = (
                     "both methods produced non-branching topologies; the "
-                    "per-cluster differential (tumour-vs-pseudo-normal) SNV "
-                    "calls do not support a branching phylogeny."
+                    "per-cluster tumour-only + gnomAD force-called SNVs do "
+                    "not support a branching phylogeny."
                 )
             else:
                 conclusion = (
@@ -559,24 +648,21 @@ def find_scite_binary(explicit: Optional[str] = None) -> str:
 
 
 def build_scite_input_matrix(
-    snv_matrix: pd.DataFrame, normal_id: str
+    snv_matrix: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """SCITE's mutations (rows) x samples (columns) matrix: ``snv_matrix``'s
-    tumour columns plus an all-zero pseudo-normal reference column, in one
-    combined column order (this module's usual numeric-then-lexicographic
-    cluster sort).
+    own columns, in this module's usual numeric-then-lexicographic cluster
+    sort.
 
-    The pseudo-normal has no VCF and so no column in ``snv_matrix``; adding it
-    as an all-zero column gives SCITE somewhere to attach it. Downstream,
-    ``collapse_scite_tree_to_clones`` re-roots the clone tree at the
-    pseudo-normal explicitly rather than trusting where SCITE attaches an
-    all-zero genotype, so this need not land exactly at SCITE's own tree root.
+    No extra reference column is added: unlike the old tumour-vs-pseudo-normal
+    design, there is no cluster standing in for the germline state to give
+    SCITE a dedicated all-zero attachment point -- SCITE roots its own
+    mutation tree however it likes, and ``resolve_scite_clone_tree`` /
+    ``collapse_scite_tree_to_clones`` always re-root the induced clone tree at
+    ``GERMLINE_ROOT_ID`` explicitly, never consulting SCITE's own root.
     """
-    column_order = sorted(list(snv_matrix.columns) + [normal_id], key=_sort_key)
-    tumour_cols = [c for c in column_order if c != normal_id]
-    full = snv_matrix.reindex(columns=tumour_cols).copy()
-    full[normal_id] = 0
-    return full[column_order], column_order
+    column_order = sorted(snv_matrix.columns, key=_sort_key)
+    return snv_matrix[column_order], column_order
 
 
 def filter_informative_snvs(
@@ -592,10 +678,10 @@ def filter_informative_snvs(
     one private to a single cluster is a leaf with nothing left to split.
     Neither constrains the tree SCITE has to search over.
 
-    ``snv_matrix`` must hold tumour-cluster columns only, as
-    ``build_snv_presence_matrix`` produces (the pseudo-normal has no VCF and so
-    never appears here) -- this is what keeps the pseudo-normal out of the
-    prevalence count, per the module contract.
+    ``snv_matrix`` must hold cluster columns only, as ``build_snv_presence_
+    matrix`` produces (the germline root is not a real cluster and so never
+    appears here) -- this is what keeps it out of the prevalence count, per
+    the module contract.
 
     Returns the filtered matrix and a stats dict (``total``, ``informative``,
     ``all_present``, ``singleton``) for the SCITE log and diagnostics. Warns to
@@ -822,12 +908,12 @@ def _walk_to_nearest_sample_or_root(
     resolved attachment node, plus a parent-lookup over that same node space,
     walk up -- iteratively, a plain while loop, so a long chain costs
     iterations, never stack depth -- to the nearest other sample-leaf
-    ancestor, or the pseudo-normal root.
+    ancestor, or the germline root.
 
-    The pseudo-normal's own attachment node (``sample_node[normal_id]``) is
-    never consulted for this walk -- it is added as the root outright -- so
-    the result is always a single tree rooted at the pseudo-normal regardless
-    of exactly where SCITE attached the all-zero reference column.
+    ``normal_id`` (``GERMLINE_ROOT_ID`` in ``main``) has no attachment node of
+    its own to consult -- it is added as the root outright -- so the result
+    is always a single tree rooted there, regardless of where (or whether)
+    SCITE's own mutation tree has anything corresponding to it at all.
     """
     node_to_cluster = {node: cid for cid, node in sample_node.items()}
     tree = nx.DiGraph()
@@ -858,7 +944,7 @@ def collapse_scite_tree_to_clones(
     scite_tree: nx.DiGraph, column_order: List[str], normal_id: str
 ) -> nx.DiGraph:
     """Collapse SCITE's mutation tree to the clone tree over ``column_order``,
-    rooted at the pseudo-normal, using sample identity found in the newick's
+    rooted at the germline root, using sample identity found in the newick's
     own leaf labels. Raises ValueError if that identity is not there at all
     (some SCITE builds only put mutation indices in the newick and record
     attachments elsewhere) -- see ``resolve_scite_clone_tree`` for the
@@ -896,7 +982,7 @@ def collapse_attachment_to_clone_tree(
     node numbering: mutations 1..n_mutations, the mutation-tree root at
     n_mutations+1, and sample i -- 0-based, in ``column_order``'s order -- at
     node n_mutations+2+i) to the clone tree, rooted explicitly at the
-    pseudo-normal exactly as ``_collapse_from_sample_nodes`` does.
+    germline root exactly as ``_collapse_from_sample_nodes`` does.
 
     Used when the mutation newick itself carries no sample identity and a
     companion ``.gv`` file is the only source of attachments (see
@@ -1151,9 +1237,9 @@ def main() -> None:
         "--vcf-dir",
         required=True,
         type=Path,
-        help="directory of clone<c>_<chrom>.vcf files (stage 07's output)",
+        help="directory of clone<c>_<chrom>.forced.vcf files (stage 06b's "
+        "pass-2 force-call output, copied out by stage 07)",
     )
-    p.add_argument("--normal-id", required=True, help="pseudo-normal cluster ID")
     p.add_argument("--ref-fasta", required=True, type=Path)
     p.add_argument(
         "--cosmic-signatures",
@@ -1162,6 +1248,20 @@ def main() -> None:
         help="cosmic_signatures.csv, used only to assert the channel order",
     )
     p.add_argument("--out-dir", required=True, type=Path)
+    p.add_argument(
+        "--presence-min-vaf",
+        type=float,
+        default=0.05,
+        help="a force-called site counts as present in a cluster only at or "
+        "above this VAF (see config.sh's PRESENCE_MIN_VAF)",
+    )
+    p.add_argument(
+        "--presence-min-alt-reads",
+        type=int,
+        default=2,
+        help="a force-called site counts as present in a cluster only at or "
+        "above this many ALT reads (see config.sh's PRESENCE_MIN_ALT_READS)",
+    )
     p.add_argument(
         "--scite-bin",
         default=None,
@@ -1230,16 +1330,25 @@ def main() -> None:
             "misalign against the model's signature columns."
         )
 
-    cluster_vcfs = discover_cluster_vcfs(args.vcf_dir, args.normal_id)
+    cluster_vcfs = discover_forced_cluster_vcfs(args.vcf_dir)
     if not cluster_vcfs:
-        sys.exit(f"no clone*_*.vcf files found in {args.vcf_dir}")
+        sys.exit(f"no clone*_*.forced.vcf files found in {args.vcf_dir}")
 
-    cluster_to_snvs: Dict[str, Set[SNVKey]] = {}
+    cluster_to_calls: Dict[str, Dict[SNVKey, Tuple[float, int]]] = {}
     for cluster, files in cluster_vcfs.items():
-        snvs: Set[SNVKey] = set()
+        calls: Dict[SNVKey, Tuple[float, int]] = {}
         for f in files:
-            snvs |= parse_vcf_snvs(f)
-        cluster_to_snvs[cluster] = snvs
+            calls.update(parse_forced_vcf_calls(f))
+        cluster_to_calls[cluster] = calls
+
+    # Presence, per cluster: VAF and ALT-read thresholds applied directly to the
+    # force-called genotype, not the FILTER column (see 06b_forcecall.sbatch and
+    # parse_forced_vcf_calls). This same call set backs the presence matrix,
+    # the containment cross-check, and the 96-channel spectra below -- all six
+    # clusters carry a spectrum now, none held back as a pseudo-normal.
+    cluster_to_snvs = resolve_presence_calls(
+        cluster_to_calls, args.presence_min_vaf, args.presence_min_alt_reads
+    )
 
     snv_matrix = build_snv_presence_matrix(cluster_to_snvs)
     snv_matrix.to_csv(args.out_dir / "clone_snv_matrix.csv")
@@ -1248,7 +1357,7 @@ def main() -> None:
 
     # Cross-check, always built (see write_diagnostics), never emitted as
     # tree.nwk unless --allow-containment-fallback is passed and SCITE fails.
-    containment_tree = build_clone_tree(mutation_sets, args.normal_id)
+    containment_tree = build_clone_tree(mutation_sets, GERMLINE_ROOT_ID)
     n_violations = three_gamete_violations(mutation_sets)
 
     # SCITE's MCMC cost scales with mutation count; only the topology-
@@ -1277,9 +1386,7 @@ def main() -> None:
     else:
         scite_log_path = args.out_dir / "scite_run.log"
         try:
-            full_matrix, column_order = build_scite_input_matrix(
-                informative_matrix, args.normal_id
-            )
+            full_matrix, column_order = build_scite_input_matrix(informative_matrix)
             matrix_path = args.out_dir / "scite_genotype_matrix.txt"
             write_scite_matrix(full_matrix, matrix_path)
             names_path = args.out_dir / "scite_mutation_names.txt"
@@ -1317,7 +1424,7 @@ def main() -> None:
                     out_prefix,
                     n_mutations=full_matrix.shape[0],
                     column_order=column_order,
-                    normal_id=args.normal_id,
+                    normal_id=GERMLINE_ROOT_ID,
                 )
             except ValueError as exc:
                 attachment_error = str(exc)
@@ -1351,8 +1458,8 @@ def main() -> None:
             scite_clone_tree if scite_clone_tree is not None else containment_tree
         )
 
-    newick_str = digraph_to_newick(primary_tree, args.normal_id)
-    verify_newick(newick_str, set(cluster_to_snvs), args.normal_id)
+    newick_str = digraph_to_newick(primary_tree, GERMLINE_ROOT_ID)
+    verify_newick(newick_str, set(cluster_to_snvs), GERMLINE_ROOT_ID)
     (args.out_dir / "tree.nwk").write_text(newick_str + "\n")
 
     # Written regardless of the tree outcome above -- the spectra are valid

@@ -55,6 +55,17 @@ DBSNP_VCF_GZ_URL="https://storage.googleapis.com/gcp-public-data--broad-referenc
 DBSNP_VCF="${REF_DIR}/dbsnp_138.b37.vcf"
 COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 
+# --- gnomAD germline resource (b37/GRCh37, af-only sites): the actual germline
+# subtraction under tumour-only calling (see 06_mutect.sbatch). Lives on scratch like the
+# rest of REF_DIR -- not backed up, subject to purge -- so re-stage it (or point this at a
+# group-shared copy) if it goes missing; it is not fetched by any script in this repo yet. ---
+GNOMAD_VCF="${REF_DIR}/gnomad/af-only-gnomad.raw.sites.vcf"
+
+# --- force-call presence thresholds (stage 06b's pass 2, read by build_tree.py): a
+# force-called site counts as present in a cluster only at or above both of these. ---
+PRESENCE_MIN_VAF="${PRESENCE_MIN_VAF:-0.05}"
+PRESENCE_MIN_ALT_READS="${PRESENCE_MIN_ALT_READS:-2}"
+
 # --- GATK4 (Mutect2 + FilterMutectCalls + SelectVariants): runs on modern Java, so unlike
 # MuTect1 it needs no special JDK fetch. Confirmed interactively on an Euler login node:
 # gatk lives under the stack/2024-06 software stack, not the default one, so a bare
@@ -67,12 +78,11 @@ COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 # (`conda install -c bioconda gatk4` or `pip install gatk`) and drop the `module load`
 # lines in those two scripts. ---
 
-# --- pseudo-normal cluster: the original script hardcodes "clone19" for slice B; which
-# cluster stands in for the matched normal is data-dependent and cannot be known before
-# stage 04/05 produce slice D's actual clustering. Inspect CLUSTERING_DIR/clustering and
-# CLUSTER_BAMS_DIR (cluster sizes, and which one looks diploid/background) after stage 05,
-# then set this before submitting stage 06. Left unset deliberately -- 06 refuses to run
-# without it rather than guessing. ---
+# --- pseudo-normal cluster: VESTIGIAL as of the tumour-only + gnomAD switch (see
+# 06_mutect.sbatch) -- calling no longer excludes a matched-normal cluster or subtracts it
+# directly; germline subtraction is GNOMAD_VCF instead, and stage 05's task list now
+# includes every cluster. Left defined only in case some other script or diagnostic still
+# reads it; nothing in the pipeline requires it to be set any more. ---
 NORMAL_CLUSTER_ID="${NORMAL_CLUSTER_ID:-}"
 
 mkdir -p "${REF_DIR}" "${RAW_DIR}" "${PREPROC_DIR}" "${CELL_BAMS_DIR}" \
