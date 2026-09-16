@@ -1,11 +1,13 @@
 # Single-slice (D) run on Euler: SLURM translation, gaps, and space budget
 
 Scope: slice D only, through somatic calling with GATK4 Mutect2 (originally MuTect1; see
-"Correction: MuTect1 -> Mutect2" below) and on into the tree and spectra TreeHDP consumes
-(stage 8, below). Slices A, B, C, E are untouched. Scripts live in
-`realdata/scripts/euler/` (`config.sh` plus `00_download.sbatch` through
-`08_build_tree.sbatch`, `submit_all.sh`, `build_cluster_bams.py`, `build_tree.py`).
-Nothing has been submitted -- `sbatch` has not been run.
+"Correction: MuTect1 -> Mutect2" below) and on into the SNV and CNA trees plus spectra
+TreeHDP consumes (stages 8 and 9, below; see "Correction: revert to tumour-vs-pseudo-normal,
+split SNV/CNA trees" for how these two stages replaced the old single stage 8). Slices A,
+B, C, E are untouched. Scripts live in `realdata/scripts/euler/` (`config.sh` plus
+`00_download.sbatch` through `09_build_cna_tree.sbatch`, `submit_all.sh`,
+`build_cluster_bams.py`, `build_snv_tree.py`, `build_cna_tree.py`). Nothing has been
+submitted -- `sbatch` has not been run.
 
 ## What changed going from the LSF originals to SLURM
 
@@ -123,6 +125,53 @@ population frequencies) nor this dbSNP file can serve as a `--germline-resource`
 future `--germline-resource` refinement), but neither blocks stage 06 any more and
 neither is referenced by it.
 
+## Correction: revert to tumour-vs-pseudo-normal, split SNV/CNA trees (2026-09-16)
+
+Attempt 2 (tumour-only calling against a gnomAD germline-resource, single stage-8
+`build_tree.py` running SCITE with a mutation-set containment cross-check) is rejected.
+Reverted:
+
+- **Calling design.** Back to tumour-vs-pseudo-normal: `06_mutect.sbatch` calls Mutect2
+  with `-normal` against `NORMAL_CLUSTER_ID` (cluster 4 for slice D), `--germline-resource`
+  and `GNOMAD_VCF` are gone entirely, stage 05 excludes the pseudo-normal cluster from
+  `tasks.tsv` again, and `06_mutect.sbatch`'s output is back to plain
+  `clone<c>_<chrom>.vcf` naming (no `.disc.vcf`). `06b_forcecall.sbatch`'s union/force-call
+  pass is **kept**, repointed at the reverted tumour-vs-pseudo-normal output: the mutual-
+  consistency problem it solves (every cluster genotyped at the same candidate sites, not
+  independently) is orthogonal to which germline-subtraction design pass 1 uses, and it
+  matters more, not less, for a VAF-based tool like LICHeE (below).
+- **SNV tree method.** SCITE and the mutation-set containment cross-check are retired as
+  tree sources -- SCITE is single-cell-designed, mismatched to SECEDO's pseudobulk
+  clusters; containment assumes a perfect phylogeny real calls do not satisfy. Stage 8 is
+  now `08_build_snv_tree.sbatch` / `build_snv_tree.py` (split out of the old
+  `build_tree.py`, which is deleted -- its spectra-binning half is preserved unchanged,
+  only repointed at the reverted VCFs): LICHeE (Popic et al. 2015) is the primary method,
+  fed the per-cluster force-called VAF table directly; an in-house Camin-Sokal parsimony
+  search (exhaustive over SECEDO's handful-of-clusters topology space, no external binary)
+  is the automatic fallback, not a debug-only escape hatch, if LICHeE fails to run, parse,
+  or resolve cluster attachments. Output is `snv_tree.nwk` (was `tree.nwk`) and
+  `snv_tree_diagnostics.txt` (was `tree_diagnostics.txt`) -- renamed because stage 9 now
+  writes to the same `tree_input/` directory.
+- **CNA tree, new.** `09_build_cna_tree.sbatch` / `build_cna_tree.py` infers a
+  copy-number tree with SCICoNE (cbg-ethz) over CellRanger DNA's own per-cell CNV output
+  (`cnv_data.h5`, confirmed hosted alongside slice D's BAM -- HTTP 200, ~2.5 GB, already
+  binned and GC/mappability-corrected by 10x), then collapses it onto the same SECEDO
+  clusters by majority cell assignment, reusing the same nearest-labelled-ancestor
+  collapsing helper the SNV tree's LICHeE integration uses. Writes `cna_tree.nwk` in the
+  same labelled-internal-node/germline-root contract as the SNV tree (no spectra) --
+  independent of the SNV tree, both fed to separate `TreeHDP` runs for comparison, never
+  merged into one tree. `--pseudobulk-fallback` aggregates to one row per cluster and runs
+  SCICoNE over that instead, flagged explicitly (not silently substituted), if per-cell
+  inference proves impractical.
+
+Neither LICHeE's exact `.dot` output schema nor `cnv_data.h5`'s exact internal layout nor
+SCICoNE's exact CLI/output format could be confirmed against a real run while writing this
+(no LICHeE/SCICoNE binary, no sample `cnv_data.h5`, and 10x's own schema docs page could
+not be reached). Both new scripts flag this plainly in their module docstrings and fail
+loudly, naming what they tried, rather than fabricate a tree from a guessed format -- see
+"Not yet done" below for what must be confirmed before trusting either stage's output on a
+real run.
+
 ## SECEDO build flags on modern GCC
 
 Undocumented until now: building `secedo` (stage 06's upstream dependency, not part of
@@ -205,7 +254,8 @@ hiding a fragile margin.
 | Pileup outputs (23 chromosomes) | ~15 GB | SECEDO's README: ~35 GB pileup output at 8000 cells/0.5x; slice D is ~2000 cells, scaled and rounded up |
 | SECEDO clustering + reference-relative VCFs | <1 GB | flat text/small binary outputs |
 | Cluster-merged BAMs (`cluster_bams/`), plus retagged copies Mutect2 needs | <=340 GB | regrouping of the per-cell BAMs (ours, stage 05), roughly doubled by the retagged `clone*.tagged.bam` copies stage 06 now makes alongside them |
-| Mutect2 outputs (raw + filtered + final PASS/SNP VCFs, all clusters x chromosomes) | ~10 GB | small per-file VCF/stats, tens of clusters x 24 chromosomes -- no call-stats/coverage side files any more, but three VCF stages per task instead of MuTect1's one |
+| Mutect2 outputs (raw + filtered + final PASS/SNP VCFs, all clusters x chromosomes, pass 1 and pass 2 force-called) | ~15 GB | small per-file VCF/stats, tens of clusters x 24 chromosomes x 2 passes |
+| CellRanger DNA CNV output (`cnv_data.h5` + `node_cnv_calls.bed`, stage 9's input) | ~2.5 GB | measured (HTTP HEAD) |
 | dbSNP (decompressed) | ~10 GB | 1.55 GB gzipped (measured), expanded and rounded up -- staged but no longer used by stage 06 (see "Correction" above) |
 | COSMIC (decompressed, placeholder) | ~10 GB | not yet in hand -- placeholder upper bound if staged for a future refinement; no longer needed to run stage 06 |
 
@@ -240,40 +290,39 @@ Once the run finishes, report explicitly: **how many clusters SECEDO found** (st
 real-data regime lands in the sparse tens-to-hundreds-of-mutations-per-node range
 Tree-HDP is built for, or somewhere else -- the actual point of running this slice.
 
-## Stage 8: tree and spectra for TreeHDP
+## Stage 8: SNV tree and spectra for TreeHDP
 
-`08_build_tree.sbatch` (thin wrapper around `build_tree.py`, following the stage-05
-split) turns stage 07's per-cluster somatic VCFs into the two inputs `TreeHDP`
-consumes. Not chained into `submit_all.sh`'s dependency block -- run by hand once 07
-has copied the VCFs out.
+`08_build_snv_tree.sbatch` (thin wrapper around `build_snv_tree.py`) turns stage 06b's
+per-cluster force-called VCFs into the SNV-side inputs `TreeHDP` consumes. Not chained
+into `submit_all.sh`'s dependency block -- run by hand once 07 has copied the VCFs out.
 
-- **Inputs**: `${PERSIST_DIR}/mutect_vcfs/clone<c>_<chrom>.vcf` (all tumour clusters x
-  chromosomes, PASS + SNP-only, stage 07's output), `REF_FASTA` (trinucleotide context),
-  `COSMIC_sig/cosmic_signatures.csv` (channel-order check only), `NORMAL_CLUSTER_ID`
-  (from `config.sh`, set after stage 05).
+- **Inputs**: `${PERSIST_DIR}/mutect_vcfs/clone<c>_<chrom>.forced.vcf` (stage 06b's
+  force-called output, every tumour cluster genotyped at the same union of candidate
+  sites), `REF_FASTA` (trinucleotide context), `COSMIC_sig/cosmic_signatures.csv`
+  (channel-order check only), `PRESENCE_MIN_VAF`/`PRESENCE_MIN_ALT_READS` (from
+  `config.sh`).
 - **Outputs**, written to `${PERSIST_DIR}/tree_input/`:
-  - `tree.nwk` -- one rooted, labelled-internal-node Newick tree.
+  - `snv_tree.nwk` -- one rooted, labelled-internal-node Newick tree.
   - `spectra.csv` -- per-cluster 96-channel spectra, ready to load as `TreeHDP`'s
     `data_matrix` via `pd.read_csv(index_col=0)`.
   - `clone_snv_matrix.csv` -- the clone x SNV binary presence matrix the tree was built
-    from (provenance, and SCITE's genotype input).
-  - `tree_diagnostics.txt` -- per-edge mutation-containment fractions, the
-    perfect-phylogeny (three-gamete) violation count, SNVs skipped in binning, and the
-    SCITE topology cross-check if a SCITE binary was available.
+    from (provenance, and LICHeE's/Camin-Sokal's input).
+  - `snv_tree_diagnostics.txt` -- which method was used (LICHeE or the Camin-Sokal
+    fallback), the perfect-phylogeny (three-gamete) violation count, SNVs skipped in
+    binning, and the resulting topology (branching or a linear chain).
 
-Two contracts this stage exists to uphold (see `build_tree.py`'s module docstring and
+Two contracts this stage exists to uphold (see `build_snv_tree.py`'s module docstring and
 `_BaseTreeHDP` in `src/models/hdp_inference.py` for the model-side half of each):
 
-- **Pseudo-normal as latent root.** `NORMAL_CLUSTER_ID` is the single root of
-  `tree.nwk` and is deliberately absent from `spectra.csv` -- it has no VCF (excluded
-  from stage 05's `tasks.tsv`), so it becomes a spectrum-less latent root, which the
-  model handles natively rather than needing a synthesised spectrum. Node labels in the
-  Newick, `spectra.csv`'s index, the SECEDO cluster IDs, and Mutect2's `-normal` are one
-  ID system throughout.
+- **Germline latent root.** `GERMLINE_ROOT_ID` (not `NORMAL_CLUSTER_ID` -- the
+  pseudo-normal cluster is Mutect2's `-normal`, never itself genotyped, so it has no row
+  in the presence matrix either) is the single root of `snv_tree.nwk` and is deliberately
+  absent from `spectra.csv`. Node labels in the Newick, `spectra.csv`'s index, and the
+  SECEDO cluster IDs are one ID system throughout.
 - **cosmic_signatures.csv channel order.** `spectra.csv`'s 96 columns are in
   cosmic_signatures.csv's exact channel order, because the model does
   `dot(activities, signatures)` and aligns observed counts to signature columns
-  positionally. `build_tree.py` asserts this against `cosmic_signatures.csv` before
+  positionally. `build_snv_tree.py` asserts this against `cosmic_signatures.csv` before
   writing anything and refuses to run if it does not hold; cosmic_signatures.csv itself
   carries no channel labels (only `Channel_0..Channel_95`), so this order was recovered
   empirically against the file's own signature shapes (SBS1's CpG C>T peaks, SBS4's
@@ -289,16 +338,52 @@ not individually checkable this way) across all 96 channels: the order is 5'-maj
 (outer 5' base A,C,G,T; then substitution C>A,C>G,C>T,T>A,T>C,T>G; then 3' base
 A,C,G,T), i.e. the alphabetical order of COSMIC's own `Type` strings (`A[C>A]A` ..
 `T[T>G]T`), matching to floating-point exactness on all 8 checked signatures.
-`build_tree.py` implements exactly this order, so `spectra.csv` aligns positionally
+`build_snv_tree.py` implements exactly this order, so `spectra.csv` aligns positionally
 with the fixed-signatures matrix.
 
-Tree construction is accumulation by mutation-set containment (a total, always-succeeding
-perfect-phylogeny approximation, not an error-aware caller): tumour clones are placed in
-ascending order of mutation count, each under the already-placed node (root included)
-sharing the most mutations with it. `tree_diagnostics.txt`'s containment fractions and
-three-gamete violation count are what say whether this clean construction is trustworthy
-for slice D's actual calls, or whether an error-aware method (SCITE, if available, gives
-a second opinion) is needed instead.
+Tree construction: LICHeE is fed the per-cluster VAF table directly (a synthetic all-zero
+germline baseline column is prepended, since LICHeE requires a normal/baseline column and
+this pipeline has none genotyped); its `.dot` tree export is collapsed onto SECEDO's
+clusters by matching node labels against the real cluster IDs used as LICHeE's own sample
+columns. If LICHeE is unavailable, fails, or its attachments cannot be resolved, an
+in-house Camin-Sokal parsimony search runs instead: exhaustive over every rooted topology
+of the cluster set (tractable at SECEDO's handful-of-clusters scale), scoring each by gain
+events (allowed, possibly independent/homoplasious) plus a heavy penalty per reversal
+event (forbidden under strict Camin-Sokal, but penalised rather than made literally
+infinite so a well-defined tree always exists even on genuinely incompatible data).
+`snv_tree_diagnostics.txt` records which method actually ran and the resulting topology.
+
+## Stage 9: CNA tree for TreeHDP
+
+`09_build_cna_tree.sbatch` (thin wrapper around `build_cna_tree.py`) is independent of
+stages 06-08: it needs only stage 00's `cnv_data.h5` download and stage 04/05's SECEDO
+clustering plus pileup `.map` file. Not chained into `submit_all.sh` -- run by hand,
+same as stage 8.
+
+- **Inputs**: `CNV_H5` (CellRanger DNA's per-cell CNV output, stage 00's download),
+  `${PILEUP_DIR}/chromosome_1.map` and `${CLUSTERING_DIR}/clustering` (SECEDO's own
+  cell-index-to-barcode and cell-index-to-cluster files, for mapping `cnv_data.h5`'s
+  barcodes onto SECEDO clusters), `SCICONE_BIN`.
+- **Outputs**, written to the same `${PERSIST_DIR}/tree_input/` as stage 8:
+  - `cna_tree.nwk` -- one rooted, labelled-internal-node Newick tree, same
+    germline-root contract as `snv_tree.nwk`, no spectra.
+  - `cna_tree_diagnostics.txt` -- which mode ran (per-cell or `--pseudobulk-fallback`),
+    how many `cnv_data.h5` cells matched a SECEDO cluster, and the resulting topology.
+
+SCICoNE runs over `cnv_data.h5`'s cells x bins raw-counts matrix (already
+GC/mappability-corrected by CellRanger DNA, so this stage does not reimplement that
+correction) and its resulting cell-level tree is collapsed onto SECEDO's clusters by
+majority cell assignment -- each cluster's own cells vote for the SCICoNE node most of
+them were assigned to, then the tree is collapsed the same nearest-labelled-ancestor way
+the SNV tree's LICHeE integration collapses its own tool's raw tree
+(`collapse_by_nearest_labelled_ancestor`, shared between both scripts).
+`--pseudobulk-fallback` (`PSEUDOBULK_FALLBACK=1` in the sbatch wrapper) aggregates raw
+counts to one row per SECEDO cluster and runs SCICoNE over that instead, for when
+per-cell inference proves impractical (too few informative bins, non-convergence at
+~2000 cells, runtime past budget) -- a real, flagged degradation recorded in
+`cna_tree_diagnostics.txt`'s mode line, never a silent substitution.
+
+Both trees are independent `TreeHDP` inputs for comparison, not merged into one tree.
 
 ## Not yet done
 
@@ -308,6 +393,18 @@ a second opinion) is needed instead.
 - Deciding `NORMAL_CLUSTER_ID` -- only knowable after stage 04/05 run on real data.
 - Building `secedo` itself with the GCC flags now documented above
   (`-Wno-error=stringop-overflow -Wno-error=restrict`).
+- Building LICHeE (stage 8) and SCICoNE (stage 9) into `realdata/external/` -- neither is
+  cloned or built yet. `08_build_snv_tree.sbatch`'s `SKIP_LICHEE=1` runs straight to the
+  Camin-Sokal fallback if LICHeE isn't ready yet.
+- **Confirm LICHeE's real `.dot` output schema** against `lichee_out/*.dot` on the first
+  real stage-8 run and extend `build_snv_tree.py`'s `_sample_label_schemes`/DOT parser if
+  its actual node labels don't match what `resolve_lichee_clone_tree` assumes (see the
+  module docstring's caveat) -- written without access to a LICHeE binary.
+- **Confirm `cnv_data.h5`'s real internal layout** with `h5py` against the downloaded file,
+  and **SCICoNE's real CLI/output format** against `scicone --help`/its README against the
+  built binary, before trusting stage 9's output -- both `build_cna_tree.py`'s dataset-path
+  heuristics and its SCICoNE invocation/parsing were written without access to either (see
+  its module docstring's caveat).
 - **Pre-flight, on the first real stage-06 task**: run `samtools view -H` on a couple of
   cluster BAMs and confirm two things before trusting the retagging step or the calls it
   feeds:
