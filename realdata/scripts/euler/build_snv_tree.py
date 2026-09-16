@@ -826,16 +826,37 @@ def resolve_lichee_clone_tree(
     for e in edges:
         parent_of[e["b"]] = e["a"]
 
-    node_to_cluster = {node: cid for cid, node in resolved.items()}
+    tree = collapse_by_nearest_labelled_ancestor(parent_of, resolved, normal_id)
+    return tree, "the .dot export's node ids/labels"
+
+
+def collapse_by_nearest_labelled_ancestor(
+    parent_of: Dict[Hashable, Hashable],
+    node_of_cluster: Dict[str, Hashable],
+    root: str,
+) -> nx.DiGraph:
+    """Collapse an arbitrary tree (given as a ``{child: parent}`` dict over
+    some tool's own node space) onto a small set of labelled clusters, each
+    already resolved to one node in that space (``node_of_cluster``): every
+    cluster's parent in the result is the nearest OTHER cluster's node found
+    by walking up ``parent_of`` from its own node, or ``root`` if none is
+    found before the top.
+
+    Shared by every "collapse a tool's raw tree onto our observed clusters"
+    case in this pipeline (LICHeE here, via ``resolve_lichee_clone_tree``;
+    SCICoNE's cell tree in ``build_cna_tree.py``) -- the same idiom this
+    module used for SCITE's mutation tree before SCITE was retired.
+    """
+    node_to_cluster = {node: cid for cid, node in node_of_cluster.items()}
     tree = nx.DiGraph()
-    tree.add_node(normal_id)
-    for cid, node in resolved.items():
+    tree.add_node(root)
+    for cid, node in node_of_cluster.items():
         ancestor = parent_of.get(node)
         while ancestor is not None and ancestor not in node_to_cluster:
             ancestor = parent_of.get(ancestor)
-        parent_cluster = node_to_cluster.get(ancestor, normal_id)
+        parent_cluster = node_to_cluster.get(ancestor, root)
         tree.add_edge(parent_cluster, cid)
-    return tree, "the .dot export's node ids/labels"
+    return tree
 
 
 # --------------------------------------------------------------------------- #
