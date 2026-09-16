@@ -54,7 +54,7 @@ assumes a perfect phylogeny real calls do not satisfy (581k three-gamete
 violations, 0.27-0.36 edge containment, and an implausible linear chain on the
 earlier tumour-vs-pseudo-normal differential calls -- see git history for the
 retired ``build_clone_tree``/``containment_fraction`` code). Three-gamete
-(perfect-phylogeny) violations are still reported in tree_diagnostics.txt as a
+(perfect-phylogeny) violations are still reported in snv_tree_diagnostics.txt as a
 general compatibility diagnostic, independent of which tree method is used.
 
 LICHeE takes a per-sample VAF table and a required baseline/normal column
@@ -344,7 +344,7 @@ def three_gamete_violations(mutation_sets: Dict[str, Set[Hashable]]) -> int:
     pipeline expects (sparse tens-to-hundreds of mutations per cluster).
 
     A general presence-matrix compatibility diagnostic, independent of which
-    tree method is used -- reported in tree_diagnostics.txt regardless.
+    tree method is used -- reported in snv_tree_diagnostics.txt regardless.
     """
     clusters = sorted(mutation_sets)
     cluster_bit = {c: i for i, c in enumerate(clusters)}
@@ -1155,7 +1155,7 @@ def main() -> None:
     spectra.to_csv(args.out_dir / "spectra.csv")
 
     write_diagnostics(
-        args.out_dir / "tree_diagnostics.txt",
+        args.out_dir / "snv_tree_diagnostics.txt",
         mutation_sets,
         skip_counts,
         n_violations,

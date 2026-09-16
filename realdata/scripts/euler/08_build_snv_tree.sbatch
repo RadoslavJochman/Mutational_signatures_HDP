@@ -62,5 +62,5 @@ fi
     --lichee-bin "${LICHEE_BIN}" \
     ${SKIP_LICHEE_ARGS[@]+"${SKIP_LICHEE_ARGS[@]}"}
 
-echo "Wrote snv_tree.nwk, spectra.csv, clone_snv_matrix.csv, tree_diagnostics.txt" \
+echo "Wrote snv_tree.nwk, spectra.csv, clone_snv_matrix.csv, snv_tree_diagnostics.txt" \
      "to ${TREE_OUT_DIR}."

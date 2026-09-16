@@ -64,7 +64,7 @@ SCICoNE's own tree nodes then correspond directly to SECEDO clusters (via
 the same label-matching scheme build_snv_tree.py's LICHeE integration uses),
 skipping the majority-vote collapse. This is a real, flagged degradation
 (coarser than cell-level history), not a silent substitution: ``main``
-prints and records in tree_diagnostics.txt which mode actually ran.
+prints and records in cna_tree_diagnostics.txt which mode actually ran.
 """
 
 from __future__ import annotations
@@ -507,10 +507,11 @@ def main() -> None:
     diagnostics.append(f"\nEmitted tree: {classify_topology(tree)}\n")
     if classify_topology(tree).startswith("linear chain"):
         diagnostics.append("FINDING: the emitted CNA tree is a non-branching chain.\n")
-    (args.out_dir / "tree_diagnostics.txt").write_text("".join(diagnostics))
+    (args.out_dir / "cna_tree_diagnostics.txt").write_text("".join(diagnostics))
 
     print(
-        f"Mode: {mode}. Wrote cna_tree.nwk and tree_diagnostics.txt to {args.out_dir}."
+        f"Mode: {mode}. Wrote cna_tree.nwk and cna_tree_diagnostics.txt "
+        f"to {args.out_dir}."
     )
 
 

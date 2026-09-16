@@ -6,8 +6,9 @@
 #SBATCH --mem-per-cpu=4G
 #SBATCH --output=%x-%j.log
 #
-# Downloads slice D (BAM + BAI + per-cell summary CSV) and the GRCh37 reference into
-# scratch. Slice D only -- do not adapt this loop back to "A B C D E".
+# Downloads slice D (BAM + BAI + per-cell summary CSV), CellRanger DNA's own per-cell CNV
+# output (cnv_data.h5 + node_cnv_calls.bed, stage 09's input), and the GRCh37 reference
+# into scratch. Slice D only -- do not adapt this loop back to "A B C D E".
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
@@ -19,6 +20,10 @@ echo "Downloading slice ${SLICE} BAM/BAI/summary into ${RAW_DIR}..."
 wget -c -O "${RAW_DIR}/breast_tissue_D_2k_possorted_bam.bam" "${BAM_URL}"
 wget -c -O "${RAW_DIR}/breast_tissue_D_2k_possorted_bam.bam.bai" "${BAI_URL}"
 wget -c -O "${RAW_DIR}/breast_tissue_D_2k_per_cell_summary_metrics.csv" "${SUMMARY_URL}"
+
+echo "Downloading CellRanger DNA's per-cell CNV output (stage 09's input) into ${RAW_DIR}..."
+wget -c -O "${CNV_H5}" "${CNV_H5_URL}"
+wget -c -O "${NODE_CNV_CALLS_BED}" "${NODE_CNV_CALLS_URL}"
 
 echo "Downloading GRCh37 reference into ${REF_DIR}..."
 wget -c -O "${REF_DIR}/GRCh37.p13.genome.fa.gz" "${REF_FASTA_GZ_URL}"
@@ -63,5 +68,5 @@ if [ ! -f "${COSMIC_VCF}" ]; then
     echo "only, no longer a prerequisite for stage 06 to run."
 fi
 
-echo "Slice ${SLICE} download complete."
+echo "Slice ${SLICE} download complete (BAM, CNV h5/bed, reference)."
 du -sh "${RAW_DIR}" "${REF_DIR}"
