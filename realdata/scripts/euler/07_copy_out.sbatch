@@ -7,10 +7,12 @@
 #SBATCH --output=%x-%j.log
 #
 # Must-have (a): scratch is transient and unbacked-up, so copy the run's outputs to
-# persistent storage as soon as stage 06 finishes -- do not leave the only copy here.
-# Copies the per-cluster somatic VCFs (the actual deliverable), the secedo clustering
-# assignment and per-cluster reference-relative VCFs, and this run's logs, so the run is
-# reproducible-by-inspection without needing scratch to still exist.
+# persistent storage as soon as stage 06/06b finish -- do not leave the only copy here.
+# Copies the per-cluster somatic VCFs (pass 1's clone<c>_<chrom>.vcf, the actual
+# deliverable, plus pass 2's clone<c>_<chrom>.forced.vcf, which build_snv_tree.py reads),
+# the secedo clustering assignment and per-cluster reference-relative VCFs, and this
+# run's logs, so the run is reproducible-by-inspection without needing scratch to still
+# exist.
 #
 # MuTect1's call-stats .txt/.coverage side files are gone now that stage 06 runs
 # Mutect2 -- there is no equivalent output to copy, so only the final filtered VCFs are
@@ -22,7 +24,10 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 
 mkdir -p "${PERSIST_DIR}/mutect_vcfs" "${PERSIST_DIR}/secedo_clustering" "${PERSIST_DIR}/logs"
 
-echo "Copying per-cluster somatic VCFs to ${PERSIST_DIR}/mutect_vcfs..."
+# The clone*.vcf glob already matches both pass 1's clone<c>_<chrom>.vcf and pass 2's
+# clone<c>_<chrom>.forced.vcf (both end in .vcf) -- one cp covers both.
+echo "Copying per-cluster somatic VCFs (pass 1 and, if run, pass 2 force-called) to" \
+     "${PERSIST_DIR}/mutect_vcfs..."
 cp "${MUTECT_DIR}"/clone*.vcf "${PERSIST_DIR}/mutect_vcfs/"
 
 echo "Copying secedo clustering assignment and reference-relative VCFs to" \
@@ -56,7 +61,11 @@ for bam in "${CLUSTER_BAMS_DIR}"/clone*.bam; do
     [ -e "${bam}" ] || continue
     cid=$(basename "${bam}" .bam | sed 's/^clone//')
     [ "${cid}" = "${NORMAL_CLUSTER_ID}" ] && continue
-    n=$(cat "${PERSIST_DIR}/mutect_vcfs"/clone${cid}_*.vcf 2>/dev/null | grep -vc '^#' || true)
+    # Pass 1's plain clone<cid>_<chrom>.vcf only -- excludes pass 2's
+    # clone<cid>_<chrom>.forced.vcf (also matches clone${cid}_*.vcf), which would double-
+    # count sites and mix in non-PASS force-called records.
+    n=$(find "${PERSIST_DIR}/mutect_vcfs" -maxdepth 1 -name "clone${cid}_*.vcf" \
+        ! -name '*.forced.vcf' -exec cat {} + 2>/dev/null | grep -vc '^#' || true)
     echo "  clone${cid}: ${n}"
     echo "${cid},${n}" >> "${summary_csv}"
     n_clusters_final=$((n_clusters_final + 1))
