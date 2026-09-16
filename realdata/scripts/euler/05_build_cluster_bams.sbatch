@@ -31,14 +31,24 @@ n_clusters=$(find "${CLUSTER_BAMS_DIR}" -maxdepth 1 -name 'clone*.bam' | wc -l)
 echo "SECEDO found ${n_clusters} populated clusters (cluster 0/no-cluster excluded)."
 
 # Task list for stage 06 (mutect): one line per (cluster, chromosome), every populated
-# cluster -- tumour-only + gnomAD calling (see 06_mutect.sbatch) has no pseudo-normal to
-# exclude, so unlike before this needs no NORMAL_CLUSTER_ID and runs straight through.
+# cluster except NORMAL_CLUSTER_ID -- tumour-vs-pseudo-normal calling (see
+# 06_mutect.sbatch) needs that cluster held back as Mutect2's -normal, not called as a
+# tumour task itself. NORMAL_CLUSTER_ID must be set in config.sh (inspect this stage's
+# own output first if it isn't yet known for a fresh clustering run).
+if [ -z "${NORMAL_CLUSTER_ID}" ]; then
+    echo "NORMAL_CLUSTER_ID is not set in config.sh -- inspect ${CLUSTER_BAMS_DIR} above" \
+         "and set it, then rerun this stage to regenerate tasks.tsv with the pseudo-normal" \
+         "cluster excluded." >&2
+    exit 1
+fi
 tasks_file="${MUTECT_DIR}/tasks.tsv"
 : > "${tasks_file}"
 for bam in "${CLUSTER_BAMS_DIR}"/clone*.bam; do
     cluster_id=$(basename "${bam}" .bam | sed 's/^clone//')
+    [ "${cluster_id}" = "${NORMAL_CLUSTER_ID}" ] && continue
     for chrom in {1..22} X Y; do
         printf '%s\t%s\n' "${cluster_id}" "${chrom}" >> "${tasks_file}"
     done
 done
-echo "Wrote $(wc -l < "${tasks_file}") mutect tasks to ${tasks_file}."
+echo "Wrote $(wc -l < "${tasks_file}") mutect tasks to ${tasks_file}" \
+     "(pseudo-normal cluster ${NORMAL_CLUSTER_ID} excluded)."
