@@ -55,12 +55,6 @@ DBSNP_VCF_GZ_URL="https://storage.googleapis.com/gcp-public-data--broad-referenc
 DBSNP_VCF="${REF_DIR}/dbsnp_138.b37.vcf"
 COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 
-# --- gnomAD germline resource (b37/GRCh37, af-only sites): the actual germline
-# subtraction under tumour-only calling (see 06_mutect.sbatch). Lives on scratch like the
-# rest of REF_DIR -- not backed up, subject to purge -- so re-stage it (or point this at a
-# group-shared copy) if it goes missing; it is not fetched by any script in this repo yet. ---
-GNOMAD_VCF="${REF_DIR}/gnomad/af-only-gnomad.raw.sites.vcf"
-
 # --- force-call presence thresholds (stage 06b's pass 2, read by build_tree.py): a
 # force-called site counts as present in a cluster only at or above both of these. ---
 PRESENCE_MIN_VAF="${PRESENCE_MIN_VAF:-0.05}"
@@ -78,12 +72,11 @@ PRESENCE_MIN_ALT_READS="${PRESENCE_MIN_ALT_READS:-2}"
 # (`conda install -c bioconda gatk4` or `pip install gatk`) and drop the `module load`
 # lines in those two scripts. ---
 
-# --- pseudo-normal cluster: VESTIGIAL as of the tumour-only + gnomAD switch (see
-# 06_mutect.sbatch) -- calling no longer excludes a matched-normal cluster or subtracts it
-# directly; germline subtraction is GNOMAD_VCF instead, and stage 05's task list now
-# includes every cluster. Left defined only in case some other script or diagnostic still
-# reads it; nothing in the pipeline requires it to be set any more. ---
-NORMAL_CLUSTER_ID="${NORMAL_CLUSTER_ID:-}"
+# --- pseudo-normal cluster: back to tumour-vs-pseudo-normal calling (gnomAD dropped,
+# see the plan doc's "revert to tumour-vs-pseudo-normal" entry). Stage 05 excludes this
+# cluster from the tumour task list; stage 06/06b call it as Mutect2's -normal. Cluster 4
+# is slice D's matched pseudo-normal, identified from stage 04/05's clustering output. ---
+NORMAL_CLUSTER_ID="${NORMAL_CLUSTER_ID:-4}"
 
 mkdir -p "${REF_DIR}" "${RAW_DIR}" "${PREPROC_DIR}" "${CELL_BAMS_DIR}" \
     "${CELL_BAMS_SPLIT_DIR}" "${PILEUP_DIR}" "${CLUSTERING_DIR}" "${CLUSTER_BAMS_DIR}" \
