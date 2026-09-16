@@ -41,9 +41,14 @@ echo "07_copy_out.sbatch uses --dependency=afterany, not afterok, so the must-ha
      "step still runs (and reports what did/didn't finish) even if some mutect array" \
      "tasks fail -- never leaves a completed subset stranded in scratch."
 echo
-echo "Once 07 has copied the VCFs out, stage 08 builds the tree and spectra TreeHDP" \
-     "consumes -- run it by hand, it is not chained here:"
-echo '  sbatch 08_build_tree.sbatch'
+echo "Once 07 has copied the VCFs out, stage 08 builds the SNV tree and spectra" \
+     "TreeHDP consumes -- run it by hand, it is not chained here:"
+echo '  sbatch 08_build_snv_tree.sbatch'
 # Not force-chained into the block above: the pipeline is run by hand past stage 05
 # (see the header note), and stage 08 needs 07's copy-out to have finished first.
-# sbatch --dependency=afterok:<07's job id> 08_build_tree.sbatch
+# sbatch --dependency=afterok:<07's job id> 08_build_snv_tree.sbatch
+echo
+echo "Stage 09 builds the CNA-side tree (SCICoNE over copy-number bins, collapsed onto" \
+     "the same SECEDO clusters) -- independent of stages 05-08, needs only stage 00's" \
+     "cnv_data.h5 download and stage 04/05's clustering. Also run by hand:"
+echo '  sbatch 09_build_cna_tree.sbatch'
