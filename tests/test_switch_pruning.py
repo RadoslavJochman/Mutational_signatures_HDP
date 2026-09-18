@@ -201,12 +201,16 @@ def _np_log_pi(pi, masks):
 
 
 def brute_force_oracle(
-    K, depth: DepthArrays, eta_by_depth, S, lambda_on, lambda_off, pi
+    K, depth: DepthArrays, eta_by_depth, S, lambda_on, lambda_off, pi, with_edges=False
 ):
     """Enumerate every joint state assignment over the whole forest.
 
     Returns (logZ, a_prob_by_depth, e_level_by_depth), directly comparable to
-    `_run`'s outputs.
+    `_run`'s outputs. With `with_edges=True` a fourth item is appended:
+    {"gain": {(d, i): (K,)}, "loss": {(d, i): (K,)}}, the exact per-edge
+    P(a_parent,k = 0, a_child,k = 1) and P(a_parent,k = 1, a_child,k = 0) for
+    every non-root node (d, i), which the FFBS sampler in
+    src/analysis/switch_posterior.py must reproduce to Monte Carlo error.
     """
     masks = state_grid(K)
     n_by_depth = [c.shape[0] for c in depth.counts]
@@ -259,7 +263,26 @@ def brute_force_oracle(
             axis=0
         ) / q_no_off.sum()
 
-    return logZ, a_prob_by_depth, e_level_by_depth
+    if not with_edges:
+        return logZ, a_prob_by_depth, e_level_by_depth
+
+    pos_of = {node: pos for pos, node in enumerate(node_list)}
+    edges = {"gain": {}, "loss": {}}
+    for d, i in node_list:
+        if d == 0:
+            continue
+        parent = (d - 1, int(depth.parent_pos[d][i]))
+        pp, pc = pos_of[parent], pos_of[(d, i)]
+        other = tuple(a for a in range(N) if a not in (pp, pc))
+        pair = np.exp(logsumexp(joint, axis=other) - logZ)  # axes in (pp, pc) order
+        if pp > pc:
+            pair = pair.T  # make axis 0 the parent's state
+        on = masks > 0  # (2^K, K)
+        gain = np.array([pair[~on[:, k]][:, on[:, k]].sum() for k in range(K)])
+        loss = np.array([pair[on[:, k]][:, ~on[:, k]].sum() for k in range(K)])
+        edges["gain"][(d, i)] = gain
+        edges["loss"][(d, i)] = loss
+    return logZ, a_prob_by_depth, e_level_by_depth, edges
 
 
 @pytest.mark.parametrize("forest_kind", ["chain", "branching"])
