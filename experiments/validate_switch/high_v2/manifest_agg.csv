@@ -1,0 +1,4 @@
+setting,rep,dir
+high_v2,0,../experiments/validate_switch/high_v2/rep00/results/recovery
+high_v2,1,../experiments/validate_switch/high_v2/rep01/results/recovery
+high_v2,2,../experiments/validate_switch/high_v2/rep02/results/recovery

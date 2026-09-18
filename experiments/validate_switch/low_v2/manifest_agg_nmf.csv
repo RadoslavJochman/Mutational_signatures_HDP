@@ -1,0 +1,4 @@
+setting,rep,dir
+low_v2,0,../experiments/validate_switch/low_v2/rep00/results/nmf
+low_v2,1,../experiments/validate_switch/low_v2/rep01/results/nmf
+low_v2,2,../experiments/validate_switch/low_v2/rep02/results/nmf

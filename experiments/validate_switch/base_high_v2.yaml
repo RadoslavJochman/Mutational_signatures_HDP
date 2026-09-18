@@ -1,0 +1,120 @@
+# Validation of the switch model before the treehdp-v2 merge: comfortable burden,
+# v2 model (switching on, the Checkpoint 1 priors, always_on empty, tree_coupled
+# true, walk_branch_length_scaling false). Expanded to 3 seeds by
+# make_replicate_configs.py; run by scripts/validate_switch.sh; summarised in
+# report.md by scripts/validate_switch_report.py.
+#
+# Repertoire: the catalogue holds ten signatures and none of SBS2, SBS13, SBS3
+# (simulator_spec.md section 13 lists extending it as an open data task), so
+# the breast repertoire's unit structure is kept with stand-ins: SBS1/SBS5
+# clock (always on); [SBS36, SBS112] as the co-switching APOBEC-like unit
+# (two distinct spectra, as SBS2/SBS13 are); SBS40a as the flat per-patient
+# signature standing in for SBS3 (cosine 0.81 to SBS5, the overlap SBS3 has).
+# Rates are the spec's section 3 values. Burden 970 is the most-used value of
+# the historical sweep configs; the low arm uses 300, the current smoke value.
+
+experiment_name: validate_switch/high_v2
+experiment_root: ../experiments/
+git_tag: treehdp-v2-rc1
+
+simulation:
+  seed: 20260918
+  make_plots: false
+
+  repertoire:
+    source: cosmic
+    path: ../COSMIC_sig/cosmic_signatures.csv
+    signatures: [SBS1, SBS5, SBS36, SBS112, SBS40a]
+
+  switching:
+    enabled: true
+    branch_length_scaling: true
+    units:
+      - signatures: [SBS1] # clock: always on
+        root_prob: 1.0
+        lambda_on: 0.0
+        lambda_off: 0.0
+      - signatures: [SBS5] # clock: always on
+        root_prob: 1.0
+        lambda_on: 0.0
+        lambda_off: 0.0
+      - signatures: [SBS36, SBS112] # co-switching unit (stand-in for SBS2/SBS13)
+        root_prob: 0.0
+        lambda_on: 0.4
+        lambda_off: 0.1
+      - signatures: [SBS40a] # per-patient presence at the root (stand-in for SBS3)
+        root_prob: 0.5
+        lambda_on: 0.05
+        lambda_off: 0.05
+
+  levels:
+    enabled: true
+    walk: dirichlet
+    concentration: 50.0
+    branch_length_scaling: true
+    concentration_floor: 1.0
+    root_concentration: 1.0
+    activation_pseudocount: 0.02
+
+  forest:
+    n_trees: 4
+    nodes_per_tree: [6, 10]
+    depth: [2, 4]
+    max_attempts: 200
+    branch_lengths:
+      distribution: lognormal
+      params: { mu: 0.0, sigma: 0.6 }
+
+  burden:
+    mean: 970
+    distribution: negbin
+    dispersion: 2.0
+
+  counts:
+    model: dirichlet_multinomial
+    kappa: 50.0
+
+inference:
+  model: fixed
+
+  data:
+    count_matrix: ../experiments/validate_switch/high_v2/data/mutation_count_matrix.csv
+    newick_string: ../experiments/validate_switch/high_v2/data/newick_string.nwk
+    tree_edges: ../experiments/validate_switch/high_v2/data/tree_edges.csv
+    fixed_signatures: ../experiments/validate_switch/high_v2/data/fixed_signatures.csv
+    true_activities: ../experiments/validate_switch/high_v2/data/true_activities.csv
+    ground_truth_params: ../experiments/validate_switch/high_v2/data/ground_truth_params.json
+
+  priors:
+    sigma_prior: LogNorm
+    sigma_prior_parm:
+      mu: 0.0
+      sigma: 1.0
+    sigma_0: 1.0
+    sigma_mu: 2.0
+    walk_branch_length_scaling: false
+
+  switching:
+    enabled: true
+    branch_length_source: newick
+    lambda_on_prior: LogNorm
+    lambda_on_prior_parm:
+      mu: -1.2
+      sigma: 1.0
+    lambda_off_prior: LogNorm
+    lambda_off_prior_parm:
+      mu: -1.2
+      sigma: 1.0
+    pi_root_prior: Beta
+    pi_root_prior_parm:
+      alpha: 1
+      beta: 1
+    always_on: []
+    tree_coupled: true
+
+  draws: 1000
+  tune: 1000
+  chains: 4
+  cores: 4
+  target_accept: 0.9
+  max_treedepth: 10
