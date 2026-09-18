@@ -57,9 +57,9 @@ def _toy_inputs(K=3, C=6, seed=0, newick=NEWICK):
     return newick, data, K, C, S
 
 
-def _build_fixed(switching=None, newick=NEWICK, K=3):
+def _build_fixed(switching=None, newick=NEWICK, K=3, priors=PRIORS):
     newick, data, K, C, S = _toy_inputs(K=K, newick=newick)
-    return TreeHDP(newick, data, priors=PRIORS, fixed_signatures=S, switching=switching)
+    return TreeHDP(newick, data, priors=priors, fixed_signatures=S, switching=switching)
 
 
 def _build_denovo(switching=None, K=3):
@@ -230,6 +230,71 @@ def test_state_space_cap_counts_free_signatures_only():
         signature_names=names,
     )
     assert model.switching["always_on_idx"] == (0,)
+
+
+# ---------------------------------------------------------------------------
+# walk_branch_length_scaling (section 7.3).
+# ---------------------------------------------------------------------------
+
+NEWICK_UNIT = "((C:1,D:1)B:1,E:1)A:0.0;"  # every edge 1, so every l_e = 1
+SCALED = dict(PRIORS, walk_branch_length_scaling=True)
+
+
+def _logp_pairs(model_a, model_b, n=20, seed=0):
+    """Model logp of both models at the same n random points around the
+    initial point (both share the same free variables)."""
+    fa, fb = model_a.model.compile_logp(), model_b.model.compile_logp()
+    ip = model_a.model.initial_point()
+    assert set(ip) == set(model_b.model.initial_point())
+    rng = np.random.default_rng(seed)
+    pairs = []
+    for _ in range(n):
+        point = {k: v + rng.normal(scale=0.3, size=np.shape(v)) for k, v in ip.items()}
+        pairs.append((float(fa(point)), float(fb(point))))
+    return np.array(pairs)
+
+
+@pytest.mark.parametrize("with_switching", [False, True])
+def test_walk_scaling_with_unit_lengths_equals_unscaled(with_switching):
+    sw = _switching() if with_switching else None
+    scaled = _build_fixed(switching=sw, newick=NEWICK_UNIT, priors=SCALED)
+    plain = _build_fixed(switching=sw, newick=NEWICK_UNIT)
+    assert scaled.l_median == 1.0
+    pairs = _logp_pairs(scaled, plain)
+    assert np.all(np.isfinite(pairs))
+    np.testing.assert_allclose(pairs[:, 0], pairs[:, 1], rtol=1e-10)
+
+
+@pytest.mark.parametrize("with_switching", [False, True])
+def test_walk_scaling_with_unequal_lengths_differs(with_switching):
+    sw = _switching() if with_switching else None
+    scaled = _build_fixed(switching=sw, newick=NEWICK, priors=SCALED)
+    plain = _build_fixed(switching=sw, newick=NEWICK)
+    assert scaled.l_median == pytest.approx(0.6)  # median of 0.3, 0.5, 0.7, 1.0
+    pairs = _logp_pairs(scaled, plain)
+    assert np.all(np.isfinite(pairs))
+    assert np.abs(pairs[:, 0] - pairs[:, 1]).max() > 1e-6
+
+
+def test_walk_scaling_length_source_without_switching():
+    unit = _build_fixed(
+        newick=NEWICK_NO_LENGTHS, priors=dict(SCALED, branch_length_source="unit")
+    )
+    plain = _build_fixed(newick=NEWICK_NO_LENGTHS)
+    pairs = _logp_pairs(unit, plain)
+    np.testing.assert_allclose(pairs[:, 0], pairs[:, 1], rtol=1e-10)
+    with pytest.raises(ValueError, match="length"):
+        _build_fixed(newick=NEWICK_NO_LENGTHS, priors=SCALED)
+
+
+def test_walk_scaling_default_off_is_unchanged():
+    assert "walk_branch_length_scaling" not in PRIORS
+    plain = _build_fixed(newick=NEWICK)
+    explicit_off = _build_fixed(
+        newick=NEWICK, priors=dict(PRIORS, walk_branch_length_scaling=False)
+    )
+    pairs = _logp_pairs(plain, explicit_off, n=5)
+    np.testing.assert_allclose(pairs[:, 0], pairs[:, 1], rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

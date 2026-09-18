@@ -228,7 +228,9 @@ class TreeHDP(_BaseTreeHDP):
         eta_root   =  mu_level + sigma_0 * z_root        (each tree root,
                                                           non-centered)
         z_j        ~ ZeroSumNormal(1)                    (K,)
-        eta_j      =  eta_parent + sigma * z_j           (non-centered)
+        eta_j      =  eta_parent + sigma * z_j           (non-centered; times
+                                                          sqrt(l_e) with
+                                                          walk_branch_length_scaling)
         e_j        =  softmax(eta_j)                     (full K, no
                                                           pinned coordinate)
         x_ji       ~ Multinomial(M_j, e_j @ S)
@@ -285,6 +287,16 @@ class TreeHDP(_BaseTreeHDP):
           - 'beta' (optional, default 0.5)     : Dirichlet concentration
             for the signature prior S_k ~ Dir(beta * 1_C). Read only when
             S is latent.
+          - 'walk_branch_length_scaling' (optional, default False) : scale
+            each walk step by the square root of the normalised branch
+            length, eta_j = eta_parent + sigma * sqrt(l_e) * z_j, with the
+            same l_e = L_e / L_median as the switch block (the simulator's
+            branch-length-scaled drift). Works with switching on or off;
+            with every l_e = 1 it is the unscaled model.
+          - 'branch_length_source' (optional, default 'newick') : where the
+            lengths for the scaled walk come from when switching is off
+            ('newick' | 'unit'); with switching on, its
+            `branch_length_source` is used for both.
     fixed_signatures : np.ndarray, optional
         Shape (K, C). Pass to fix S (known-signature setting); K is taken
         from this array. Exactly one of `fixed_signatures` /
@@ -457,6 +469,52 @@ class TreeHDP(_BaseTreeHDP):
             shape=(self.K, self.n_channels),
         )
 
+    def _normalised_edge_lengths(self, nodes_by_depth_list: List[list], source: str):
+        """
+        Per-depth normalised branch lengths `l_e = L_e / L_median`, the one
+        length convention shared by the switch block and the branch-length-
+        scaled walk. `L_median` is the median over every edge of the forest.
+
+        Returns `(length_by_depth, l_median)`: `length_by_depth[0]` is None,
+        `length_by_depth[d]` is a `(n_d,)` array for `d >= 1`. With
+        `source == 'unit'` every length is 1 and `l_median = 1`. Also sets
+        `self.l_median` (rates in the switch block are per median branch, so
+        comparing a fitted `lambda` to the simulator's needs this factor).
+
+        Raises
+        ------
+        ValueError
+            If `source` is not 'newick'/'unit', or is 'newick' and some edge
+            has no `length` attribute.
+        """
+        if source not in ("newick", "unit"):
+            raise ValueError(
+                f"branch_length_source must be 'newick' or 'unit', got {source!r}."
+            )
+        if source == "newick":
+            lengths = [d.get("length") for _, _, d in self.graph.edges(data=True)]
+            if any(length is None for length in lengths):
+                raise ValueError(
+                    "branch_length_source='newick' requires a 'length' attribute "
+                    "on every edge; found one or more edges without one. Use "
+                    "branch_length_source='unit' for a Newick forest with no "
+                    "branch lengths."
+                )
+            l_median = float(np.median(lengths)) if lengths else 1.0
+        else:
+            l_median = 1.0
+
+        length_by_depth: List[Optional[np.ndarray]] = [None]
+        for current_nodes in nodes_by_depth_list[1:]:
+            length_d = np.ones(len(current_nodes))
+            if source == "newick":
+                for i, node in enumerate(current_nodes):
+                    parent = list(self.graph.predecessors(node))[0]
+                    length_d[i] = self.graph.edges[parent, node]["length"] / l_median
+            length_by_depth.append(length_d)
+        self.l_median = l_median
+        return length_by_depth, l_median
+
     def _build_switch_depth_arrays(
         self, nodes_by_depth_list: List[list]
     ) -> DepthArrays:
@@ -477,23 +535,13 @@ class TreeHDP(_BaseTreeHDP):
             If `branch_length_source` is 'newick' and some edge has no
             `length` attribute.
         """
-        source = self.switching["branch_length_source"]
-        if source == "newick":
-            lengths = [d.get("length") for _, _, d in self.graph.edges(data=True)]
-            if any(length is None for length in lengths):
-                raise ValueError(
-                    "switching.branch_length_source='newick' requires a "
-                    "'length' attribute on every edge; found one or more "
-                    "edges without one. Use branch_length_source='unit' for "
-                    "a Newick forest with no branch lengths."
-                )
-            l_median = float(np.median(lengths)) if lengths else 1.0
-        else:
-            l_median = 1.0
+        length_by_depth, _ = self._normalised_edge_lengths(
+            nodes_by_depth_list, self.switching["branch_length_source"]
+        )
 
         node_pos: Dict[str, int] = {}
         counts_by_depth, observed_by_depth = [], []
-        parent_pos_by_depth, length_by_depth = [], []
+        parent_pos_by_depth = []
 
         for depth, current_nodes in enumerate(nodes_by_depth_list):
             n_cur = len(current_nodes)
@@ -512,17 +560,12 @@ class TreeHDP(_BaseTreeHDP):
 
             if depth == 0:
                 parent_pos_by_depth.append(None)
-                length_by_depth.append(None)
                 continue
             parent_pos_d = np.zeros(n_cur, dtype=int)
-            length_d = np.ones(n_cur)
             for i, node in enumerate(current_nodes):
                 parent = list(self.graph.predecessors(node))[0]
                 parent_pos_d[i] = node_pos[parent]
-                if source == "newick":
-                    length_d[i] = self.graph.edges[parent, node]["length"] / l_median
             parent_pos_by_depth.append(parent_pos_d)
-            length_by_depth.append(length_d)
 
         tree_of_root = np.arange(len(nodes_by_depth_list[0]))
         return DepthArrays.build(
@@ -595,8 +638,26 @@ class TreeHDP(_BaseTreeHDP):
         sigma_mu = float(Fraction(str(self.priors.get("sigma_mu", 2.0))))
 
         nodes_by_depth = self._get_nodes_by_depth()
-        max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
+        nodes_by_depth_list: List[list] = [
+            nodes_by_depth[d] for d in sorted(nodes_by_depth)
+        ]
         switching_enabled = self.switching is not None
+
+        # Branch-length-scaled walk (priors.walk_branch_length_scaling):
+        # eta_j = eta_parent + sigma * sqrt(l_e) * z_j, with the same
+        # l_e = L_e / L_median as the switch block.
+        walk_scaling = bool(self.priors.get("walk_branch_length_scaling", False))
+        sqrt_l_by_depth: List[Optional[np.ndarray]] = [None] * len(nodes_by_depth_list)
+        if walk_scaling:
+            source = (
+                self.switching["branch_length_source"]
+                if switching_enabled
+                else self.priors.get("branch_length_source", "newick")
+            )
+            length_by_depth, _ = self._normalised_edge_lengths(
+                nodes_by_depth_list, source
+            )
+            sqrt_l_by_depth = [None] + [np.sqrt(ln) for ln in length_by_depth[1:]]
 
         with pm.Model() as self.model:
             signatures = self._build_signature_block()
@@ -608,12 +669,8 @@ class TreeHDP(_BaseTreeHDP):
             node_etas: Dict[str, pt.TensorVariable] = {}
             node_es: Dict[str, pt.TensorVariable] = {}
             eta_by_depth: List[pt.TensorVariable] = []
-            nodes_by_depth_list: List[list] = []
 
-            for depth in range(0, max_depth + 1):
-                current_nodes = nodes_by_depth.get(depth, [])
-                if not current_nodes:
-                    continue
+            for depth, current_nodes in enumerate(nodes_by_depth_list):
                 n_cur = len(current_nodes)
 
                 parent_nodes = [
@@ -636,9 +693,11 @@ class TreeHDP(_BaseTreeHDP):
                     z_name = f"z_level_{depth}"
                     z_level = pm.ZeroSumNormal(z_name, sigma=1.0, shape=(n_cur, self.K))
                     eta_name = f"eta_level_{depth}"
-                    eta_level = pm.Deterministic(
-                        eta_name, parent_eta_stack + sigma * z_level
-                    )
+                    step = sigma * z_level
+                    if walk_scaling:
+                        sqrt_l = pt.as_tensor_variable(sqrt_l_by_depth[depth])
+                        step = sigma * sqrt_l[:, None] * z_level
+                    eta_level = pm.Deterministic(eta_name, parent_eta_stack + step)
 
                 z_var = f"z_root_{depth}" if parent_nodes[0] is None else z_name
                 self.signature_axis[z_var] = -1
@@ -649,7 +708,6 @@ class TreeHDP(_BaseTreeHDP):
                     self.node_index_map[node] = (f"e_level_{depth}", i)
 
                 eta_by_depth.append(eta_level)
-                nodes_by_depth_list.append(current_nodes)
 
             if switching_enabled:
                 self._build_switch_block(
