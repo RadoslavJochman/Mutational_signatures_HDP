@@ -344,7 +344,28 @@ class TreeHDP(_BaseTreeHDP):
         self.switching = self._resolve_switching(switching)
         self.priors = priors
         self.n_channels = data_matrix.shape[1]
+        # name -> axis, for every model variable carrying a signature axis;
+        # filled in as _build_pymc_model creates them (see signature_axis_vars).
+        self.signature_axis: Dict[str, int] = {}
         super().__init__(newick_string, data_matrix)
+
+    def signature_axis_vars(self) -> Dict[str, int]:
+        """
+        Every model variable with a signature axis, as `name -> axis` (the
+        axis within the variable's own shape, not counting chain/draw).
+
+        `signatures` is axis 0 (present only when S is latent); every
+        `(..., K)` variable is axis -1: `mu_level`, `z_root_<d>`,
+        `z_level_<d>`, `eta_level_<d>`, `e_level_<d>`, and with switching
+        enabled `lambda_on`, `lambda_off`, `pi_root`, `a_prob_level_<d>`.
+
+        This is the registry a de novo post-hoc alignment permutes, so that
+        signature k means the same thing in every draw of every chain for
+        every variable, not just the ones a hard-coded list happened to
+        name. Permuting a ZeroSumNormal draw keeps it zero-sum, so aligning
+        `z_*` is harmless and makes the aligned trace self-consistent.
+        """
+        return dict(self.signature_axis)
 
     def _resolve_switching(self, switching: Optional[dict]) -> Optional[dict]:
         """
@@ -401,6 +422,7 @@ class TreeHDP(_BaseTreeHDP):
         if self.S_known:
             return pt.as_tensor_variable(self.fixed_signatures)
         beta = float(Fraction(str(self.priors.get("beta", 0.5))))
+        self.signature_axis["signatures"] = 0
         return pm.Dirichlet(
             "signatures",
             a=beta * np.ones(self.n_channels),
@@ -504,6 +526,7 @@ class TreeHDP(_BaseTreeHDP):
             name="lambda_off"
         )
         pi_root = get_prior(self.switching, "pi_root_prior", dim=self.K)(name="pi_root")
+        self.signature_axis.update(lambda_on=-1, lambda_off=-1, pi_root=-1)
 
         log_beta, log_msg, logT_by_depth, logpi_vec, logZ, logZ_per_root = switch_prune(
             eta_by_depth,
@@ -529,6 +552,8 @@ class TreeHDP(_BaseTreeHDP):
         for depth, current_nodes in enumerate(nodes_by_depth_list):
             pm.Deterministic(f"a_prob_level_{depth}", a_prob_by_depth[depth])
             e_level = pm.Deterministic(f"e_level_{depth}", e_level_by_depth[depth])
+            self.signature_axis[f"a_prob_level_{depth}"] = -1
+            self.signature_axis[f"e_level_{depth}"] = -1
             for i, node in enumerate(current_nodes):
                 node_es[node] = e_level[i]
 
@@ -547,6 +572,7 @@ class TreeHDP(_BaseTreeHDP):
             sigma = get_prior(self.priors, "sigma_prior", dim=1)(name="sigma")
 
             mu_level = pm.ZeroSumNormal("mu_level", sigma=sigma_mu, shape=(self.K,))
+            self.signature_axis["mu_level"] = -1
             node_etas: Dict[str, pt.TensorVariable] = {}
             node_es: Dict[str, pt.TensorVariable] = {}
             eta_by_depth: List[pt.TensorVariable] = []
@@ -582,6 +608,10 @@ class TreeHDP(_BaseTreeHDP):
                         eta_name, parent_eta_stack + sigma * z_level
                     )
 
+                z_var = f"z_root_{depth}" if parent_nodes[0] is None else z_name
+                self.signature_axis[z_var] = -1
+                self.signature_axis[eta_name] = -1
+
                 for i, node in enumerate(current_nodes):
                     node_etas[node] = eta_level[i]
                     self.node_index_map[node] = (f"e_level_{depth}", i)
@@ -600,6 +630,7 @@ class TreeHDP(_BaseTreeHDP):
                     f"e_level_{depth}",
                     pt.special.softmax(eta_by_depth[depth], axis=-1),
                 )
+                self.signature_axis[f"e_level_{depth}"] = -1
                 for i, node in enumerate(current_nodes):
                     node_es[node] = e_level[i]
 

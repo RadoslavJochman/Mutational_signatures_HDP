@@ -130,6 +130,41 @@ def test_switching_enabled_variable_names_and_shapes(build):
         np.testing.assert_allclose(e_level.sum(axis=-1), 1.0, atol=1e-8)
 
 
+def test_signature_axis_registry_disabled():
+    model = _build_fixed(switching=None)
+    reg = model.signature_axis_vars()
+    assert reg == {
+        "mu_level": -1,
+        "z_root_0": -1,
+        "z_level_1": -1,
+        "z_level_2": -1,
+        "eta_level_0": -1,
+        "eta_level_1": -1,
+        "eta_level_2": -1,
+        "e_level_0": -1,
+        "e_level_1": -1,
+        "e_level_2": -1,
+    }
+    assert set(reg) <= set(model.model.named_vars)
+
+
+def test_signature_axis_registry_denovo_switching():
+    model = _build_denovo(switching=_switching())
+    reg = model.signature_axis_vars()
+    assert reg["signatures"] == 0
+    for name in ("lambda_on", "lambda_off", "pi_root"):
+        assert reg[name] == -1
+    for d in range(3):
+        assert reg[f"a_prob_level_{d}"] == -1
+        assert reg[f"e_level_{d}"] == -1
+    assert set(reg) <= set(model.model.named_vars)
+    # every registered axis-(-1) variable really has K on its last axis
+    drawn = pm.draw(
+        [model.model[n] for n, ax in reg.items() if ax == -1], random_seed=0
+    )
+    assert all(arr.shape[-1] == model.K for arr in drawn)
+
+
 # ---------------------------------------------------------------------------
 # logp / dlogp finite in both backends (section 3.4).
 # ---------------------------------------------------------------------------
@@ -158,7 +193,8 @@ def test_logp_dlogp_finite(build, mode):
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_reduces_to_plain_multinomial():
+@pytest.mark.parametrize("seed", range(5))
+def test_bridge_reduces_to_plain_multinomial(seed):
     model = _build_fixed(switching=_switching())
     K = model.K
 
@@ -168,7 +204,7 @@ def test_bridge_reduces_to_plain_multinomial():
     depth_arrays = model._build_switch_depth_arrays(nodes_by_depth_list)
 
     eta_vars = [model.model[f"eta_level_{d}"] for d in range(max_depth + 1)]
-    eta_vals = pm.draw(eta_vars, random_seed=3)
+    eta_vals = pm.draw(eta_vars, random_seed=seed)
     if max_depth == 0:
         eta_vals = [eta_vals]
 
@@ -176,11 +212,19 @@ def test_bridge_reduces_to_plain_multinomial():
 
     from src.models.switch_pruning import prune
 
+    # The exact limit, not a nearby point: at pi = 1 - 1e-9 an off state
+    # still carries prior mass e^-20.7, and for an extreme prior draw of eta
+    # switching a badly fitting signature off can gain far more likelihood
+    # than that, so the pruned logZ legitimately exceeds the all-on
+    # multinomial (seen for 2 of 5 seeds). Only pi = 1, lambda = 0 makes
+    # every off state impossible; prune evaluates it exactly (log_pi is
+    # written to be nan-free there, see its docstring). backward is not
+    # exercised here: its leave-one-out step is what needs lambda > 0.
     eta_inputs = [pt.as_tensor_variable(e) for e in eta_vals]
     S_t = pt.as_tensor_variable(model.fixed_signatures)
-    lambda_on = pt.as_tensor_variable(np.full(K, 1e-8))
-    lambda_off = pt.as_tensor_variable(np.full(K, 1e-8))
-    pi_root = pt.as_tensor_variable(np.full(K, 1 - 1e-9))
+    lambda_on = pt.as_tensor_variable(np.zeros(K))
+    lambda_off = pt.as_tensor_variable(np.zeros(K))
+    pi_root = pt.as_tensor_variable(np.ones(K))
 
     *_, logZ, _ = prune(
         eta_inputs, S_t, lambda_on, lambda_off, pi_root, depth_arrays, K
@@ -204,7 +248,8 @@ def test_bridge_reduces_to_plain_multinomial():
                 continue
             want_logp += multinomial.logpmf(counts, n=counts.sum(), p=theta_d[i])
 
-    assert got_logZ == pytest.approx(want_logp, rel=1e-4)
+    assert np.isfinite(got_logZ)
+    assert got_logZ == pytest.approx(want_logp, rel=1e-8)
 
 
 # ---------------------------------------------------------------------------

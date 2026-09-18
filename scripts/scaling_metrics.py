@@ -6,13 +6,18 @@ run. Run it once per tree count and append to a shared CSV; the collected rows
 feed the trees-vs-fit table in the report.
 
 Convergence
-    max_rhat : worst split-Rhat over the activity variables (e_level_*), sigma
-               and mu_level.
+    max_rhat : worst split-Rhat over the activity variables (e_level_*), sigma,
+               mu_level and, when present, the switch model's lambda_on,
+               lambda_off and pi_root.
     min_ess  : smallest bulk ESS over the same variables.
     mu_level is the forest-pooled baseline every root deviates from, so it is
     genuinely identifiable and is monitored deliberately. eta-level, z-level
     and z-root variables are not matched and so are excluded, since they are
-    uninformative by construction in the non-centred walk.
+    uninformative by construction in the non-centred walk. a_prob_level_* is
+    excluded too: it is a bounded Deterministic that can sit at exactly 0 or 1
+    for a whole chain, which makes its r_hat and ESS NaN. Any variable whose
+    posterior variance is below 1e-12 is dropped before the diagnostic, and
+    the max/min skip NaN, so one constant element cannot turn the row NaN.
 
 Accuracy (when --true-activities and --newick are given)
     Activities are aligned to the truth
@@ -63,24 +68,56 @@ def _level_vars(post, prefix):
     return vs
 
 
+SWITCH_RATE_VARS = ("lambda_on", "lambda_off", "pi_root")
+CONSTANT_VARIANCE_TOL = 1e-12
+
+
 def _convergence_vars(post, activity_var, conv_vars):
     """Variables to judge convergence on: the activity variables, any
-    'sigma', and 'mu_level'. mu_level is a single forest-pooled baseline
-    (identifiable, unlike the walk increments) and is kept deliberately,
-    not by accident of the name match below. eta-level, z-level and
-    z-root are not matched and so are excluded."""
+    'sigma', 'mu_level', and the switch model's lambda_on/lambda_off/pi_root
+    when present. mu_level is a single forest-pooled baseline (identifiable,
+    unlike the walk increments) and is kept deliberately, not by accident of
+    the name match below. eta-level, z-level and z-root are not matched and
+    so are excluded; so is a_prob_level_* (see the module docstring)."""
     if conv_vars:
         return list(conv_vars)
+    names = list(map(str, post.data_vars))
     keep = _level_vars(post, activity_var)
-    keep += [
-        str(v) for v in post.data_vars if "sigma" in str(v) or str(v) == "mu_level"
-    ]
+    keep += [v for v in names if "sigma" in v or v == "mu_level"]
+    keep += [v for v in SWITCH_RATE_VARS if v in names]
     if not keep:
         raise SystemExit(
             f"no convergence variables matched '{activity_var}_<d>' or 'sigma'; "
-            f"available: {list(map(str, post.data_vars))}"
+            f"available: {names}"
         )
     return keep
+
+
+def _drop_constant(post, names, tol=CONSTANT_VARIANCE_TOL):
+    """Split `names` into (kept, dropped): dropped are variables whose every
+    element has posterior variance below `tol` across chains and draws.
+    r_hat and ESS are undefined for a constant, so they would only add NaN."""
+    kept, dropped = [], []
+    for v in names:
+        max_var = float(post[v].var(dim=("chain", "draw")).max())
+        (kept if max_var >= tol else dropped).append(v)
+    return kept, dropped
+
+
+def convergence_row(idata, names):
+    """max_rhat / min_ess over `names`, dropping constant variables first
+    and skipping NaN (a single constant element of an otherwise varying
+    variable still gives NaN in its own row of az.summary)."""
+    kept, _ = _drop_constant(idata.posterior, names)
+    if not kept:
+        raise SystemExit(
+            f"every convergence variable is constant across the trace: {names}"
+        )
+    diag = az.summary(idata, var_names=kept, kind="diagnostics")
+    return {
+        "max_rhat": float(diag["r_hat"].max(skipna=True)),
+        "min_ess": float(diag["ess_bulk"].min(skipna=True)),
+    }
 
 
 def _aligned_activities(post, prefix, newick, truth):
@@ -127,16 +164,10 @@ def main():
     idata = az.from_netcdf(a.trace)
     post = idata.posterior
 
-    diag = az.summary(
-        idata,
-        var_names=_convergence_vars(post, a.activity_var, a.conv_vars),
-        kind="diagnostics",
+    row = {"n_trees": a.n_trees}
+    row.update(
+        convergence_row(idata, _convergence_vars(post, a.activity_var, a.conv_vars))
     )
-    row = {
-        "n_trees": a.n_trees,
-        "max_rhat": float(diag["r_hat"].max()),
-        "min_ess": float(diag["ess_bulk"].min()),
-    }
 
     if a.true_activities and a.newick:
         truth = pd.read_csv(a.true_activities, index_col=0)

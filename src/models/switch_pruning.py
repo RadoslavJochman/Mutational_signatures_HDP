@@ -164,11 +164,22 @@ def log_pi(pi: pt.TensorVariable, masks: np.ndarray) -> pt.TensorVariable:
     Returns
     -------
     (2**K,) tensor.
+
+    Notes
+    -----
+    Written as a per-signature `where` summed over k rather than the matmul
+    `masks @ log(pi) + (1 - masks) @ log1p(-pi)`. The two agree for every
+    `pi` in (0, 1), which is all a Beta prior ever samples, but the matmul
+    form gives `0 * log(0) = nan` in the all-on row at `pi = 1` exactly,
+    while this form gives 0 there and `-inf` for every other state. That
+    exact limit (`pi = 1`, `lambda = 0`: every signature forced on) is the
+    bridge test of switch_model_plan.md section 3.4, where the pruned
+    marginal likelihood must equal the plain multinomial's, so it has to be
+    evaluable. Gradients at that boundary are undefined in either form.
     """
     masks_t = pt.as_tensor_variable(masks)  # (2^K, K)
-    log_on = pt.log(pi)
-    log_off = pt.log1p(-pi)
-    return masks_t @ log_on + (1 - masks_t) @ log_off
+    per_k = pt.where(masks_t > 0, pt.log(pi)[None, :], pt.log1p(-pi)[None, :])
+    return pt.sum(per_k, axis=-1)
 
 
 def log_transition(

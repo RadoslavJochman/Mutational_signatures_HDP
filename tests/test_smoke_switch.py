@@ -123,6 +123,8 @@ def test_generate_infer_switch_both_modes(tmp_workdir):
     assert (results_denovo / "trace_aligned.nc").exists()
     assert (results_denovo / "switching_table.csv").exists()
     assert (results_denovo / "inference_summary.csv").exists()
+    perms = np.load(results_denovo / "perms.npy")
+    assert perms.shape == (chains, draws, K)
     idata_denovo = az.from_netcdf(results_denovo / "trace_aligned.nc")
     _check_switch_trace(idata_denovo, depths, n_at_depth, K, chains, draws)
     assert "signatures" in idata_denovo.posterior.data_vars

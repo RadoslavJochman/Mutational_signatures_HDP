@@ -25,6 +25,7 @@ from src.models.switch_pruning import (
     contract_child_to_parent,
     contract_parent_to_child,
     emission_loglik,
+    log_pi,
     log_transition,
     masked_softmax,
     prune,
@@ -385,6 +386,23 @@ def test_stable_logsumexp_all_inf_slice_is_inf_not_nan():
     got = _stable_logsumexp(pt.as_tensor_variable(x), axis=1).eval()
     assert np.all(got == -np.inf)
     assert not np.any(np.isnan(got))
+
+
+@pytest.mark.parametrize("K", [1, 2, 3])
+def test_log_pi_matches_bernoulli_product_and_is_nan_free_at_pi_one(K):
+    masks = state_grid(K)
+    rng = np.random.default_rng(K)
+    pi = rng.uniform(0.05, 0.95, size=K)
+    got = log_pi(pt.as_tensor_variable(pi), masks).eval()
+    want = (masks * np.log(pi) + (1 - masks) * np.log1p(-pi)).sum(axis=1)
+    np.testing.assert_allclose(got, want, rtol=1e-12)
+    np.testing.assert_allclose(np.exp(got).sum(), 1.0, rtol=1e-12)
+
+    # the exact bridge limit: all-on has log-prior 0, everything else -inf
+    at_one = log_pi(pt.as_tensor_variable(np.ones(K)), masks).eval()
+    assert not np.any(np.isnan(at_one))
+    assert at_one[-1] == 0.0
+    assert np.all(at_one[:-1] == -np.inf)
 
 
 def test_contraction_matches_kronecker_at_large_magnitude():

@@ -17,7 +17,8 @@ YAML config. inference.model picks the mode:
             per-draw alignment to chain 0's mean labelling is inserted
             between sampling and summary.
             Artefacts: trace_raw.nc (pre-alignment), trace_aligned.nc,
-            switching_table.csv (per-chain switching diagnostic).
+            perms.npy (the (chains, draws, K) permutation applied to each
+            draw), switching_table.csv (per-chain switching diagnostic).
 
 inference.model is required and must be set explicitly to 'fixed' or
 'denovo'; there is no fallback. Configs written before this runner
@@ -83,8 +84,10 @@ def _validate_inference_config(inf_cfg: dict, model_name: str) -> None:
     Raises
     ------
     ValueError
-        If 'fixed' has no inference.data.fixed_signatures path, or if
-        'denovo' has no inference.num_signatures.
+        If 'fixed' has no inference.data.fixed_signatures path, if 'denovo'
+        has no inference.num_signatures, or if 'denovo' sets
+        inference.switching.always_on (signatures have no identity in de
+        novo mode, so there is nothing to force on).
     """
     if model_name == "fixed":
         if not inf_cfg.get("data", {}).get("fixed_signatures"):
@@ -97,42 +100,49 @@ def _validate_inference_config(inf_cfg: dict, model_name: str) -> None:
             raise ValueError(
                 "inference.model: denovo requires inference.num_signatures (K)."
             )
+        if (inf_cfg.get("switching") or {}).get("always_on"):
+            raise ValueError(
+                "inference.switching.always_on is only valid with model: fixed; "
+                "de novo signatures have no identity to force on."
+            )
 
 
-def align_trace(trace, activity_var_prefix: str = "e_level"):
+def align_trace(trace, signature_axis_vars: dict):
     """
     Per-draw alignment of a de novo (S latent) TreeHDP trace to chain 0's
     mean labelling.
 
-    The `signatures` variable, the forest-pooled usage level `mu_level`,
-    and the per-node activity variables (e_level_*) are permuted along
-    their signature axis so that signature k means the same thing in every
-    draw of every chain.
+    Every variable in `signature_axis_vars` that is present in the
+    posterior is permuted along its signature axis by the same per-draw
+    permutation (found by Hungarian cosine matching of `signatures` to
+    chain 0's mean), so that signature k means the same thing in every
+    draw of every chain for every variable at once: `signatures`,
+    `mu_level`, the walk variables, `e_level_*`, and with the switch model
+    `lambda_on`, `lambda_off`, `pi_root`, `a_prob_level_*`. The registry
+    comes from `TreeHDP.signature_axis_vars()`, so a variable added to the
+    model with a signature axis is aligned as soon as it is registered
+    there, rather than silently left out of a hard-coded list here.
 
     Parameters
     ----------
     trace : arviz.InferenceData
-        Raw trace from a de novo TreeHDP.sample().
-    activity_var_prefix : str
-        Prefix of the per-node activity variables to permute alongside the
-        signatures. e_level_* has its last axis = K, the aligned
-        interpretable activity. eta_level_*/z_level_*/z_root_* (the raw
-        non-centred walk variables in unconstrained space) are not
-        permuted: their r_hat is uninformative by construction regardless
-        of alignment (see CLAUDE.md), so leaving them unaligned costs
-        nothing.
+        Raw trace from a de novo TreeHDP.sample(). Must contain
+        `signatures`.
+    signature_axis_vars : dict
+        `name -> axis`, the axis within the variable's own shape (not
+        counting chain/draw); see `TreeHDP.signature_axis_vars`.
 
     Returns
     -------
     aligned : arviz.InferenceData
-        A copy of `trace` with `signatures`, `mu_level`, and e_level_*
-        permuted.
+        A copy of `trace` with every registered variable permuted.
     perms : np.ndarray, shape (chains, draws, K)
-        The permutation applied to each draw (for the switching report).
+        The permutation applied to each draw (saved as perms.npy and used
+        for the switching report).
     """
     post = trace.posterior
     S = post["signatures"].values
-    n_chains, n_draws, K, C = S.shape
+    n_chains, n_draws, K, _ = S.shape
 
     S_ref = S[0].mean(axis=0)
 
@@ -142,35 +152,14 @@ def align_trace(trace, activity_var_prefix: str = "e_level"):
             perms[c, d], _ = align(S[c, d], S_ref)
 
     aligned = trace.copy()
-
-    S_aligned = np.empty_like(S)
-    for c in range(n_chains):
-        for d in range(n_draws):
-            S_aligned[c, d] = S[c, d][perms[c, d]]
-
-    sig_da = aligned.posterior["signatures"].copy(data=S_aligned)
-    aligned.posterior["signatures"] = sig_da
-
-    if "mu_level" in post.data_vars:
-        mu = post["mu_level"].values  # (chains, draws, K)
-        mu_aligned = np.empty_like(mu)
-        for c in range(n_chains):
-            for d in range(n_draws):
-                mu_aligned[c, d] = mu[c, d][perms[c, d]]
-        aligned.posterior["mu_level"] = aligned.posterior["mu_level"].copy(
-            data=mu_aligned
-        )
-
-    for var in list(post.data_vars):
-        if not var.startswith(activity_var_prefix):
+    for var, axis in signature_axis_vars.items():
+        if var not in post.data_vars:
             continue
-        arr = post[var].values
-        if arr.shape[-1] != K:
-            continue
+        arr = post[var].values  # (chains, draws, *var_shape)
         out = np.empty_like(arr)
         for c in range(n_chains):
             for d in range(n_draws):
-                out[c, d] = arr[c, d][:, perms[c, d]]
+                out[c, d] = np.take(arr[c, d], perms[c, d], axis=axis)
         aligned.posterior[var] = aligned.posterior[var].copy(data=out)
 
     return aligned, perms
@@ -238,13 +227,7 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
 
     # Build model. inference.switching (absent means disabled) is passed
     # through as-is; TreeHDP resolves and validates it (see its docstring
-    # and switch_model_plan.md section 3.2). The label-switching alignment
-    # registry for the switch model's extra signature-axis variables
-    # (lambda_on, lambda_off, pi_root, a_prob_level_*) is not built yet
-    # (switch_model_plan.md section 5); until then, de novo runs with
-    # switching enabled get the same signatures/mu_level/e_level_*
-    # alignment as today, and lambda_*/pi_root/a_prob_level_* r_hat is not
-    # yet meaningful across chains in that mode.
+    # and switch_model_plan.md section 3.2).
     switching_cfg = inf_cfg.get("switching")
     print("\nBuilding PyMC model...")
     if model_name == "fixed":
@@ -305,7 +288,11 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
             print(f"NetCDF backend unavailable ({e}); saved raw trace to '{zarr_path}'")
 
         print("\nAligning chains (per-draw, to chain 0's mean labelling)...")
-        aligned, perms = align_trace(trace)
+        aligned, perms = align_trace(trace, model.signature_axis_vars())
+
+        perms_path = out_dir / "perms.npy"
+        np.save(perms_path, perms)
+        print(f"Saved per-draw permutations to '{perms_path}'")
 
         switch_df = switching_table(perms)
         switch_path = out_dir / "switching_table.csv"

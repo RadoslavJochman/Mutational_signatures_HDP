@@ -16,7 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from scaling_metrics import _convergence_vars  # noqa: E402
+import arviz as az  # noqa: E402
+import numpy as np  # noqa: E402
+from scaling_metrics import (  # noqa: E402
+    _convergence_vars,
+    _drop_constant,
+    convergence_row,
+)
 
 
 class _FakePosterior:
@@ -72,3 +78,70 @@ def test_convergence_vars_override():
     post = _FakePosterior(["e_level_0", "sigma", "mu_level"])
     kept = _convergence_vars(post, "e_level", ["mu_level"])
     assert kept == ["mu_level"]
+
+
+def test_convergence_vars_switch_model():
+    """Switch-model trace: lambda_on/lambda_off/pi_root are kept;
+    a_prob_level_* (bounded, can be constant) is excluded."""
+    post = _FakePosterior(
+        [
+            "e_level_0",
+            "e_level_1",
+            "a_prob_level_0",
+            "a_prob_level_1",
+            "eta_level_0",
+            "z_root_0",
+            "sigma",
+            "mu_level",
+            "lambda_on",
+            "lambda_off",
+            "pi_root",
+        ]
+    )
+    kept = _convergence_vars(post, "e_level", None)
+    assert set(kept) == {
+        "e_level_0",
+        "e_level_1",
+        "sigma",
+        "mu_level",
+        "lambda_on",
+        "lambda_off",
+        "pi_root",
+    }
+
+
+def _fake_idata(seed=0):
+    rng = np.random.default_rng(seed)
+    chains, draws = 2, 40
+    return az.from_dict(
+        posterior={
+            "sigma": rng.lognormal(size=(chains, draws)),
+            "e_level_0": rng.dirichlet(np.ones(3), size=(chains, draws, 2)),
+            # exactly constant, as a_prob can be for an always-on signature
+            "a_prob_level_0": np.ones((chains, draws, 2, 3)),
+            # one constant element inside an otherwise varying variable
+            "lambda_on": np.concatenate(
+                [rng.lognormal(size=(chains, draws, 2)), np.ones((chains, draws, 1))],
+                axis=-1,
+            ),
+        }
+    )
+
+
+def test_drop_constant_removes_only_fully_constant_variables():
+    idata = _fake_idata()
+    kept, dropped = _drop_constant(
+        idata.posterior, ["sigma", "e_level_0", "a_prob_level_0", "lambda_on"]
+    )
+    assert dropped == ["a_prob_level_0"]
+    assert kept == ["sigma", "e_level_0", "lambda_on"]
+
+
+def test_convergence_row_is_finite_despite_constants():
+    """A fully constant variable and a constant element must not turn
+    max_rhat / min_ess into NaN."""
+    idata = _fake_idata()
+    row = convergence_row(idata, ["sigma", "e_level_0", "a_prob_level_0", "lambda_on"])
+    assert np.isfinite(row["max_rhat"])
+    assert np.isfinite(row["min_ess"])
+    assert row["min_ess"] > 0
