@@ -238,6 +238,28 @@ def log_transition(
     return pt.stack([row0, row1], axis=-2)  # (n, K, 2, 2): axis -2 is i, axis -1 is j
 
 
+def log_transition_iid(pi: pt.TensorVariable, n: int) -> pt.TensorVariable:
+    """The tree-free ablation's transition: every edge draws the child's
+    state from the root prior, independent of the parent's state and of the
+    branch length, so states are i.i.d. across nodes and the tree carries no
+    information about on/off (switch_model_plan.md section 7.2).
+
+    Parameters
+    ----------
+    pi : (K,) tensor, per-signature activation probability.
+    n : number of nodes at this depth (Python int).
+
+    Returns
+    -------
+    logT : (n, K, 2, 2) tensor with `logT[:, k, i, 1] = log(pi_k)` and
+        `logT[:, k, i, 0] = log(1 - pi_k)` for both parent states `i`, the
+        same layout as `log_transition` so the contractions are unchanged.
+    """
+    row = pt.stack([pt.log1p(-pi), pt.log(pi)], axis=-1)  # (K, 2): j = 0, 1
+    per_k = pt.stack([row, row], axis=-2)  # (K, 2, 2): i, then j
+    return pt.tile(per_k[None, :, :, :], (n, 1, 1, 1))
+
+
 def contract_child_to_parent(
     log_beta_child: pt.TensorVariable, logT: pt.TensorVariable, K: int
 ) -> pt.TensorVariable:
@@ -354,6 +376,7 @@ def prune(
     depth: DepthArrays,
     K: int,
     always_on: Sequence[int] = (),
+    tree_coupled: bool = True,
 ):
     """Upward (Felsenstein pruning) pass over the whole forest.
 
@@ -367,6 +390,10 @@ def prune(
     always_on : indices of signatures forced on (see `full_masks`). They are
         dropped from the state grid, so the state space is `2**(K - m)`, and
         their `lambda`/`pi` entries are ignored.
+    tree_coupled : with False, every edge transition is replaced by the root
+        prior (`log_transition_iid`): states are i.i.d. across nodes,
+        `lambda_on`/`lambda_off` and the branch lengths are ignored, and the
+        tree carries no information about on/off. The tree-free ablation.
 
     Returns
     -------
@@ -411,7 +438,10 @@ def prune(
         )
         if d > 0:
             length_d = pt.as_tensor_variable(depth.length[d].astype("float64"))
-            logT_d = log_transition(lambda_on, lambda_off, length_d)
+            if tree_coupled:
+                logT_d = log_transition(lambda_on, lambda_off, length_d)
+            else:
+                logT_d = log_transition_iid(pi, n_by_depth[d])
             logT_by_depth[d] = logT_d
             log_msg[d] = contract_child_to_parent(log_beta[d], logT_d, n_free)
             acc[d - 1] = pt.inc_subtensor(acc[d - 1][depth.parent_pos[d]], log_msg[d])

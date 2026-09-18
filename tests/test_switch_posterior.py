@@ -192,6 +192,42 @@ def test_sample_states_always_on_matches_exact_limit_oracle():
     )
 
 
+def test_sample_states_tree_coupled_false_matches_backward_marginals():
+    """Under the tree-free ablation the FFBS samples (compiled with
+    tree_coupled=False) must reproduce backward's Rao-Blackwellised a_prob
+    for the same setting to Monte Carlo error."""
+    from tests.test_switch_pruning import _prune_outputs
+
+    K, C = 2, 5
+    rng = np.random.default_rng(9)
+    depth, eta, S, lam_on, lam_off, pi = _make_branching_forest(K, C, rng)
+    _, a_prob, _ = _prune_outputs(
+        K, C, depth, eta, S, lam_on, lam_off, pi, tree_coupled=False
+    )
+
+    chains, draws = 1, 3000
+    post = {
+        f"eta_level_{d}": np.broadcast_to(e, (chains, draws) + e.shape).copy()
+        for d, e in enumerate(eta)
+    }
+    post["lambda_on"] = np.broadcast_to(lam_on, (chains, draws, K)).copy()
+    post["lambda_off"] = np.broadcast_to(lam_off, (chains, draws, K)).copy()
+    post["pi_root"] = np.broadcast_to(pi, (chains, draws, K)).copy()
+    idata = az.from_dict(posterior=post)
+
+    states, _ = sample_states(
+        idata.posterior,
+        depth,
+        K,
+        fixed_signatures=S,
+        rng=np.random.default_rng(3),
+        tree_coupled=False,
+    )
+    np.testing.assert_allclose(
+        node_marginals(states), np.concatenate(a_prob), atol=0.04
+    )
+
+
 def test_registry_frame_to_true_inverts_perm():
     perm0 = np.array([2, 0, 1])  # true slot i holds trace row perm0[i]
     mapping = registry_frame_to_true(perm0)

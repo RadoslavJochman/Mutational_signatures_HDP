@@ -65,6 +65,7 @@ def run(
     thin=1,
     seed=0,
     always_on=(),
+    tree_coupled=True,
 ):
     post = az.from_netcdf(trace_path).posterior
     counts = pd.read_csv(counts_path, index_col=0)
@@ -95,7 +96,9 @@ def run(
             newick, counts, num_signatures=K, branch_length_source=branch_length_source
         )
 
-    compiled = compile_pruning(K, counts.shape[1], depth, always_on=always_on_idx)
+    compiled = compile_pruning(
+        K, counts.shape[1], depth, always_on=always_on_idx, tree_coupled=tree_coupled
+    )
     states, draw_idx = sample_states(
         post,
         depth,
@@ -140,6 +143,13 @@ def main():
         help="signature names the model forced on (inference.switching.always_on); "
         "fixed mode only, must match the fitted model",
     )
+    ap.add_argument(
+        "--tree-coupled",
+        choices=["true", "false"],
+        default="true",
+        help="inference.switching.tree_coupled of the fitted model; 'false' is the "
+        "tree-free ablation (transitions are the root prior)",
+    )
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args()
     for p in run(
@@ -152,6 +162,7 @@ def main():
         thin=a.thin,
         seed=a.seed,
         always_on=tuple(a.always_on),
+        tree_coupled=a.tree_coupled == "true",
     ):
         print(p)
 

@@ -96,7 +96,12 @@ def depth_arrays_from_files(
 
 
 def compile_pruning(
-    K: int, C: int, depth: DepthArrays, always_on: Sequence[int] = (), mode=None
+    K: int,
+    C: int,
+    depth: DepthArrays,
+    always_on: Sequence[int] = (),
+    tree_coupled: bool = True,
+    mode=None,
 ):
     """
     Compile `switch_pruning.prune` for one forest.
@@ -107,8 +112,10 @@ def compile_pruning(
     `(log_beta_by_depth, log_msg_by_depth, logT_by_depth, logpi_vec)` as
     NumPy arrays, with `log_msg_by_depth[0]` and `logT_by_depth[0]` None.
     Every shape is static (Python ints from `depth`), as the pruning graph
-    requires. `always_on` must match the fitted model's (the state grid is
-    over the free signatures only; see `switch_pruning.full_masks`).
+    requires. `always_on` and `tree_coupled` must match the fitted model's
+    (the state grid is over the free signatures only, see
+    `switch_pruning.full_masks`; with `tree_coupled=False` the transitions
+    are the root prior, see `switch_pruning.log_transition_iid`).
     """
     n_by_depth = [c.shape[0] for c in depth.counts]
     eta_in = [
@@ -121,11 +128,26 @@ def compile_pruning(
     pi_t = pt.tensor("pi", dtype="float64", shape=(K,))
 
     log_beta, log_msg, logT, logpi_vec, _, _ = prune(
-        eta_in, S_t, lam_on_t, lam_off_t, pi_t, depth, K, always_on=always_on
+        eta_in,
+        S_t,
+        lam_on_t,
+        lam_off_t,
+        pi_t,
+        depth,
+        K,
+        always_on=always_on,
+        tree_coupled=tree_coupled,
     )
     outputs = list(log_beta) + list(log_msg[1:]) + list(logT[1:]) + [logpi_vec]
     kwargs = {} if mode is None else {"mode": mode}
-    fn = pytensor.function(eta_in + [S_t, lam_on_t, lam_off_t, pi_t], outputs, **kwargs)
+    # lambda_on / lambda_off drop out of the graph under tree_coupled=False
+    # (and always-on entries never enter it); keep the call signature fixed.
+    fn = pytensor.function(
+        eta_in + [S_t, lam_on_t, lam_off_t, pi_t],
+        outputs,
+        on_unused_input="ignore",
+        **kwargs,
+    )
     n_depths = len(n_by_depth)
 
     def run(eta_by_depth, S, lambda_on, lambda_off, pi):
@@ -193,6 +215,7 @@ def sample_states(
     thin: int = 1,
     rng: Optional[np.random.Generator] = None,
     always_on: Sequence[int] = (),
+    tree_coupled: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Forward-filter backward-sample one joint state per posterior draw.
@@ -212,6 +235,8 @@ def sample_states(
     rng : NumPy Generator (default_rng(0) if None).
     always_on : the fitted model's always-on signature indices; those bits
         are 1 in every sample.
+    tree_coupled : the fitted model's setting (False for the tree-free
+        ablation); only used when `compiled` is built here.
 
     Returns
     -------
@@ -230,7 +255,9 @@ def sample_states(
     S_all = None if fixed_signatures is not None else post["signatures"].values
     C = fixed_signatures.shape[1] if fixed_signatures is not None else S_all.shape[-1]
     if compiled is None:
-        compiled = compile_pruning(K, C, depth, always_on=always_on)
+        compiled = compile_pruning(
+            K, C, depth, always_on=always_on, tree_coupled=tree_coupled
+        )
     masks_full, free = full_masks(K, always_on)
     masks = state_grid(len(free))  # the axes logT is factorised over
     masks_int = masks_full.astype(np.int8)

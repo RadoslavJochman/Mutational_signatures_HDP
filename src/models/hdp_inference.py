@@ -312,9 +312,13 @@ class TreeHDP(_BaseTreeHDP):
             (state space `2**(K - m)`) and `a_prob_level_*` is exactly 1 for
             them. Biologically the clock signatures (SBS1, SBS5). Needs
             `signature_names`.
-        `tree_coupled: False` (switch_model_plan.md section 7.2) is not
-        implemented yet and raises `NotImplementedError` rather than being
-        silently ignored. `K - m` above 12 raises `ValueError`.
+          - 'tree_coupled' (default True) : with False, every edge
+            transition is the root prior, independent of the parent's state
+            and the branch length: states are i.i.d. across nodes and the
+            tree carries no information about on/off. The walk is unchanged,
+            so this isolates what the Markov coupling along the tree adds to
+            on/off recovery (the tree-free switching ablation).
+        `K - m` above 12 raises `ValueError`.
     signature_names : sequence of str, optional
         Names of the rows of `fixed_signatures`, needed to resolve
         `switching.always_on`.
@@ -389,10 +393,6 @@ class TreeHDP(_BaseTreeHDP):
 
         Raises
         ------
-        NotImplementedError
-            If `tree_coupled` is set to False: not implemented yet
-            (switch_model_plan.md section 7.2), so it is rejected loudly
-            rather than silently ignored.
         ValueError
             If `branch_length_source` is not 'newick'/'unit'; if `always_on`
             is given with S latent, without `signature_names`, or names a
@@ -430,11 +430,7 @@ class TreeHDP(_BaseTreeHDP):
             cfg["always_on_idx"] = tuple(sorted(names.index(s) for s in always_on))
         else:
             cfg["always_on_idx"] = ()
-        if not cfg.get("tree_coupled", True):
-            raise NotImplementedError(
-                "switching.tree_coupled = False is not implemented yet; see "
-                "switch_model_plan.md section 7.2."
-            )
+        cfg["tree_coupled"] = bool(cfg.get("tree_coupled", True))
         state_space_cap = 12
         n_free = self.K - len(cfg["always_on_idx"])
         if n_free > state_space_cap:
@@ -570,6 +566,7 @@ class TreeHDP(_BaseTreeHDP):
             depth_arrays,
             self.K,
             always_on=always_on,
+            tree_coupled=self.switching["tree_coupled"],
         )
         pm.Potential("switch_loglik", logZ)
 

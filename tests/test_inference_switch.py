@@ -329,9 +329,16 @@ def test_bad_branch_length_source_raises():
         _build_fixed(switching=_switching(branch_length_source="weekly"))
 
 
-def test_tree_coupled_false_not_implemented():
-    with pytest.raises(NotImplementedError, match="tree_coupled"):
-        _build_fixed(switching=_switching(tree_coupled=False))
+@pytest.mark.parametrize("build", [_build_fixed, _build_denovo])
+def test_tree_coupled_false_builds_and_is_finite(build):
+    model = build(switching=_switching(tree_coupled=False))
+    assert model.switching["tree_coupled"] is False
+    assert {v.name for v in model.model.potentials} == {"switch_loglik"}
+    ip = model.model.initial_point()
+    assert np.isfinite(model.model.compile_logp()(ip))
+    assert np.all(np.isfinite(model.model.compile_dlogp()(ip)))
+    coupled = build(switching=_switching())
+    assert coupled.switching["tree_coupled"] is True
 
 
 def test_state_space_cap_raises():

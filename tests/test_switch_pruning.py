@@ -28,6 +28,7 @@ from src.models.switch_pruning import (
     full_masks,
     log_pi,
     log_transition,
+    log_transition_iid,
     masked_softmax,
     prune,
     state_grid,
@@ -386,7 +387,9 @@ def test_brute_force_oracle_reduces_to_plain_multinomial(forest_kind):
 # ---------------------------------------------------------------------------
 
 
-def _prune_outputs(K, C, depth, eta, S, lam_on, lam_off, pi, always_on=()):
+def _prune_outputs(
+    K, C, depth, eta, S, lam_on, lam_off, pi, always_on=(), tree_coupled=True
+):
     """logZ, a_prob and e_level from prune + backward at fixed numeric inputs."""
     eta_t = [pt.as_tensor_variable(e) for e in eta]
     args = (
@@ -398,7 +401,9 @@ def _prune_outputs(K, C, depth, eta, S, lam_on, lam_off, pi, always_on=()):
         depth,
         K,
     )
-    lb, lm, lt, lp, logZ, lz_root = prune(*args, always_on=always_on)
+    lb, lm, lt, lp, logZ, lz_root = prune(
+        *args, always_on=always_on, tree_coupled=tree_coupled
+    )
     _, a_prob, e_level = backward(
         eta_t, lb, lm, lt, lp, lz_root, depth, K, always_on=always_on
     )
@@ -473,6 +478,57 @@ def test_always_on_all_signatures_is_plain_multinomial():
         np.testing.assert_allclose(e_level[d], sm, atol=1e-10)
         assert (a_prob[d] == 1.0).all()
     assert logZ == pytest.approx(want, rel=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# tree_coupled = False (section 7.2): the tree-free switching ablation.
+# ---------------------------------------------------------------------------
+
+
+def test_log_transition_iid_is_root_prior_for_both_parent_states():
+    pi = np.array([0.2, 0.7])
+    logT = log_transition_iid(pt.as_tensor_variable(pi), 3).eval()
+    assert logT.shape == (3, 2, 2, 2)
+    for i in range(2):
+        np.testing.assert_allclose(
+            logT[:, :, i, 1], np.broadcast_to(np.log(pi), (3, 2))
+        )
+        np.testing.assert_allclose(
+            logT[:, :, i, 0], np.broadcast_to(np.log1p(-pi), (3, 2))
+        )
+
+
+def test_tree_coupled_false_node_marginal_ignores_neighbours():
+    """With i.i.d. states a node's P(active) depends on its own counts only:
+    changing every other node's counts leaves it unchanged, whereas the
+    coupled model moves it."""
+    K, C = 2, 5
+    rng = np.random.default_rng(72)
+    depth, eta, S, lam_on, lam_off, pi = _make_branching_forest(K, C, rng)
+    target = (1, 0)  # c1, which has a parent and two children
+
+    def a_prob_of_target(depth_arrays, tree_coupled):
+        _, a_prob, _ = _prune_outputs(
+            K, C, depth_arrays, eta, S, lam_on, lam_off, pi, tree_coupled=tree_coupled
+        )
+        return a_prob[target[0]][target[1]]
+
+    counts_alt = [c.copy() for c in depth.counts]
+    for d, c in enumerate(counts_alt):
+        for i in range(c.shape[0]):
+            if (d, i) != target:
+                c[i] = rng.integers(20, 60, size=C).astype("float64")
+    depth_alt = DepthArrays.build(
+        counts_alt, depth.observed, depth.parent_pos, depth.length, depth.tree_id[0]
+    )
+
+    iid_before = a_prob_of_target(depth, tree_coupled=False)
+    iid_after = a_prob_of_target(depth_alt, tree_coupled=False)
+    np.testing.assert_allclose(iid_after, iid_before, atol=1e-10)
+
+    coupled_before = a_prob_of_target(depth, tree_coupled=True)
+    coupled_after = a_prob_of_target(depth_alt, tree_coupled=True)
+    assert np.abs(coupled_after - coupled_before).max() > 1e-3
 
 
 # ---------------------------------------------------------------------------
