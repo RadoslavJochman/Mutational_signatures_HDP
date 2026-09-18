@@ -236,7 +236,16 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
     with open(data_cfg["newick_string"]) as f:
         newick_string = f.read().strip()
 
-    # Build model
+    # Build model. inference.switching (absent means disabled) is passed
+    # through as-is; TreeHDP resolves and validates it (see its docstring
+    # and switch_model_plan.md section 3.2). The label-switching alignment
+    # registry for the switch model's extra signature-axis variables
+    # (lambda_on, lambda_off, pi_root, a_prob_level_*) is not built yet
+    # (switch_model_plan.md section 5); until then, de novo runs with
+    # switching enabled get the same signatures/mu_level/e_level_*
+    # alignment as today, and lambda_*/pi_root/a_prob_level_* r_hat is not
+    # yet meaningful across chains in that mode.
+    switching_cfg = inf_cfg.get("switching")
     print("\nBuilding PyMC model...")
     if model_name == "fixed":
         signatures_df = pd.read_csv(data_cfg["fixed_signatures"], index_col=0)
@@ -245,6 +254,7 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
             data_matrix=count_matrix,
             fixed_signatures=signatures_df.values,
             priors=inf_cfg["priors"],
+            switching=switching_cfg,
         )
     else:
         model = TreeHDP(
@@ -252,6 +262,7 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
             data_matrix=count_matrix,
             num_signatures=int(inf_cfg["num_signatures"]),
             priors=inf_cfg["priors"],
+            switching=switching_cfg,
         )
     print(f"Built TreeHDP (S_known={model.S_known}, K={model.K}).")
 

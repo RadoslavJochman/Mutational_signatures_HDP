@@ -37,7 +37,7 @@ import sys
 from abc import ABC, abstractmethod
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -48,6 +48,9 @@ import pytensor.tensor as pt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import get_prior
+from src.models.switch_pruning import DepthArrays
+from src.models.switch_pruning import backward as switch_backward
+from src.models.switch_pruning import prune as switch_prune
 
 
 class _BaseTreeHDP(ABC):
@@ -230,6 +233,14 @@ class TreeHDP(_BaseTreeHDP):
                                                           pinned coordinate)
         x_ji       ~ Multinomial(M_j, e_j @ S)
 
+    With `switching` given (see below), `e_j` and the likelihood change:
+    each signature carries a marginalised per-node on/off state, exactly
+    marginalised by Felsenstein pruning (`src/models/switch_pruning.py`,
+    see `switch_model_plan.md`). `eta_j` is unchanged; `e_j` becomes the
+    state-mixed Bayes activity and the plain `pm.Multinomial` observation
+    is replaced by a `pm.Potential` holding the pruned log-likelihood.
+    `switching=None` (the default) builds exactly the model above.
+
     S known (fixed signatures)
         S is a constant, passed in as `fixed_signatures`. Component k
         already is true signature k: there is no label switching, and
@@ -282,6 +293,24 @@ class TreeHDP(_BaseTreeHDP):
         K, the number of signatures to discover, with S latent
         (de novo setting). Exactly one of `fixed_signatures` /
         `num_signatures` must be given.
+    switching : dict, optional
+        `None` (default) or `{"enabled": False}` builds exactly the model
+        above -- same variables, same `pm.Multinomial` likelihood. With
+        `"enabled": True`, reads:
+          - 'branch_length_source' (default 'newick') : 'newick' reads each
+            edge's `length` attribute (normalised by the forest median
+            branch length) and fails loudly if any edge lacks one; 'unit'
+            sets every branch length to 1 (for Newick trees with no lengths,
+            e.g. the real-data SNV tree).
+          - 'lambda_on_prior' / 'lambda_on_prior_parm',
+            'lambda_off_prior' / 'lambda_off_prior_parm' : `get_prior`-style
+            prior on the per-signature gain/loss hazard, shape (K,).
+          - 'pi_root_prior' / 'pi_root_prior_parm' : `get_prior`-style prior
+            on the per-signature root activation probability, shape (K,).
+        `always_on` and `tree_coupled: False` (switch_model_plan.md
+        sections 7.1, 7.2) are not implemented yet; passing either raises
+        `NotImplementedError` rather than being silently ignored. The state
+        space is `2**K`; `K` above 12 raises `ValueError`.
 
     Notes
     -----
@@ -298,6 +327,7 @@ class TreeHDP(_BaseTreeHDP):
         priors: dict,
         fixed_signatures: Optional[np.ndarray] = None,
         num_signatures: Optional[int] = None,
+        switching: Optional[dict] = None,
     ):
         if (fixed_signatures is None) == (num_signatures is None):
             raise ValueError(
@@ -311,9 +341,56 @@ class TreeHDP(_BaseTreeHDP):
         else:
             self.S_known = False
             self.K = int(num_signatures)
+        self.switching = self._resolve_switching(switching)
         self.priors = priors
         self.n_channels = data_matrix.shape[1]
         super().__init__(newick_string, data_matrix)
+
+    def _resolve_switching(self, switching: Optional[dict]) -> Optional[dict]:
+        """
+        Validate and normalise the `switching` constructor argument.
+
+        Returns `None` when switching is disabled (the default), or the
+        validated config dict when enabled. See the class docstring for the
+        keys read. Called before `self.K` is otherwise used, so `self.K`
+        must already be set (the constructor does this).
+
+        Raises
+        ------
+        NotImplementedError
+            If `always_on` is given or `tree_coupled` is set to False:
+            neither is implemented yet (switch_model_plan.md sections 7.1,
+            7.2), so these are rejected loudly rather than silently ignored.
+        ValueError
+            If `branch_length_source` is not 'newick'/'unit', or if `K`
+            exceeds the state-space cap of 12 (`2**K` states).
+        """
+        if not switching or not switching.get("enabled", False):
+            return None
+        cfg = dict(switching)
+        cfg.setdefault("branch_length_source", "newick")
+        if cfg["branch_length_source"] not in ("newick", "unit"):
+            raise ValueError(
+                "switching.branch_length_source must be 'newick' or 'unit', "
+                f"got {cfg['branch_length_source']!r}."
+            )
+        if cfg.get("always_on"):
+            raise NotImplementedError(
+                "switching.always_on is not implemented yet; see "
+                "switch_model_plan.md section 7.1."
+            )
+        if not cfg.get("tree_coupled", True):
+            raise NotImplementedError(
+                "switching.tree_coupled = False is not implemented yet; see "
+                "switch_model_plan.md section 7.2."
+            )
+        state_space_cap = 12
+        if self.K > state_space_cap:
+            raise ValueError(
+                f"switching state space is 2**K states; K={self.K} exceeds "
+                f"the cap of {state_space_cap}."
+            )
+        return cfg
 
     def _build_signature_block(self) -> pt.TensorVariable:
         """
@@ -330,6 +407,131 @@ class TreeHDP(_BaseTreeHDP):
             shape=(self.K, self.n_channels),
         )
 
+    def _build_switch_depth_arrays(
+        self, nodes_by_depth_list: List[list]
+    ) -> DepthArrays:
+        """
+        Build the NumPy `DepthArrays` the switch-pruning graph needs, from
+        `self.graph`'s edge `length` attributes and `self.data_matrix`.
+
+        Parameters
+        ----------
+        nodes_by_depth_list : list of list of node id
+            One entry per depth, in the same order used to build
+            `eta_level_<d>` (so switch_pruning's node order matches the
+            walk's).
+
+        Raises
+        ------
+        ValueError
+            If `branch_length_source` is 'newick' and some edge has no
+            `length` attribute.
+        """
+        source = self.switching["branch_length_source"]
+        if source == "newick":
+            lengths = [d.get("length") for _, _, d in self.graph.edges(data=True)]
+            if any(length is None for length in lengths):
+                raise ValueError(
+                    "switching.branch_length_source='newick' requires a "
+                    "'length' attribute on every edge; found one or more "
+                    "edges without one. Use branch_length_source='unit' for "
+                    "a Newick forest with no branch lengths."
+                )
+            l_median = float(np.median(lengths)) if lengths else 1.0
+        else:
+            l_median = 1.0
+
+        node_pos: Dict[str, int] = {}
+        counts_by_depth, observed_by_depth = [], []
+        parent_pos_by_depth, length_by_depth = [], []
+
+        for depth, current_nodes in enumerate(nodes_by_depth_list):
+            n_cur = len(current_nodes)
+            counts_d = np.zeros((n_cur, self.n_channels))
+            observed_d = np.zeros(n_cur, dtype=bool)
+            for i, node in enumerate(current_nodes):
+                label = self.graph.nodes[node].get("label", str(node))
+                if label in self.data_matrix.index:
+                    row = self.data_matrix.loc[label].values.astype("float64")
+                    if row.sum() > 0:
+                        counts_d[i] = row
+                        observed_d[i] = True
+                node_pos[node] = i
+            counts_by_depth.append(counts_d)
+            observed_by_depth.append(observed_d)
+
+            if depth == 0:
+                parent_pos_by_depth.append(None)
+                length_by_depth.append(None)
+                continue
+            parent_pos_d = np.zeros(n_cur, dtype=int)
+            length_d = np.ones(n_cur)
+            for i, node in enumerate(current_nodes):
+                parent = list(self.graph.predecessors(node))[0]
+                parent_pos_d[i] = node_pos[parent]
+                if source == "newick":
+                    length_d[i] = self.graph.edges[parent, node]["length"] / l_median
+            parent_pos_by_depth.append(parent_pos_d)
+            length_by_depth.append(length_d)
+
+        tree_of_root = np.arange(len(nodes_by_depth_list[0]))
+        return DepthArrays.build(
+            counts_by_depth,
+            observed_by_depth,
+            parent_pos_by_depth,
+            length_by_depth,
+            tree_of_root,
+        )
+
+    def _build_switch_block(
+        self,
+        signatures: pt.TensorVariable,
+        eta_by_depth: List[pt.TensorVariable],
+        nodes_by_depth_list: List[list],
+        node_es: Dict[str, pt.TensorVariable],
+    ) -> None:
+        """
+        Build the switching likelihood: priors on lambda_on/lambda_off/
+        pi_root, the pruned log-likelihood Potential, and the
+        a_prob_level_<d>/e_level_<d> Deterministics. Must be called inside
+        `self.model`, after the walk block has built `eta_by_depth`.
+        """
+        depth_arrays = self._build_switch_depth_arrays(nodes_by_depth_list)
+        lambda_on = get_prior(self.switching, "lambda_on_prior", dim=self.K)(
+            name="lambda_on"
+        )
+        lambda_off = get_prior(self.switching, "lambda_off_prior", dim=self.K)(
+            name="lambda_off"
+        )
+        pi_root = get_prior(self.switching, "pi_root_prior", dim=self.K)(name="pi_root")
+
+        log_beta, log_msg, logT_by_depth, logpi_vec, logZ, logZ_per_root = switch_prune(
+            eta_by_depth,
+            signatures,
+            lambda_on,
+            lambda_off,
+            pi_root,
+            depth_arrays,
+            self.K,
+        )
+        pm.Potential("switch_loglik", logZ)
+
+        _, a_prob_by_depth, e_level_by_depth = switch_backward(
+            eta_by_depth,
+            log_beta,
+            log_msg,
+            logT_by_depth,
+            logpi_vec,
+            logZ_per_root,
+            depth_arrays,
+            self.K,
+        )
+        for depth, current_nodes in enumerate(nodes_by_depth_list):
+            pm.Deterministic(f"a_prob_level_{depth}", a_prob_by_depth[depth])
+            e_level = pm.Deterministic(f"e_level_{depth}", e_level_by_depth[depth])
+            for i, node in enumerate(current_nodes):
+                node_es[node] = e_level[i]
+
     def _build_pymc_model(self) -> None:
         """Build the shared-walk PyMC model (structure in the class docstring)."""
         sigma_0 = float(Fraction(str(self.priors.get("sigma_0", 1.0))))
@@ -337,6 +539,7 @@ class TreeHDP(_BaseTreeHDP):
 
         nodes_by_depth = self._get_nodes_by_depth()
         max_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 0
+        switching_enabled = self.switching is not None
 
         with pm.Model() as self.model:
             signatures = self._build_signature_block()
@@ -346,6 +549,8 @@ class TreeHDP(_BaseTreeHDP):
             mu_level = pm.ZeroSumNormal("mu_level", sigma=sigma_mu, shape=(self.K,))
             node_etas: Dict[str, pt.TensorVariable] = {}
             node_es: Dict[str, pt.TensorVariable] = {}
+            eta_by_depth: List[pt.TensorVariable] = []
+            nodes_by_depth_list: List[list] = []
 
             for depth in range(0, max_depth + 1):
                 current_nodes = nodes_by_depth.get(depth, [])
@@ -377,15 +582,26 @@ class TreeHDP(_BaseTreeHDP):
                         eta_name, parent_eta_stack + sigma * z_level
                     )
 
-                e_name = f"e_level_{depth}"
-                e_level = pm.Deterministic(
-                    e_name, pt.special.softmax(eta_level, axis=-1)
-                )
-
                 for i, node in enumerate(current_nodes):
                     node_etas[node] = eta_level[i]
+                    self.node_index_map[node] = (f"e_level_{depth}", i)
+
+                eta_by_depth.append(eta_level)
+                nodes_by_depth_list.append(current_nodes)
+
+            if switching_enabled:
+                self._build_switch_block(
+                    signatures, eta_by_depth, nodes_by_depth_list, node_es
+                )
+                return
+
+            for depth, current_nodes in enumerate(nodes_by_depth_list):
+                e_level = pm.Deterministic(
+                    f"e_level_{depth}",
+                    pt.special.softmax(eta_by_depth[depth], axis=-1),
+                )
+                for i, node in enumerate(current_nodes):
                     node_es[node] = e_level[i]
-                    self.node_index_map[node] = (e_name, i)
 
             # Likelihood
             observed_es, obs_counts = [], []
