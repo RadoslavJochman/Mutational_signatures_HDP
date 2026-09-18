@@ -8,8 +8,15 @@ Tree-HDP infers mutational signature activities across tumour phylogenies. Activ
 random walk down each tree (a finite-dimensional approximation of a tree-structured HDP), node
 spectra are `e_j S`, and counts are multinomial. One inference model, `TreeHDP`, under a shared
 ILR activity walk: signatures are either clamped to a catalogue (`S` known) or given a
-Dirichlet prior and inferred jointly (`S` latent). Developed and validated on simulated
-forests; targets single-cell tumour data.
+Dirichlet prior and inferred jointly (`S` latent). With `inference.switching` enabled, each
+signature also carries a per-node on/off state: a two-state gain/loss chain along the edges,
+marginalised exactly by Felsenstein pruning over the `2^K` joint states
+(`src/models/switch_pruning.py`, design in `switch_model_plan.md`), so the sampler only sees
+continuous variables. `e_j` is then the masked softmax `a_j * exp(eta_j) / sum_k a_jk exp(eta_jk)`
+mixed over the state posterior, the `pm.Multinomial` observation becomes a `pm.Potential` holding
+the pruned log-likelihood, and `a_prob_level_*`, the posterior `P(signature k active at node j)`,
+is the model's calibrated on/off call. Developed and validated on simulated forests; targets
+single-cell tumour data.
 
 ## Environment
 
@@ -34,7 +41,8 @@ fix, not something the repo configures.
 
 The project is a git repository, and experiments are pinned to tags. Every config records a
 `git_tag` (in use so far: `fixed-sig-v1`, `fixed-sig-v2`, `denovo-v1`, `denovo-v1-ilr`,
-`denovo-v2`, `treehdp-v1`, `switch-drift-v1`, `switch-drift-v2`, `switch-drift-v3`), and
+`denovo-v2`, `treehdp-v1`, `switch-drift-v1`, `switch-drift-v2`, `switch-drift-v3`,
+`treehdp-v2` for the switch model), and
 reproducing a run means checking out that tag before generating and fitting.
 Treat a tag as immutable: when the model changes in a way that would alter results, cut a new
 tag and point the new configs at it rather than editing the model under an existing tag. The
@@ -122,8 +130,15 @@ transition.
 - `src/` is the library. Import from it; do not reimplement its pieces in scripts.
   - `src/models/hdp_inference.py`: `_BaseTreeHDP` (abstract), `TreeHDP` (`S` known or latent,
     see Direction of travel).
+  - `src/models/switch_pruning.py`: the switch model's pure PyTensor graph builders: state
+    grid and `full_masks`, masked-softmax emissions, factorised transitions, the axis-wise
+    contraction, and the depth-batched `prune` (upward, the likelihood) and `backward`
+    (downward, `a_prob_level_*` and the state-mixed `e_level_*`). No PyMC, no config.
   - `src/models/hdp_simulator.py`: `TreeSwitchDriftGenerator` (the switch-plus-drift data
     generator; see `simulator_spec.md`).
+  - `src/analysis/switch_posterior.py`: post-hoc on/off state samples: `compile_pruning`
+    (the same `prune` graph, compiled once per forest), forward-filter backward-sample
+    `sample_states`, and per-edge gain/loss/switch probabilities from the samples.
   - `src/models/dirichlet_process.py`: `Measure`, `DirichletPrior`, `DirichletProcess`.
   - `src/analysis/analysis.py`: the shared helper library (metrics, alignment, tree/forest
     utilities, walk transforms). See below.
@@ -168,6 +183,32 @@ python nmf_baseline.py --counts ../experiments/<name>/data/mutation_count_matrix
     --true-signatures ../experiments/<name>/data/fixed_signatures.csv \
     --metrics tv hellinger cosine --outdir ../experiments/<name>/results/nmf   # de novo only
 ```
+
+With `inference.switching` enabled, three more stages score the on/off states (fixed mode shown;
+in de novo mode pass `trace_aligned.nc` and `--true-signatures` to `switch_recovery.py`, and
+omit `--fixed-signatures` from `switch_states.py`):
+
+```
+python switch_states.py --trace ../experiments/<name>/results/trace.nc \
+    --newick ../experiments/<name>/data/newick_string.nwk \
+    --counts ../experiments/<name>/data/mutation_count_matrix.csv \
+    --fixed-signatures ../experiments/<name>/data/fixed_signatures.csv \
+    --outdir ../experiments/<name>/results/switch        # state_samples.npz, switch_edges.csv
+python switch_recovery.py --trace ../experiments/<name>/results/trace.nc \
+    --true-active-sets ../experiments/<name>/data/true_active_sets.csv \
+    --true-activities ../experiments/<name>/data/true_activities.csv \
+    --newick ../experiments/<name>/data/newick_string.nwk \
+    --tree-edges ../experiments/<name>/data/tree_edges.csv \
+    --switch-edges ../experiments/<name>/results/switch/switch_edges.csv \
+    --outdir ../experiments/<name>/results/switch        # switch_nodes/summary/calibration/edges_*.csv
+python plot_switch_recovery.py --nodes ../experiments/<name>/results/switch/switch_nodes.csv \
+    --calibration ../experiments/<name>/results/switch/switch_calibration.csv \
+    --outdir ../experiments/<name>/results/switch
+```
+
+`switch_states.py` must be given the fitted model's `--always-on` names and `--tree-coupled`
+setting, since it recompiles the same pruning graph. `experiments/smoke_switch/config.yaml` and
+`tests/test_smoke_switch.py` run this whole chain in both modes.
 
 Rules that matter:
 
@@ -215,8 +256,23 @@ inference:
     sigma_0                          # root-baseline std
     sigma_mu                         # de novo ILR only: forest-pooled usage-level std
     beta                             # de novo only: S_k ~ Dir(beta * 1_96)
+    walk_branch_length_scaling       # optional, default false: eta_j = eta_parent + sigma * sqrt(l_e) * z_j
+    branch_length_source             # optional, newick | unit: lengths for the scaled walk when
+                                     # switching is off (with switching on, its setting is used)
+  switching:                         # optional; absent means the plain model above
+    enabled                          # true | false
+    branch_length_source             # newick (default; every edge needs a length) | unit
+    lambda_on_prior, lambda_on_prior_parm    # per-signature gain hazard, per median branch
+    lambda_off_prior, lambda_off_prior_parm  # per-signature loss hazard, per median branch
+    pi_root_prior, pi_root_prior_parm        # per-signature root activation probability
+    always_on                        # optional, fixed mode only: names forced on (2**(K - m) states)
+    tree_coupled                     # optional, default true; false is the tree-free ablation
   draws, tune, chains, cores, target_accept, max_treedepth
 ```
+
+The switching priors decided at Checkpoint 1 are `LogNorm {mu: -1.2, sigma: 1.0}` for both
+hazards (per median branch, so one prior serves simulated and real forests) and `Beta {alpha: 1,
+beta: 1}` for `pi_root`. The state space is `2**(K - len(always_on))` and capped at `2**12`.
 
 `experiment_root` and `experiment_name` are read directly by `generate_data.py` and
 `run_inference.py` (there is no separate `simulation.results_dir`/`inference.results_dir`
@@ -257,7 +313,9 @@ travel) will be the first to exercise this machinery for real.
 Reuse these rather than reimplementing. Metrics: `cosine`, `hellinger`, `total_variation`,
 `jensen_shannon`, `bray_curtis`, `signature_distances`, `usage_distances`, `node_distances`,
 `exposure_errors`, `across_chain`. Alignment: `align` and `chain_perms_to_true` (Hungarian on
-signature cosine). Walk transforms: `softmax_last_zero`, `inv_softmax_last_zero`,
+signature cosine), and `node_variable_rows` to read any per-depth variable (`e_level`,
+`a_prob_level`) off a trace per node and chain in the true labelling. Calibration:
+`reliability_bins`, `expected_calibration_error`. Walk transforms: `softmax_last_zero`, `inv_softmax_last_zero`,
 `forward_walk`, `inverse_walk`. Tree/forest: `build_forest`, `build_model`, `node_order`,
 `node_depths`, `nodes_by_depth`. Mode analysis: `detect_camps`, `split_camps`,
 `per_chain_activity`.
@@ -268,9 +326,20 @@ signature cosine). Walk transforms: `softmax_last_zero`, `inv_softmax_last_zero`
   `hellinger` are also available via `--metrics`. Signatures are matched to truth by Hungarian
   cosine before scoring, and the same permutation is applied to the activity components.
 - For convergence (`scaling_metrics.py`), `max_rhat` and `min_ess` are taken over the
-  identifiable activity variables (`e_level_*`) and `sigma`. The raw walk increments
-  (`eta_level`, `z_level`) are excluded: they are uninformative by construction in the
-  non-centred walk. Never report r_hat or ess over them.
+  identifiable activity variables (`e_level_*`), `sigma`, `mu_level` and, for the switch model,
+  `lambda_on`, `lambda_off`, `pi_root`. The raw walk increments (`eta_level`, `z_level`) are
+  excluded: they are uninformative by construction in the non-centred walk. Never report r_hat
+  or ess over them. `a_prob_level_*` is excluded too: it is a bounded Deterministic that can sit
+  at exactly 0 or 1 for a whole chain, so its r_hat and ESS are NaN.
+- On/off recovery (`switch_recovery.py`) is scored per node and signature by AUROC, AUPRC,
+  precision/recall/F1/accuracy at 0.5, Brier and ECE (10 bins), overall and per signature, with
+  accuracy stratified by the true level (`0`, `(0, 0.05]`, `> 0.05`): "on at a level the counts
+  cannot see" is an identification limit, not a model error, and the stratified number separates
+  the two. Per-edge gain/loss/switch events are scored from the FFBS samples. A signature on (or
+  off) everywhere in truth has no AUROC and gets NaN.
+- The switch model's `lambda_on`/`lambda_off` are per median branch (`l_e = L_e / L_median`);
+  the simulator's rates are per raw branch length. Convert by `L_median` (`TreeHDP.l_median`)
+  before comparing.
 
 ## Diagnostic scripts (not the forward pipeline)
 
@@ -361,6 +430,13 @@ rules do not apply here.
 - Duplicate helpers that exist in `src/analysis/analysis.py` or `figure_style.py`.
 - Compare true-label and inferred-label frames without aligning first.
 - Include `eta_level`/`z_level` in convergence statistics.
+- Compute `r_hat`/`ess` over `a_prob_level_*`: it is a bounded Deterministic that can be constant
+  across a chain, which makes both NaN.
+- Compare the model's `lambda_on`/`lambda_off` to the simulator's rates without the `L_median`
+  factor: the model's are per median branch, the simulator's per raw branch length.
+- Run the switch model at `K - len(always_on) > 10` on CPU without checking the cost estimate:
+  the likelihood is `O(N 2^K C)` per evaluation, about 1000x the plain model at `K = 10`. Force
+  the clock signatures on with `always_on`, or use the GPU.
 - Commit an experiment's `data/`, `results/`, or `plots/` subdirectory, or any trace. Every
   experiment's `config.yaml`, a sweep's `manifest_*` and `agg/`, and `tables/` (the
   cross-cutting `scaling_results.csv`, `agg/`, `agg40/`) are the tracked exceptions.

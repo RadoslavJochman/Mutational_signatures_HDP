@@ -337,9 +337,12 @@ the active signatures" question, and where the drift belief does its work.
 
 **Signatures (de novo).** Cosine to the matched true signature, recovery rate at cosine >= 0.90.
 
-State plainly that the current model reads on/off off a continuous posterior with a compositional
-floor, so its on/off ceiling is a model property, not a threshold artefact, which motivates a
-zero-mass switch model as the follow-up.
+With `inference.switching` enabled, Tree-HDP no longer reads on/off off a continuous posterior with
+a compositional floor: it carries a per-node binary state per signature, marginalised exactly by
+pruning (`switch_model_plan.md`, `src/models/switch_pruning.py`), and `a_prob_level_*` is the
+posterior activation probability scored here; `scripts/switch_recovery.py` writes the
+precision-recall, calibration and level-stratified numbers. The plain model (switching off) still
+has the floor, and its on/off ceiling is then a model property, not a threshold artefact.
 
 ## 11. Baselines on on/off
 

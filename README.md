@@ -67,6 +67,36 @@ reference labelling) and a shape/activity trade-off that, without help, makes th
 chains settle into several clusters; a forest-pooled per-signature usage level
 `mu_level` keeps them from splitting on the harder de novo problem.
 
+**On/off states** (`inference.switching`, `src/models/switch_pruning.py`). The
+simulator's active set is binary and off signatures are exact zeros, so the
+inference model carries a matching per-node state `a_j in {0,1}^K` rather than
+reading on/off off a continuous posterior with a compositional floor. Each
+signature switches along the edges as a two-state chain and the states are
+marginalised exactly, so NUTS still only sees continuous parameters:
+
+```
+a_root,k ~ Bernoulli(pi_k)
+P(0 -> 1 on edge e) = 1 - exp(-lambda_on,k  * l_e),   l_e = L_e / L_median
+P(1 -> 0 on edge e) = 1 - exp(-lambda_off,k * l_e)
+e_j(a) = a_j * exp(eta_j) / sum_k a_jk exp(eta_jk)     # masked softmax, off = exact zero
+x_j | a_j ~ Multinomial(M_j, e_j(a_j) S),   P(x_j | a_j = 0) = 0 at an observed node
+log p(x | eta, S, lambda, pi) = sum over trees of a Felsenstein pruning over the 2^K joint states
+```
+
+The walk on `eta_j` is unchanged (an off signature keeps a dormant level that
+re-enters through the softmax if it switches back on). Outputs per node:
+`a_prob_level_*`, the posterior `P(signature k active at node j)` from the
+downward pass (Rao-Blackwellised, the calibrated on/off call), and `e_level_*`,
+now the state-mixed expected activity. `scripts/switch_states.py` draws joint
+state samples per posterior draw (forward-filter backward-sample) for per-edge
+gain/loss/switch probabilities; `scripts/switch_recovery.py` scores both against
+the simulator's `true_active_sets.csv` (AUROC, AUPRC, calibration, accuracy
+stratified by the true level). Two ablations: `always_on` forces named clock
+signatures on and shrinks the state space to `2^(K - m)`, and
+`tree_coupled: false` replaces every edge transition by the root prior (states
+i.i.d. across nodes), which isolates what the tree adds to on/off recovery.
+`priors.walk_branch_length_scaling` scales each walk step by `sqrt(l_e)`.
+
 **NMF baseline** (`scripts/nmf_baseline.py`). scikit-learn NMF on the flattened
 observed-node counts (it ignores the tree), generalised Kullback-Leibler loss,
 best of ten restarts, aligned to the truth by Hungarian matching on cosine. This
