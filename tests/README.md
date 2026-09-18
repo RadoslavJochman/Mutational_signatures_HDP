@@ -27,6 +27,9 @@ Mirror `src/` and the scripts under test, for example:
   `scripts/switch_recovery.py`'s metric functions
 - `test_smoke_switch.py` for the switch model end to end in both modes, including the
   Rao-Blackwellised versus sampled cross-check
+- `test_switch_convergence.py` (slow) for the switch model's statistical gate: an easy
+  hand-built forest, 2 chains x 500 draws, r_hat, ESS, divergences and node-level on/off
+  accuracy
 
 ## Running
 

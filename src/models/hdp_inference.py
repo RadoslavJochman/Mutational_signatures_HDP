@@ -179,6 +179,7 @@ class _BaseTreeHDP(ABC):
         max_treedepth: int = 10,
         initvals=None,
         init: str = "auto",
+        random_seed: Optional[int] = None,
     ):
         """
         Run the NUTS sampler.
@@ -193,6 +194,9 @@ class _BaseTreeHDP(ABC):
             init='adapt_diag' for a shared start without jitter.
         init :
             pm.sample initialisation scheme (default 'auto', unchanged).
+        random_seed :
+            passed to pm.sample; fix it in tests so a statistical assertion
+            is reproducible.
 
         Returns
         -------
@@ -211,6 +215,7 @@ class _BaseTreeHDP(ABC):
                 nuts={"max_tree_depth": max_treedepth},
                 initvals=initvals,
                 init=init,
+                random_seed=random_seed,
             )
         return self.trace
 
