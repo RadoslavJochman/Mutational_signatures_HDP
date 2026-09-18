@@ -26,6 +26,10 @@ traces, NumPy 2.2.6, pandas, SciPy and scikit-learn 1.7.2 (the NMF baseline), ma
 seaborn for plots, NetworkX 3.4.2 and phylox 1.1.2 for trees, and JAX 0.4.38 with NumPyro for
 the JAX sampling path (see `enable_local_gpu.sh`).
 
+On macOS with Command Line Tools 27, the pinned PyTensor's `-ld64` flag needs a per-machine
+workaround in `~/.pytensorrc` to compile on the default C backend; this is a local toolchain
+fix, not something the repo configures.
+
 ## Git and reproducibility
 
 The project is a git repository, and experiments are pinned to tags. Every config records a
