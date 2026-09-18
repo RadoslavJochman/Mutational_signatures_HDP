@@ -476,6 +476,8 @@ model to the simulator's without the `L_median` factor; do not run the switch mo
 | Two implementations of the same maths | One PyTensor implementation, compiled for post-hoc use (2, 6.1) |
 | Regression of the level metric | `e_level` redefined as the state-mixed Bayes activity; identical to today when disabled (1.3) |
 | Node ordering drift | Reuse `_get_nodes_by_depth` order; `node_index_map` unchanged (2.2) |
+| `pt.tensordot` fails to JIT-trace under `mode="JAX"` (dynamic reshape on a traced shape) | Emissions use plain matmul, `theta = e_all @ S`, never `tensordot` (2.3, confirmed by the step 1 spike) |
+| Same failure mode recurs anywhere pruning reshapes a tensor | Every reshaped tensor in the pruning graph has a static shape: `n_d`, `K`, `2**K`, `C` are Python ints fixed at graph-build time, and the axis-wise contraction reshapes to `(n_d, 2, R)` with `R` a Python int, never a symbolic shape read off `x.shape` (2.2, 2.4, confirmed by the step 1 spike) |
 
 ## 10. Decisions for Rado (do not guess; ask at Checkpoint 1)
 
