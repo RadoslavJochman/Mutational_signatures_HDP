@@ -64,34 +64,13 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.analysis.analysis import (
     across_chain,
-    build_forest,
     chain_perms_to_true,
     exposure_errors,
     node_distances,
-    nodes_by_depth,
+    node_variable_rows,
     signature_distances,
     usage_distances,
 )
-
-
-def _aligned_activities(post, perms, newick, truth):
-    """Per-chain, per-node activities aligned to the true labelling, matched to
-    the rows of `truth`. Returns (labels, A) with A shape (n_nodes, n_chains, K)
-    read straight from the e_level_* deterministics; no model is built."""
-    dr = nodes_by_depth(build_forest(newick))  # (depth, pos) -> label
-    e_vars = sorted([v for v in post.data_vars if v.startswith("e_level")])
-    n_chains = post.sizes["chain"]
-    labels, rows = [], []
-    for ev in e_vars:
-        depth = int(ev.split("_")[-1])
-        cmean = post[ev].values.mean(axis=1)  # (chains, n_rows, K)
-        for r in range(cmean.shape[1]):
-            label = dr.get((depth, r))
-            if label is None or label not in truth.index:
-                continue
-            labels.append(label)
-            rows.append(np.stack([cmean[c, r][perms[c]] for c in range(n_chains)]))
-    return labels, np.stack(rows)  # (n_nodes, chains, K)
 
 
 def main():
@@ -135,8 +114,8 @@ def main():
     else:
         perms = [np.arange(K) for _ in range(n_chains)]
 
-    labels, A = _aligned_activities(
-        post, perms, Path(a.newick).read_text().strip(), truth
+    labels, A = node_variable_rows(
+        post, "e_level", Path(a.newick).read_text().strip(), perms, keep=truth.index
     )  # (nodes, chains, K)
     true_acts = truth.loc[labels].values  # (n_nodes, K)
     n_nodes = len(labels)

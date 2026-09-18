@@ -15,7 +15,13 @@ Distribution distances
 
 Signature alignment
     align (Hungarian on cosine) and chain_perms_to_true, which undo the de novo
-    label-switching symmetry before anything is compared.
+    label-switching symmetry before anything is compared; node_variable_rows
+    reads per-node, per-chain rows of any per-depth variable (e_level,
+    a_prob_level) off a trace in the true labelling.
+
+Calibration
+    reliability_bins and expected_calibration_error, for the switch model's
+    per-node activation probabilities.
 
 Forest and graph helpers
     node_order, node_depths, node_label, build_forest and nodes_by_depth, for
@@ -429,6 +435,93 @@ def split_camps(
         pc_al[c] = pc[c][perm]
     res = detect_camps(pc_al)
     return res["campA"], res["campB"]
+
+
+def node_variable_rows(post, prefix, newick, perms, keep=None):
+    """
+    Per-chain, per-node draw means of the per-depth variables `<prefix>_<d>`
+    (e_level, a_prob_level, ...), aligned to the true labelling and mapped
+    to node labels.
+
+    post   : xarray posterior; `<prefix>_<d>` has shape (chain, draw, n_d, K).
+    prefix : variable prefix, e.g. "e_level" or "a_prob_level".
+    newick : the forest's newick string; row r of `<prefix>_<d>` is the node
+             at (d, r) of nodes_by_depth(build_forest(newick)).
+    perms  : (n_chains, K) per-chain permutation into the true labelling
+             (chain_perms_to_true), or the identity for a fixed-signature run.
+    keep   : optional collection of labels to restrict to (e.g. the truth's
+             index); nodes outside it are skipped.
+
+    Returns (labels, A) with A of shape (n_nodes, n_chains, K) in true label
+    order. No model is built; this reads the deterministics straight off the
+    trace, so it works on any saved trace.
+    """
+    import re
+
+    dr = nodes_by_depth(build_forest(newick))  # (depth, pos) -> label
+    pattern = re.compile(re.escape(prefix) + r"_(\d+)$")
+    matched = [
+        (int(m.group(1)), v)
+        for v in map(str, post.data_vars)
+        if (m := pattern.match(v))
+    ]
+    n_chains = post.sizes["chain"]
+    keep = None if keep is None else set(keep)
+    labels, rows = [], []
+    for depth, var in sorted(matched):
+        cmean = post[var].values.mean(axis=1)  # (chains, n_rows, K)
+        for r in range(cmean.shape[1]):
+            label = dr.get((depth, r))
+            if label is None or (keep is not None and label not in keep):
+                continue
+            labels.append(label)
+            rows.append(np.stack([cmean[c, r][perms[c]] for c in range(n_chains)]))
+    return labels, np.stack(rows)  # (n_nodes, chains, K)
+
+
+def reliability_bins(p, y, n_bins: int = 10):
+    """
+    Reliability table for binary predictions: `n_bins` equal-width bins on
+    [0, 1] (p = 1 falls in the last bin). Returns a DataFrame with columns
+    bin, lo, hi, n, mean_pred, obs_freq; empty bins have n = 0 and NaN
+    means. Together with expected_calibration_error this is the calibration
+    evidence for the switch model's P(active) (switch_model_plan.md 6.3).
+    """
+    import pandas as pd
+
+    p = np.asarray(p, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.clip(np.digitize(p, edges[1:-1], right=True), 0, n_bins - 1)
+    rows = []
+    for b in range(n_bins):
+        m = idx == b
+        rows.append(
+            {
+                "bin": b,
+                "lo": edges[b],
+                "hi": edges[b + 1],
+                "n": int(m.sum()),
+                "mean_pred": float(p[m].mean()) if m.any() else np.nan,
+                "obs_freq": float(y[m].mean()) if m.any() else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def expected_calibration_error(p, y, n_bins: int = 10) -> float:
+    """
+    Expected calibration error over `n_bins` equal-width bins:
+    sum_b (n_b / N) |obs_freq_b - mean_pred_b|. 0 for a perfectly calibrated
+    predictor, 1 for a confidently inverted one. NaN if there are no
+    predictions.
+    """
+    tbl = reliability_bins(p, y, n_bins)
+    n = tbl["n"].to_numpy()
+    if n.sum() == 0:
+        return float("nan")
+    gap = np.abs(tbl["obs_freq"].to_numpy() - tbl["mean_pred"].to_numpy())
+    return float(np.nansum(n * gap) / n.sum())
 
 
 def chain_perms_to_true(S, true_S):
