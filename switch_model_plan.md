@@ -479,13 +479,12 @@ model to the simulator's without the `L_median` factor; do not run the switch mo
 | `pt.tensordot` fails to JIT-trace under `mode="JAX"` (dynamic reshape on a traced shape) | Emissions use plain matmul, `theta = e_all @ S`, never `tensordot` (2.3, confirmed by the step 1 spike) |
 | Same failure mode recurs anywhere pruning reshapes a tensor | Every reshaped tensor in the pruning graph has a static shape: `n_d`, `K`, `2**K`, `C` are Python ints fixed at graph-build time, and the axis-wise contraction reshapes to `(n_d, 2, R)` with `R` a Python int, never a symbolic shape read off `x.shape` (2.2, 2.4, confirmed by the step 1 spike) |
 
-## 10. Decisions for Rado (do not guess; ask at Checkpoint 1)
+## 10. Decisions for Rado (decided at Checkpoint 1)
 
-- Prior parameters for `lambda_on`, `lambda_off` (proposed `LogNorm(mu=-1.2, sigma=1.0)`
-  in per-median-branch units, covering roughly 0.1 to 0.8 at one standard deviation, in
-  line with the simulator's example rates) and `pi_root` (proposed `Beta(1, 1)`).
-- Tag name (`treehdp-v2` proposed).
-- Whether `e_level` keeps its name under the new definition (recommended: yes, it is the
-  drop-in Bayes estimate) or the old softmax activity is also stored as `e_on_level_d`.
-- State-space cap (12 proposed) and whether the `K = 10` stress sweep runs with
-  `always_on: [SBS1, SBS5]`.
+- Prior parameters: `lambda_on`, `lambda_off` ~ `LogNorm(mu=-1.2, sigma=1.0)` in
+  per-median-branch units; `pi_root` ~ `Beta(1, 1)`.
+- Tag name: `treehdp-v2`.
+- `e_level` keeps its name under the new (state-mixed Bayes) definition; no separate
+  `e_on_level_d` is added.
+- State-space cap: 12. Whether the `K = 10` stress sweep runs with
+  `always_on: [SBS1, SBS5]` is deferred to after the pilot (checkpoint 3, item 8).

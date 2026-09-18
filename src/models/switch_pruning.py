@@ -324,7 +324,8 @@ def prune(
     logT_by_depth: List[Optional[pt.TensorVariable]] = [None] * (max_depth + 1)
 
     for d in range(max_depth, -1, -1):
-        e_all = masked_softmax(eta_by_depth[d], masks)
+        eta_d = pt.specify_shape(eta_by_depth[d], (n_by_depth[d], K))
+        e_all = masked_softmax(eta_d, masks)
         counts_d = pt.as_tensor_variable(depth.counts[d].astype("float64"))
         observed_d = pt.as_tensor_variable(depth.observed[d].astype(bool))
         log_beta[d] = emission_loglik(e_all, S, counts_d, observed_d) + acc[d]

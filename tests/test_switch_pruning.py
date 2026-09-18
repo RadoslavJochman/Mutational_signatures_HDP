@@ -31,17 +31,23 @@ from src.models.switch_pruning import (
 )
 
 # ---------------------------------------------------------------------------
-# Shared fixtures: a small two-tree forest.
+# Shared fixtures: two small forests.
 #
-# Tree A: r0 alone (depth 0, no children).
-# Tree B: r1 -> c1 -> c2 (depths 0, 1, 2).
-# 4 nodes total, matching the plan's own example ((2**K)**N <= 8**4 = 4096
-# for the K=3 case brute-forced below).
+# "chain": a two-tree forest, tree A = r0 alone (depth 0, no children), tree
+# B = r1 -> c1 -> c2 (depths 0, 1, 2). 4 nodes total, matching the plan's own
+# example ((2**K)**N <= 8**4 = 4096 for K = 3).
+#
+# "branching": one tree, r0 -> {c1, c2}, c1 -> {c3, c4}. 5 nodes. Every depth
+# here has a parent with MORE THAN ONE child, which the chain forest never
+# exercises: `inc_subtensor` never sees a duplicate parent index there, and
+# the downward pass's leave-one-out subtraction never has to leave out one
+# sibling's message while keeping another's. Both are exercised at both
+# depth 0->1 (r0's two children) and depth 1->2 (c1's two children).
 # ---------------------------------------------------------------------------
 
 
-def _make_forest(K: int, C: int, rng: np.random.Generator, unobserved=()):
-    """Build DepthArrays plus random eta/S/lambda/pi for the shared forest.
+def _make_chain_forest(K: int, C: int, rng: np.random.Generator, unobserved=()):
+    """Build DepthArrays plus random eta/S/lambda/pi for the chain forest.
 
     `unobserved` lists (depth, index) pairs whose counts are zeroed and
     `observed` set to False.
@@ -70,6 +76,43 @@ def _make_forest(K: int, C: int, rng: np.random.Generator, unobserved=()):
     lambda_off = rng.uniform(0.1, 0.6, size=K)
     pi = rng.uniform(0.2, 0.8, size=K)
     return depth, eta_by_depth, S, lambda_on, lambda_off, pi
+
+
+def _make_branching_forest(K: int, C: int, rng: np.random.Generator, unobserved=()):
+    """Build DepthArrays plus random eta/S/lambda/pi for the branching forest.
+
+    r0 (depth 0) -> c1, c2 (depth 1) -> c1 has children c3, c4 (depth 2); c2
+    is a leaf. `unobserved` lists (depth, index) pairs as in
+    `_make_chain_forest`.
+    """
+    counts0 = rng.integers(0, 6, size=(1, C)).astype("float64")  # r0
+    counts1 = rng.integers(0, 6, size=(2, C)).astype("float64")  # c1, c2
+    counts2 = rng.integers(0, 6, size=(2, C)).astype("float64")  # c3, c4
+    counts = [counts0, counts1, counts2]
+    observed = [np.array([True]), np.array([True, True]), np.array([True, True])]
+    for d, i in unobserved:
+        counts[d][i] = 0.0
+        observed[d][i] = False
+
+    parent_pos = [None, np.array([0, 0]), np.array([0, 0])]
+    length = [None, rng.uniform(0.3, 1.5, size=2), rng.uniform(0.3, 1.5, size=2)]
+    tree_of_root = np.array([0])
+    depth = DepthArrays.build(counts, observed, parent_pos, length, tree_of_root)
+
+    eta_by_depth = [
+        rng.normal(size=(1, K)),
+        rng.normal(size=(2, K)),
+        rng.normal(size=(2, K)),
+    ]
+    S = rng.dirichlet(np.ones(C), size=K)
+    lambda_on = rng.uniform(0.1, 0.6, size=K)
+    lambda_off = rng.uniform(0.1, 0.6, size=K)
+    pi = rng.uniform(0.2, 0.8, size=K)
+    return depth, eta_by_depth, S, lambda_on, lambda_off, pi
+
+
+_FOREST_BUILDERS = {"chain": _make_chain_forest, "branching": _make_branching_forest}
+_DEFAULT_UNOBSERVED = {"chain": [(1, 0)], "branching": [(2, 1)]}
 
 
 def _compile(K, C, depth, mode=None):
@@ -217,13 +260,15 @@ def brute_force_oracle(
     return logZ, a_prob_by_depth, e_level_by_depth
 
 
+@pytest.mark.parametrize("forest_kind", ["chain", "branching"])
 @pytest.mark.parametrize("K", [1, 2, 3])
-def test_brute_force_oracle_random(K):
+def test_brute_force_oracle_random(K, forest_kind):
     """Baseline case: random eta/S/lambda/pi/counts, one node unobserved."""
     rng = np.random.default_rng(100 + K)
     C = 6
-    depth, eta_by_depth, S, lambda_on, lambda_off, pi = _make_forest(
-        K, C, rng, unobserved=[(1, 0)]
+    make_forest = _FOREST_BUILDERS[forest_kind]
+    depth, eta_by_depth, S, lambda_on, lambda_off, pi = make_forest(
+        K, C, rng, unobserved=_DEFAULT_UNOBSERVED[forest_kind]
     )
     f = _compile(K, C, depth)
     logZ, a_prob, e_level = _run(f, eta_by_depth, S, lambda_on, lambda_off, pi)
@@ -239,13 +284,16 @@ def test_brute_force_oracle_random(K):
         np.testing.assert_allclose(got.sum(axis=-1), 1.0, atol=1e-8)
 
 
-def test_brute_force_oracle_small_pi_all_off_matters():
+@pytest.mark.parametrize("forest_kind", ["chain", "branching"])
+def test_brute_force_oracle_small_pi_all_off_matters(forest_kind):
     """Small pi puts real prior mass on all-off; the observed-node exclusion
     (log P(x | a = 0) = -inf) must change the answer, not just be inert."""
     K = 3
     C = 6
     rng = np.random.default_rng(7)
-    depth, eta_by_depth, S, lambda_on, lambda_off, _ = _make_forest(K, C, rng)
+    depth, eta_by_depth, S, lambda_on, lambda_off, _ = _FOREST_BUILDERS[forest_kind](
+        K, C, rng
+    )
     pi = np.full(K, 0.05)
 
     f = _compile(K, C, depth)
@@ -265,7 +313,8 @@ def test_brute_force_oracle_small_pi_all_off_matters():
     assert min(a.min() for a in a_prob) < 0.95
 
 
-def test_brute_force_oracle_reduces_to_plain_multinomial():
+@pytest.mark.parametrize("forest_kind", ["chain", "branching"])
+def test_brute_force_oracle_reduces_to_plain_multinomial(forest_kind):
     """pi -> 1, lambda -> 0: only the all-on state keeps essentially all the
     mass, so e_level must be close to softmax(eta) (the switch model with
     everything forced on is the current model, cf. the bridge test in
@@ -281,7 +330,7 @@ def test_brute_force_oracle_reduces_to_plain_multinomial():
     K = 3
     C = 6
     rng = np.random.default_rng(11)
-    depth, eta_by_depth, S, _, _, _ = _make_forest(K, C, rng)
+    depth, eta_by_depth, S, _, _, _ = _FOREST_BUILDERS[forest_kind](K, C, rng)
     lambda_on = np.full(K, 1e-8)
     lambda_off = np.full(K, 1e-8)
     pi = np.full(K, 1 - 1e-9)
@@ -376,24 +425,78 @@ def test_identity_transition_is_identity(K):
     np.testing.assert_allclose(got, log_beta_child_val, atol=1e-10)
 
 
-def test_contract_parent_to_child_transposes():
-    K, n = 2, 2
-    rng = np.random.default_rng(3)
+@pytest.mark.parametrize("K", [1, 2, 3, 4])
+def test_contract_parent_to_child_matches_kronecker(K):
+    """Downward analogue of test_contraction_matches_kronecker: contracts
+    away the PARENT's state, leaving the child's, so the reference sums over
+    the Kronecker matrix's transpose."""
+    rng = np.random.default_rng(K + 20)
+    n = 3
+    masks = state_grid(K)
+    length = rng.uniform(0.2, 1.5, size=n)
     lambda_on = rng.uniform(0.1, 0.6, size=K)
     lambda_off = rng.uniform(0.1, 0.6, size=K)
-    length = rng.uniform(0.2, 1.0, size=n)
+    log_belief_parent_val = np.log(rng.dirichlet(np.ones(2**K), size=n))
+
     logT_t = log_transition(
         pt.as_tensor_variable(lambda_on),
         pt.as_tensor_variable(lambda_off),
         pt.as_tensor_variable(length),
     )
     x_t = pt.tensor("x", dtype="float64", shape=(n, 2**K))
-    up = contract_child_to_parent(x_t, logT_t, K)
-    down = contract_parent_to_child(x_t, logT_t.transpose(0, 1, 3, 2), K)
-    f = pytensor.function([x_t], [up, down])
-    x_val = np.log(rng.dirichlet(np.ones(2**K), size=n))
-    got_up, got_down = f(x_val)
-    np.testing.assert_allclose(got_up, got_down, atol=1e-10)
+    out_t = contract_parent_to_child(x_t, logT_t, K)
+    f = pytensor.function([x_t], out_t)
+    got = f(log_belief_parent_val)
+
+    want = np.stack(
+        [
+            logsumexp(
+                _np_log_transition_matrix(lambda_on, lambda_off, length[node], masks).T
+                + log_belief_parent_val[node][None, :],
+                axis=1,
+            )
+            for node in range(n)
+        ]
+    )
+    np.testing.assert_allclose(got, want, atol=1e-8)
+
+
+def test_contraction_matches_kronecker_with_inf_entry():
+    """As test_contraction_matches_kronecker, but one entry of
+    log_beta_child is -inf (as at an observed node's all-off state), so the
+    logsumexp contraction must handle it without producing NaN."""
+    K, n = 3, 2
+    rng = np.random.default_rng(99)
+    masks = state_grid(K)
+    length = rng.uniform(0.2, 1.5, size=n)
+    lambda_on = rng.uniform(0.1, 0.6, size=K)
+    lambda_off = rng.uniform(0.1, 0.6, size=K)
+    log_beta_child_val = np.log(rng.dirichlet(np.ones(2**K), size=n))
+    log_beta_child_val[0, 0] = -np.inf
+    log_beta_child_val[1, 3] = -np.inf
+
+    logT_t = log_transition(
+        pt.as_tensor_variable(lambda_on),
+        pt.as_tensor_variable(lambda_off),
+        pt.as_tensor_variable(length),
+    )
+    log_beta_child_t = pt.tensor("lbc", dtype="float64", shape=(n, 2**K))
+    out_t = contract_child_to_parent(log_beta_child_t, logT_t, K)
+    f = pytensor.function([log_beta_child_t], out_t)
+    got = f(log_beta_child_val)
+
+    want = np.stack(
+        [
+            logsumexp(
+                _np_log_transition_matrix(lambda_on, lambda_off, length[node], masks)
+                + log_beta_child_val[node][None, :],
+                axis=1,
+            )
+            for node in range(n)
+        ]
+    )
+    assert np.all(np.isfinite(got))
+    np.testing.assert_allclose(got, want, atol=1e-8)
 
 
 def test_masked_softmax_emission_properties():
@@ -463,12 +566,15 @@ def test_log1mexp_path():
     assert out[0, 0, 0, 1] < 0  # log of a tiny but nonzero probability
 
 
-def test_prune_and_backward_jax_matches_default_backend():
+@pytest.mark.parametrize("forest_kind", ["chain", "branching"])
+def test_prune_and_backward_jax_matches_default_backend(forest_kind):
     """JAX compilation of prune and backward on a tiny input; the sampler is
     numpyro, so a graph that only works in C is a failure (section 4.2)."""
     K, C = 2, 4
     rng = np.random.default_rng(8)
-    depth, eta_by_depth, S, lambda_on, lambda_off, pi = _make_forest(K, C, rng)
+    depth, eta_by_depth, S, lambda_on, lambda_off, pi = _FOREST_BUILDERS[forest_kind](
+        K, C, rng
+    )
 
     f_default = _compile(K, C, depth, mode=None)
     f_jax = _compile(K, C, depth, mode="JAX")
@@ -478,3 +584,39 @@ def test_prune_and_backward_jax_matches_default_backend():
 
     for got, want in zip(out_jax, out_default):
         np.testing.assert_allclose(np.asarray(got), np.asarray(want), atol=1e-8)
+
+
+def test_logz_gradients_finite_branching_forest():
+    """Gradients of logZ w.r.t. every input the sampler differentiates
+    through -- eta, S, lambda_on, lambda_off, pi -- must be finite, on the
+    branching forest (siblings sharing a parent), with an unobserved node
+    and a small pi (real prior mass on all-off), in both backends."""
+    K, C = 3, 5
+    rng = np.random.default_rng(42)
+    depth, eta_by_depth, S, lambda_on, lambda_off, _ = _make_branching_forest(
+        K, C, rng, unobserved=[(2, 1)]
+    )
+    pi = np.full(K, 0.05)
+
+    n_by_depth = [c.shape[0] for c in depth.counts]
+    for mode in (None, "JAX"):
+        eta_inputs = [
+            pt.tensor(f"eta{d}", dtype="float64", shape=(n, K))
+            for d, n in enumerate(n_by_depth)
+        ]
+        S_t = pt.tensor("S", dtype="float64", shape=(K, C))
+        lam_on_t = pt.tensor("lambda_on", dtype="float64", shape=(K,))
+        lam_off_t = pt.tensor("lambda_off", dtype="float64", shape=(K,))
+        pi_t = pt.tensor("pi", dtype="float64", shape=(K,))
+
+        *_, logZ, _ = prune(eta_inputs, S_t, lam_on_t, lam_off_t, pi_t, depth, K)
+        wrt = [*eta_inputs, S_t, lam_on_t, lam_off_t, pi_t]
+        grads = pt.grad(logZ, wrt)
+
+        kwargs = {} if mode is None else {"mode": mode}
+        f = pytensor.function(wrt, [logZ, *grads], **kwargs)
+        out = f(*eta_by_depth, S, lambda_on, lambda_off, pi)
+
+        for arr in out:
+            arr = np.asarray(arr)
+            assert np.all(np.isfinite(arr)), f"non-finite output under mode={mode}"
