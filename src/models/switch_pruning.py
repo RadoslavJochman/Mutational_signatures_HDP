@@ -43,6 +43,15 @@ emission at an observed node, see `emission_loglik`), never as the result of
 `pt.where` that a gradient could flow through: JAX's `where` propagates NaN
 gradients from the branch that was not selected, so every `where` here has
 both branches finite.
+
+`pt.logsumexp` is never used: in PyTensor 2.31.7 it is the naive
+`log(sum(exp(x)))` (no max-shift), which silently returns `-inf` for any
+input more negative than about -745, since `exp(x)` underflows to exactly
+0.0 there. Real per-node log-likelihoods reach into the -1000s at a burden
+of a few hundred mutations, well past that threshold; a smoke-config run on
+real generated data hit this (`switch_loglik = -inf` at a perfectly
+ordinary point, traced to this). `_stable_logsumexp` below does the
+max-shift by hand and is used everywhere a log-sum-exp reduction is needed.
 """
 
 from __future__ import annotations
@@ -52,6 +61,20 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 import pytensor.tensor as pt
+
+
+def _stable_logsumexp(x: pt.TensorVariable, axis: int) -> pt.TensorVariable:
+    """Log-sum-exp along one axis, stable at any magnitude.
+
+    Do not use `pt.logsumexp` (see the module docstring). `x_max` is
+    replaced by 0 when it is `-inf` (every entry along `axis` is `-inf`),
+    so the result is `-inf` in that case rather than `-inf - (-inf) = nan`.
+    """
+    x_max = pt.max(x, axis=axis, keepdims=True)
+    safe_max = pt.where(pt.isinf(x_max), pt.zeros_like(x_max), x_max)
+    summed = pt.sum(pt.exp(x - safe_max), axis=axis, keepdims=True)
+    result = pt.log(summed) + safe_max
+    return pt.squeeze(result, axis=axis)
 
 
 def state_grid(K: int) -> np.ndarray:
@@ -209,7 +232,7 @@ def contract_child_to_parent(
         x2 = x.reshape((n, 2, r))  # child's s_k at axis 1
         lt = logT[:, k, :, :]  # (n, 2(i), 2(j))
         combined = lt[:, :, :, None] + x2[:, None, :, :]  # (n, 2(i), 2(j), R)
-        contracted = pt.logsumexp(combined, axis=2)  # (n, 2(i)=parent, R)
+        contracted = _stable_logsumexp(combined, axis=2)  # (n, 2(i)=parent, R)
         x = contracted.reshape((n, 2) + (2,) * (K - 1))
         inv_perm = [0] * (K + 1)
         for i, p in enumerate(perm):
@@ -336,7 +359,9 @@ def prune(
             log_msg[d] = contract_child_to_parent(log_beta[d], logT_d, K)
             acc[d - 1] = pt.inc_subtensor(acc[d - 1][depth.parent_pos[d]], log_msg[d])
 
-    logZ_per_root = pt.logsumexp(logpi_vec[None, :] + log_beta[0], axis=1)  # (n_0,)
+    logZ_per_root = _stable_logsumexp(
+        logpi_vec[None, :] + log_beta[0], axis=1
+    )  # (n_0,)
     logZ = pt.sum(logZ_per_root)
     return log_beta, log_msg, logT_by_depth, logpi_vec, logZ, logZ_per_root
 

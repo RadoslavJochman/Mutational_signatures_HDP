@@ -20,6 +20,7 @@ from scipy.special import gammaln, logsumexp
 
 from src.models.switch_pruning import (
     DepthArrays,
+    _stable_logsumexp,
     backward,
     contract_child_to_parent,
     contract_parent_to_child,
@@ -358,6 +359,70 @@ def test_brute_force_oracle_reduces_to_plain_multinomial(forest_kind):
 # ---------------------------------------------------------------------------
 # Component tests (section 4.2).
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2, 3])
+def test_stable_logsumexp_matches_scipy_at_large_magnitude(axis):
+    """Regression test: `pt.logsumexp` in this PyTensor version is the naive
+    `log(sum(exp(x)))` (see switch_pruning.py's module docstring), which
+    silently returns -inf for any input more negative than about -745
+    (`exp(x)` underflows to exactly 0.0 there). A real (not toy-scale) run
+    of experiments/smoke_switch hit this: per-node log-likelihoods reach
+    the -1000s at a burden of a few hundred mutations, and every axis in
+    the pruning graph's contractions can be the one that needs a stable
+    reduction, so all four are checked here."""
+    rng = np.random.default_rng(axis)
+    x = rng.uniform(-2000.0, -900.0, size=(2, 2, 2, 2))
+    x[0, 0, 0, 0] = -np.inf  # a genuine -inf entry must not become nan
+    got = _stable_logsumexp(pt.as_tensor_variable(x), axis=axis).eval()
+    want = logsumexp(x, axis=axis)
+    np.testing.assert_allclose(got, want, rtol=1e-10)
+    assert np.all(np.isfinite(got))
+
+
+def test_stable_logsumexp_all_inf_slice_is_inf_not_nan():
+    x = np.full((3, 4), -np.inf)
+    got = _stable_logsumexp(pt.as_tensor_variable(x), axis=1).eval()
+    assert np.all(got == -np.inf)
+    assert not np.any(np.isnan(got))
+
+
+def test_contraction_matches_kronecker_at_large_magnitude():
+    """As test_contraction_matches_kronecker, but with per-state log-beta
+    values in the -1000s (a realistic per-node log-likelihood at a burden
+    of a few hundred counts), which is what exposed the pt.logsumexp bug
+    (see test_stable_logsumexp_matches_scipy_at_large_magnitude)."""
+    K, n = 3, 2
+    rng = np.random.default_rng(123)
+    masks = state_grid(K)
+    length = rng.uniform(0.2, 1.5, size=n)
+    lambda_on = rng.uniform(0.1, 0.6, size=K)
+    lambda_off = rng.uniform(0.1, 0.6, size=K)
+    log_beta_child_val = rng.uniform(-2000.0, -900.0, size=(n, 2**K))
+    log_beta_child_val[0, 0] = -np.inf
+
+    logT_t = log_transition(
+        pt.as_tensor_variable(lambda_on),
+        pt.as_tensor_variable(lambda_off),
+        pt.as_tensor_variable(length),
+    )
+    log_beta_child_t = pt.tensor("lbc", dtype="float64", shape=(n, 2**K))
+    out_t = contract_child_to_parent(log_beta_child_t, logT_t, K)
+    f = pytensor.function([log_beta_child_t], out_t)
+    got = f(log_beta_child_val)
+
+    want = np.stack(
+        [
+            logsumexp(
+                _np_log_transition_matrix(lambda_on, lambda_off, length[node], masks)
+                + log_beta_child_val[node][None, :],
+                axis=1,
+            )
+            for node in range(n)
+        ]
+    )
+    assert np.all(np.isfinite(got))
+    np.testing.assert_allclose(got, want, rtol=1e-8)
 
 
 @pytest.mark.parametrize("K", [1, 2, 3, 4])
