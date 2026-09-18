@@ -37,7 +37,7 @@ import sys
 from abc import ABC, abstractmethod
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import networkx as nx
 import numpy as np
@@ -307,10 +307,17 @@ class TreeHDP(_BaseTreeHDP):
             prior on the per-signature gain/loss hazard, shape (K,).
           - 'pi_root_prior' / 'pi_root_prior_parm' : `get_prior`-style prior
             on the per-signature root activation probability, shape (K,).
-        `always_on` and `tree_coupled: False` (switch_model_plan.md
-        sections 7.1, 7.2) are not implemented yet; passing either raises
-        `NotImplementedError` rather than being silently ignored. The state
-        space is `2**K`; `K` above 12 raises `ValueError`.
+          - 'always_on' (fixed mode only; default []) : signature names
+            forced on everywhere. They are dropped from the state grid
+            (state space `2**(K - m)`) and `a_prob_level_*` is exactly 1 for
+            them. Biologically the clock signatures (SBS1, SBS5). Needs
+            `signature_names`.
+        `tree_coupled: False` (switch_model_plan.md section 7.2) is not
+        implemented yet and raises `NotImplementedError` rather than being
+        silently ignored. `K - m` above 12 raises `ValueError`.
+    signature_names : sequence of str, optional
+        Names of the rows of `fixed_signatures`, needed to resolve
+        `switching.always_on`.
 
     Notes
     -----
@@ -328,7 +335,11 @@ class TreeHDP(_BaseTreeHDP):
         fixed_signatures: Optional[np.ndarray] = None,
         num_signatures: Optional[int] = None,
         switching: Optional[dict] = None,
+        signature_names: Optional[Sequence[str]] = None,
     ):
+        self.signature_names = (
+            None if signature_names is None else list(signature_names)
+        )
         if (fixed_signatures is None) == (num_signatures is None):
             raise ValueError(
                 "TreeHDP needs exactly one of fixed_signatures (S known) "
@@ -379,12 +390,14 @@ class TreeHDP(_BaseTreeHDP):
         Raises
         ------
         NotImplementedError
-            If `always_on` is given or `tree_coupled` is set to False:
-            neither is implemented yet (switch_model_plan.md sections 7.1,
-            7.2), so these are rejected loudly rather than silently ignored.
+            If `tree_coupled` is set to False: not implemented yet
+            (switch_model_plan.md section 7.2), so it is rejected loudly
+            rather than silently ignored.
         ValueError
-            If `branch_length_source` is not 'newick'/'unit', or if `K`
-            exceeds the state-space cap of 12 (`2**K` states).
+            If `branch_length_source` is not 'newick'/'unit'; if `always_on`
+            is given with S latent, without `signature_names`, or names a
+            signature not in the index; or if `K - len(always_on)` exceeds
+            the state-space cap of 12 (`2**12` states).
         """
         if not switching or not switching.get("enabled", False):
             return None
@@ -395,21 +408,40 @@ class TreeHDP(_BaseTreeHDP):
                 "switching.branch_length_source must be 'newick' or 'unit', "
                 f"got {cfg['branch_length_source']!r}."
             )
-        if cfg.get("always_on"):
-            raise NotImplementedError(
-                "switching.always_on is not implemented yet; see "
-                "switch_model_plan.md section 7.1."
-            )
+        always_on = list(cfg.get("always_on") or [])
+        if always_on:
+            if not self.S_known:
+                raise ValueError(
+                    "switching.always_on is only valid with fixed signatures; de "
+                    "novo signatures have no identity to force on."
+                )
+            if self.signature_names is None:
+                raise ValueError(
+                    "switching.always_on names signatures, so TreeHDP needs "
+                    "signature_names (the fixed signature matrix's index)."
+                )
+            names = list(self.signature_names)
+            missing = [s for s in always_on if s not in names]
+            if missing:
+                raise ValueError(
+                    f"switching.always_on names {missing} are not in the fixed "
+                    f"signature index {names}."
+                )
+            cfg["always_on_idx"] = tuple(sorted(names.index(s) for s in always_on))
+        else:
+            cfg["always_on_idx"] = ()
         if not cfg.get("tree_coupled", True):
             raise NotImplementedError(
                 "switching.tree_coupled = False is not implemented yet; see "
                 "switch_model_plan.md section 7.2."
             )
         state_space_cap = 12
-        if self.K > state_space_cap:
+        n_free = self.K - len(cfg["always_on_idx"])
+        if n_free > state_space_cap:
             raise ValueError(
-                f"switching state space is 2**K states; K={self.K} exceeds "
-                f"the cap of {state_space_cap}."
+                f"switching state space is 2**(K - len(always_on)) = 2**{n_free} "
+                f"states; that exceeds the cap of 2**{state_space_cap}. Use "
+                "always_on for the clock signatures or reduce K."
             )
         return cfg
 
@@ -528,6 +560,7 @@ class TreeHDP(_BaseTreeHDP):
         pi_root = get_prior(self.switching, "pi_root_prior", dim=self.K)(name="pi_root")
         self.signature_axis.update(lambda_on=-1, lambda_off=-1, pi_root=-1)
 
+        always_on = self.switching["always_on_idx"]
         log_beta, log_msg, logT_by_depth, logpi_vec, logZ, logZ_per_root = switch_prune(
             eta_by_depth,
             signatures,
@@ -536,6 +569,7 @@ class TreeHDP(_BaseTreeHDP):
             pi_root,
             depth_arrays,
             self.K,
+            always_on=always_on,
         )
         pm.Potential("switch_loglik", logZ)
 
@@ -548,6 +582,7 @@ class TreeHDP(_BaseTreeHDP):
             logZ_per_root,
             depth_arrays,
             self.K,
+            always_on=always_on,
         )
         for depth, current_nodes in enumerate(nodes_by_depth_list):
             pm.Deterministic(f"a_prob_level_{depth}", a_prob_by_depth[depth])

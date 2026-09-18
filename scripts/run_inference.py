@@ -238,6 +238,7 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
             fixed_signatures=signatures_df.values,
             priors=inf_cfg["priors"],
             switching=switching_cfg,
+            signature_names=list(signatures_df.index),
         )
     else:
         model = TreeHDP(

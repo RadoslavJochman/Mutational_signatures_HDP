@@ -64,14 +64,22 @@ def run(
     branch_length_source="newick",
     thin=1,
     seed=0,
+    always_on=(),
 ):
     post = az.from_netcdf(trace_path).posterior
     counts = pd.read_csv(counts_path, index_col=0)
     newick = Path(newick_path).read_text().strip()
 
+    always_on_idx = ()
     if fixed_signatures_path is not None:
-        S = pd.read_csv(fixed_signatures_path, index_col=0).values
+        S_df = pd.read_csv(fixed_signatures_path, index_col=0)
+        S = S_df.values
         K = S.shape[0]
+        names = list(S_df.index)
+        missing = [s for s in always_on if s not in names]
+        if missing:
+            raise SystemExit(f"--always-on names {missing} not in {names}")
+        always_on_idx = tuple(sorted(names.index(s) for s in always_on))
         model, depth, nbd_list = depth_arrays_from_files(
             newick,
             counts,
@@ -79,13 +87,15 @@ def run(
             branch_length_source=branch_length_source,
         )
     else:
+        if always_on:
+            raise SystemExit("--always-on needs --fixed-signatures (fixed mode only)")
         S = None
         K = post["signatures"].shape[-2]
         model, depth, nbd_list = depth_arrays_from_files(
             newick, counts, num_signatures=K, branch_length_source=branch_length_source
         )
 
-    compiled = compile_pruning(K, counts.shape[1], depth)
+    compiled = compile_pruning(K, counts.shape[1], depth, always_on=always_on_idx)
     states, draw_idx = sample_states(
         post,
         depth,
@@ -94,6 +104,7 @@ def run(
         compiled=compiled,
         thin=thin,
         rng=np.random.default_rng(seed),
+        always_on=always_on_idx,
     )
 
     outdir = Path(outdir)
@@ -122,6 +133,13 @@ def main():
     )
     ap.add_argument("--thin", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--always-on",
+        nargs="*",
+        default=[],
+        help="signature names the model forced on (inference.switching.always_on); "
+        "fixed mode only, must match the fitted model",
+    )
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args()
     for p in run(
@@ -133,6 +151,7 @@ def main():
         branch_length_source=a.branch_length_source,
         thin=a.thin,
         seed=a.seed,
+        always_on=tuple(a.always_on),
     ):
         print(p)
 

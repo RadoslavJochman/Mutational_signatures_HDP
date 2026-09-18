@@ -151,6 +151,47 @@ def test_edge_table_and_probabilities_from_model():
     assert (bc.p_switch == 0.0).all()
 
 
+def test_sample_states_always_on_matches_exact_limit_oracle():
+    """With always_on = [0] the samples must have bit 0 on everywhere and
+    reproduce the marginals of the full-grid oracle at its exact limit
+    (pi[0] -> 1, lambda[0] = 0) to Monte Carlo error."""
+    K, C = 2, 5
+    rng = np.random.default_rng(5)
+    depth, eta, S, lam_on, lam_off, _ = _make_branching_forest(
+        K, C, rng, unobserved=[(2, 1)]
+    )
+    pi = np.array([0.4, 0.3])
+    lam_on_lim, lam_off_lim, pi_lim = lam_on.copy(), lam_off.copy(), pi.copy()
+    lam_on_lim[0] = lam_off_lim[0] = 0.0
+    pi_lim[0] = 1 - 1e-12  # the NumPy oracle's matmul log_pi is nan at exactly 1
+    _, true_a_prob, _ = brute_force_oracle(
+        K, depth, eta, S, lam_on_lim, lam_off_lim, pi_lim
+    )
+
+    chains, draws = 1, 3000
+    post = {
+        f"eta_level_{d}": np.broadcast_to(e, (chains, draws) + e.shape).copy()
+        for d, e in enumerate(eta)
+    }
+    post["lambda_on"] = np.broadcast_to(lam_on, (chains, draws, K)).copy()
+    post["lambda_off"] = np.broadcast_to(lam_off, (chains, draws, K)).copy()
+    post["pi_root"] = np.broadcast_to(pi, (chains, draws, K)).copy()
+    idata = az.from_dict(posterior=post)
+
+    states, _ = sample_states(
+        idata.posterior,
+        depth,
+        K,
+        fixed_signatures=S,
+        rng=np.random.default_rng(2),
+        always_on=(0,),
+    )
+    assert (states[..., 0] == 1).all()
+    np.testing.assert_allclose(
+        node_marginals(states), np.concatenate(true_a_prob), atol=0.04
+    )
+
+
 def test_registry_frame_to_true_inverts_perm():
     perm0 = np.array([2, 0, 1])  # true slot i holds trace row perm0[i]
     mapping = registry_frame_to_true(perm0)

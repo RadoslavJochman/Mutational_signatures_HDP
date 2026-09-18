@@ -42,7 +42,7 @@ import pandas as pd
 import pytensor
 import pytensor.tensor as pt
 
-from src.models.switch_pruning import DepthArrays, prune, state_grid
+from src.models.switch_pruning import DepthArrays, full_masks, prune, state_grid
 
 # Priors are irrelevant to the depth arrays; these only have to build.
 _BUILD_PRIORS = {
@@ -95,7 +95,9 @@ def depth_arrays_from_files(
     )
 
 
-def compile_pruning(K: int, C: int, depth: DepthArrays, mode=None):
+def compile_pruning(
+    K: int, C: int, depth: DepthArrays, always_on: Sequence[int] = (), mode=None
+):
     """
     Compile `switch_pruning.prune` for one forest.
 
@@ -105,7 +107,8 @@ def compile_pruning(K: int, C: int, depth: DepthArrays, mode=None):
     `(log_beta_by_depth, log_msg_by_depth, logT_by_depth, logpi_vec)` as
     NumPy arrays, with `log_msg_by_depth[0]` and `logT_by_depth[0]` None.
     Every shape is static (Python ints from `depth`), as the pruning graph
-    requires.
+    requires. `always_on` must match the fitted model's (the state grid is
+    over the free signatures only; see `switch_pruning.full_masks`).
     """
     n_by_depth = [c.shape[0] for c in depth.counts]
     eta_in = [
@@ -118,7 +121,7 @@ def compile_pruning(K: int, C: int, depth: DepthArrays, mode=None):
     pi_t = pt.tensor("pi", dtype="float64", shape=(K,))
 
     log_beta, log_msg, logT, logpi_vec, _, _ = prune(
-        eta_in, S_t, lam_on_t, lam_off_t, pi_t, depth, K
+        eta_in, S_t, lam_on_t, lam_off_t, pi_t, depth, K, always_on=always_on
     )
     outputs = list(log_beta) + list(log_msg[1:]) + list(logT[1:]) + [logpi_vec]
     kwargs = {} if mode is None else {"mode": mode}
@@ -161,7 +164,10 @@ def ffbs_draw(
 
     Roots from `softmax(log_pi + log_beta[0])`; then, depth by depth, each
     child from `softmax(logT(s_parent -> .) + log_beta_child)`. Returns the
-    flat state index per node, shape `(N,)`, in depth-major order.
+    flat state index per node, shape `(N,)`, in depth-major order. `masks`
+    is the state grid over the FREE signatures (`state_grid(K - m)`), the
+    axes `logT` is factorised over; map the returned indices through
+    `full_masks(K, always_on)[0]` to get all K on/off bits.
     """
     K = masks.shape[1]
     masks_int = masks.astype(int)
@@ -186,6 +192,7 @@ def sample_states(
     compiled=None,
     thin: int = 1,
     rng: Optional[np.random.Generator] = None,
+    always_on: Sequence[int] = (),
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Forward-filter backward-sample one joint state per posterior draw.
@@ -199,9 +206,12 @@ def sample_states(
     K : number of signatures.
     fixed_signatures : (K, C) array when S is known; None reads
         `post["signatures"]` per draw.
-    compiled : output of `compile_pruning` (built here if None).
+    compiled : output of `compile_pruning` (built here if None; must have
+        been compiled with the same `always_on`).
     thin : use every `thin`-th draw.
     rng : NumPy Generator (default_rng(0) if None).
+    always_on : the fitted model's always-on signature indices; those bits
+        are 1 in every sample.
 
     Returns
     -------
@@ -220,9 +230,10 @@ def sample_states(
     S_all = None if fixed_signatures is not None else post["signatures"].values
     C = fixed_signatures.shape[1] if fixed_signatures is not None else S_all.shape[-1]
     if compiled is None:
-        compiled = compile_pruning(K, C, depth)
-    masks = state_grid(K)
-    masks_int = masks.astype(np.int8)
+        compiled = compile_pruning(K, C, depth, always_on=always_on)
+    masks_full, free = full_masks(K, always_on)
+    masks = state_grid(len(free))  # the axes logT is factorised over
+    masks_int = masks_full.astype(np.int8)
     N = sum(c.shape[0] for c in depth.counts)
 
     states = np.empty((n_chains, len(draw_idx), N, K), dtype=np.int8)

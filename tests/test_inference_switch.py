@@ -166,6 +166,73 @@ def test_signature_axis_registry_denovo_switching():
 
 
 # ---------------------------------------------------------------------------
+# always_on (section 7.1).
+# ---------------------------------------------------------------------------
+
+SIG_NAMES = ["SBS1", "SBS5", "SBS36"]
+
+
+def _build_fixed_named(switching, K=3):
+    newick, data, K, C, S = _toy_inputs(K=K)
+    return TreeHDP(
+        newick,
+        data,
+        priors=PRIORS,
+        fixed_signatures=S,
+        switching=switching,
+        signature_names=SIG_NAMES,
+    )
+
+
+def test_always_on_forces_a_prob_to_one_and_builds():
+    model = _build_fixed_named(_switching(always_on=["SBS1"]))
+    assert model.switching["always_on_idx"] == (0,)
+    nodes_by_depth = model._get_nodes_by_depth()
+    draw_vars = [
+        model.model[f"a_prob_level_{d}"] for d in range(max(nodes_by_depth) + 1)
+    ]
+    drawn = pm.draw(draw_vars, random_seed=0)
+    for a_prob in drawn:
+        assert (a_prob[:, 0] == 1.0).all()
+        assert ((a_prob[:, 1:] >= 0) & (a_prob[:, 1:] <= 1)).all()
+    logp = model.model.compile_logp()(model.model.initial_point())
+    assert np.isfinite(logp)
+
+
+def test_always_on_validation_errors():
+    with pytest.raises(ValueError, match="fixed signatures"):
+        _build_denovo(switching=_switching(always_on=["SBS1"]))
+    with pytest.raises(ValueError, match="signature_names"):
+        _build_fixed(switching=_switching(always_on=["SBS1"]))
+    with pytest.raises(ValueError, match="not in the fixed signature index"):
+        _build_fixed_named(_switching(always_on=["SBS99"]))
+
+
+def test_state_space_cap_counts_free_signatures_only():
+    # K = 13 exceeds the cap; forcing one signature on brings it to 2**12.
+    newick, data, K, C, S = _toy_inputs(K=13)
+    names = [f"S{k}" for k in range(13)]
+    with pytest.raises(ValueError, match="cap"):
+        TreeHDP(
+            newick,
+            data,
+            priors=PRIORS,
+            fixed_signatures=S,
+            switching=_switching(),
+            signature_names=names,
+        )
+    model = TreeHDP(
+        newick,
+        data,
+        priors=PRIORS,
+        fixed_signatures=S,
+        switching=_switching(always_on=["S0"]),
+        signature_names=names,
+    )
+    assert model.switching["always_on_idx"] == (0,)
+
+
+# ---------------------------------------------------------------------------
 # logp / dlogp finite in both backends (section 3.4).
 # ---------------------------------------------------------------------------
 
@@ -260,11 +327,6 @@ def test_bridge_reduces_to_plain_multinomial(seed):
 def test_bad_branch_length_source_raises():
     with pytest.raises(ValueError, match="branch_length_source"):
         _build_fixed(switching=_switching(branch_length_source="weekly"))
-
-
-def test_always_on_not_implemented():
-    with pytest.raises(NotImplementedError, match="always_on"):
-        _build_fixed(switching=_switching(always_on=["SBS1"]))
 
 
 def test_tree_coupled_false_not_implemented():

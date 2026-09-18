@@ -57,7 +57,7 @@ max-shift by hand and is used everywhere a log-sum-exp reduction is needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pytensor.tensor as pt
@@ -84,9 +84,32 @@ def state_grid(K: int) -> np.ndarray:
     is all-off, and flat index `s` corresponds to position
     `(s_0, ..., s_{K-1})` in a tensor of shape `(2,) * K` in C order.
     """
+    if K == 0:
+        return np.zeros((1, 0))  # one state, no free signatures
     s = np.arange(2**K)
     bits = [(s >> (K - 1 - k)) & 1 for k in range(K)]
     return np.stack(bits, axis=1).astype("float64")
+
+
+def full_masks(K: int, always_on: Sequence[int] = ()) -> Tuple[np.ndarray, List[int]]:
+    """State masks over the free signatures only, with `always_on` reinserted.
+
+    The joint state space is `state_grid` over the `K - m` signatures not in
+    `always_on`; each always-on signature is a constant 1 column, so it is on
+    in every state and never switches. Returns `(masks, free)`: `masks` of
+    shape `(2**(K - m), K)` and `free`, the indices of the switching
+    signatures in increasing order (the axis order of the state grid). With
+    `always_on` empty this is `state_grid(K)` and `free = range(K)`.
+    """
+    always_on = sorted(set(int(k) for k in always_on))
+    for k in always_on:
+        if not 0 <= k < K:
+            raise ValueError(f"always_on index {k} outside range(K={K})")
+    free = [k for k in range(K) if k not in always_on]
+    grid = state_grid(len(free))
+    masks = np.ones((grid.shape[0], K))
+    masks[:, free] = grid
+    return masks, free
 
 
 def masked_softmax(eta: pt.TensorVariable, masks: np.ndarray) -> pt.TensorVariable:
@@ -116,25 +139,29 @@ def emission_loglik(
     S: pt.TensorVariable,
     counts: pt.TensorVariable,
     observed: pt.TensorVariable,
+    has_all_off: bool = True,
 ) -> pt.TensorVariable:
     """Multinomial log-emission per node per joint state.
 
     Parameters
     ----------
-    e_all : (n, 2**K, K) tensor from `masked_softmax`.
+    e_all : (n, n_states, K) tensor from `masked_softmax`.
     S : (K, C) tensor, the signature matrix.
     counts : (n, C) tensor, observed mutation counts (any values at
         unobserved nodes; ignored there).
     observed : (n,) bool tensor.
+    has_all_off : whether state 0 is the all-off state (true for
+        `state_grid`; false when `full_masks` has an always-on signature, so
+        no state has every signature off and none is excluded).
 
     Returns
     -------
-    log_em : (n, 2**K) tensor. Includes the multinomial normalising
+    log_em : (n, n_states) tensor. Includes the multinomial normalising
         constant, so this is the true log-emission, not a quantity that is
-        only proportional to it. The all-off column (`s = 0`) is `-inf`
-        where `observed` is true (a node with counts cannot have every
-        signature off) and `0` where `observed` is false (an unobserved
-        node's likelihood does not depend on its state).
+        only proportional to it. With `has_all_off`, the all-off column
+        (`s = 0`) is `-inf` where `observed` is true (a node with counts
+        cannot have every signature off) and `0` where `observed` is false
+        (an unobserved node's likelihood does not depend on its state).
     """
     theta = (
         e_all @ S
@@ -146,6 +173,8 @@ def emission_loglik(
     norm_const = pt.gammaln(norm_const + 1) - pt.sum(pt.gammaln(counts + 1), axis=-1)
     ll = ll + norm_const[:, None]
     log_em = pt.where(observed[:, None], ll, pt.zeros_like(ll))
+    if not has_all_off:
+        return log_em
     all_off_value = pt.where(observed, -np.inf, 0.0)  # constant per node, no grad path
     log_em = pt.set_subtensor(log_em[:, 0], all_off_value)
     return log_em
@@ -324,6 +353,7 @@ def prune(
     pi: pt.TensorVariable,
     depth: DepthArrays,
     K: int,
+    always_on: Sequence[int] = (),
 ):
     """Upward (Felsenstein pruning) pass over the whole forest.
 
@@ -334,25 +364,38 @@ def prune(
     lambda_on, lambda_off, pi : (K,) tensors.
     depth : `DepthArrays`.
     K : number of signatures (Python int).
+    always_on : indices of signatures forced on (see `full_masks`). They are
+        dropped from the state grid, so the state space is `2**(K - m)`, and
+        their `lambda`/`pi` entries are ignored.
 
     Returns
     -------
-    log_beta_by_depth : list of (n_d, 2**K) tensors.
-    log_msg_by_depth : list, `None` at depth 0; otherwise (n_d, 2**K)
+    log_beta_by_depth : list of (n_d, n_states) tensors.
+    log_msg_by_depth : list, `None` at depth 0; otherwise (n_d, n_states)
         tensors, the message each node sent to its parent.
-    logT_by_depth : list, `None` at depth 0; otherwise (n_d, K, 2, 2)
-        tensors, so `backward` need not recompute them.
-    logpi_vec : (2**K,) tensor.
+    logT_by_depth : list, `None` at depth 0; otherwise (n_d, K - m, 2, 2)
+        tensors over the free signatures, so `backward` need not recompute
+        them.
+    logpi_vec : (n_states,) tensor.
     logZ : scalar tensor, the total forest log-likelihood (sum over roots),
         entering the model as `pm.Potential("switch_loglik", logZ)`.
     logZ_per_root : (n_0,) tensor.
     """
-    masks = state_grid(K)
-    logpi_vec = log_pi(pi, masks)
+    masks, free = full_masks(K, always_on)
+    n_free, n_states = len(free), masks.shape[0]
+    has_all_off = n_free == K
+    if not has_all_off:
+        free_idx = np.asarray(free)
+        lambda_on, lambda_off, pi = (
+            lambda_on[free_idx],
+            lambda_off[free_idx],
+            pi[free_idx],
+        )
+    logpi_vec = log_pi(pi, state_grid(n_free))
     max_depth = depth.max_depth
     n_by_depth = [c.shape[0] for c in depth.counts]
 
-    acc = [pt.zeros((n, 2**K)) for n in n_by_depth]
+    acc = [pt.zeros((n, n_states)) for n in n_by_depth]
     log_beta: List[Optional[pt.TensorVariable]] = [None] * (max_depth + 1)
     log_msg: List[Optional[pt.TensorVariable]] = [None] * (max_depth + 1)
     logT_by_depth: List[Optional[pt.TensorVariable]] = [None] * (max_depth + 1)
@@ -362,12 +405,15 @@ def prune(
         e_all = masked_softmax(eta_d, masks)
         counts_d = pt.as_tensor_variable(depth.counts[d].astype("float64"))
         observed_d = pt.as_tensor_variable(depth.observed[d].astype(bool))
-        log_beta[d] = emission_loglik(e_all, S, counts_d, observed_d) + acc[d]
+        log_beta[d] = (
+            emission_loglik(e_all, S, counts_d, observed_d, has_all_off=has_all_off)
+            + acc[d]
+        )
         if d > 0:
             length_d = pt.as_tensor_variable(depth.length[d].astype("float64"))
             logT_d = log_transition(lambda_on, lambda_off, length_d)
             logT_by_depth[d] = logT_d
-            log_msg[d] = contract_child_to_parent(log_beta[d], logT_d, K)
+            log_msg[d] = contract_child_to_parent(log_beta[d], logT_d, n_free)
             acc[d - 1] = pt.inc_subtensor(acc[d - 1][depth.parent_pos[d]], log_msg[d])
 
     logZ_per_root = _stable_logsumexp(
@@ -386,24 +432,28 @@ def backward(
     logZ_per_root: pt.TensorVariable,
     depth: DepthArrays,
     K: int,
+    always_on: Sequence[int] = (),
 ):
     """Downward pass: per-node state posterior and the reported Deterministics.
 
     Takes the outputs of `prune` (plus `eta_by_depth` again, to rebuild
-    `e_all`). Cost is not on the sampler: every output here is a
-    Deterministic, evaluated after sampling.
+    `e_all`), with the same `always_on`. Cost is not on the sampler: every
+    output here is a Deterministic, evaluated after sampling.
 
     Returns
     -------
-    log_q_by_depth : list of (n_d, 2**K) tensors, the normalised log joint
-        state posterior per node.
-    a_prob_by_depth : list of (n_d, K) tensors, `P(a_jk = 1 | data)`.
+    log_q_by_depth : list of (n_d, n_states) tensors, the normalised log
+        joint state posterior per node.
+    a_prob_by_depth : list of (n_d, K) tensors, `P(a_jk = 1 | data)`;
+        exactly 1 in every `always_on` column.
     e_level_by_depth : list of (n_d, K) tensors, the state-mixed expected
         activity (rows sum to one); this is what `e_level_d` becomes when
         switching is enabled.
     """
-    masks = state_grid(K)
-    masks_t = pt.as_tensor_variable(masks)  # (2^K, K)
+    masks, free = full_masks(K, always_on)
+    n_free = len(free)
+    has_all_off = n_free == K
+    masks_t = pt.as_tensor_variable(masks)  # (n_states, K)
     max_depth = depth.max_depth
     n0 = depth.counts[0].shape[0]
 
@@ -414,7 +464,7 @@ def backward(
         leave_one_out = (
             combined_parent[depth.parent_pos[d]] - log_msg_by_depth[d]
         )  # (n_d, 2^K)
-        log_alpha[d] = contract_parent_to_child(leave_one_out, logT_by_depth[d], K)
+        log_alpha[d] = contract_parent_to_child(leave_one_out, logT_by_depth[d], n_free)
 
     log_q_by_depth: List[pt.TensorVariable] = []
     a_prob_by_depth: List[pt.TensorVariable] = []
@@ -424,9 +474,12 @@ def backward(
         log_q_d = log_alpha[d] + log_beta_by_depth[d] - logZ_node[:, None]  # (n_d, 2^K)
         q_d = pt.exp(log_q_d)
         a_prob_d = q_d @ masks_t  # (n_d, K)
+        if not has_all_off:
+            on_idx = [k for k in range(K) if k not in free]
+            a_prob_d = pt.set_subtensor(a_prob_d[:, on_idx], 1.0)
 
-        e_all_d = masked_softmax(eta_by_depth[d], masks)  # (n_d, 2^K, K)
-        q_no_off = pt.set_subtensor(q_d[:, 0], 0.0)
+        e_all_d = masked_softmax(eta_by_depth[d], masks)  # (n_d, n_states, K)
+        q_no_off = pt.set_subtensor(q_d[:, 0], 0.0) if has_all_off else q_d
         numer = pt.sum(q_no_off[:, :, None] * e_all_d, axis=1)  # (n_d, K)
         denom = pt.sum(q_no_off, axis=1, keepdims=True)  # (n_d, 1)
         e_level_d = numer / denom

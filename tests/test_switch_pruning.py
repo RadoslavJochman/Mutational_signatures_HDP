@@ -25,6 +25,7 @@ from src.models.switch_pruning import (
     contract_child_to_parent,
     contract_parent_to_child,
     emission_loglik,
+    full_masks,
     log_pi,
     log_transition,
     masked_softmax,
@@ -378,6 +379,100 @@ def test_brute_force_oracle_reduces_to_plain_multinomial(forest_kind):
         softmax_eta = np.exp(eta_d - eta_d.max(axis=-1, keepdims=True))
         softmax_eta /= softmax_eta.sum(axis=-1, keepdims=True)
         np.testing.assert_allclose(got, softmax_eta, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# always_on (section 7.1): reduced state grid equals the exact limit.
+# ---------------------------------------------------------------------------
+
+
+def _prune_outputs(K, C, depth, eta, S, lam_on, lam_off, pi, always_on=()):
+    """logZ, a_prob and e_level from prune + backward at fixed numeric inputs."""
+    eta_t = [pt.as_tensor_variable(e) for e in eta]
+    args = (
+        eta_t,
+        pt.as_tensor_variable(S),
+        pt.as_tensor_variable(lam_on),
+        pt.as_tensor_variable(lam_off),
+        pt.as_tensor_variable(pi),
+        depth,
+        K,
+    )
+    lb, lm, lt, lp, logZ, lz_root = prune(*args, always_on=always_on)
+    _, a_prob, e_level = backward(
+        eta_t, lb, lm, lt, lp, lz_root, depth, K, always_on=always_on
+    )
+    return (
+        float(logZ.eval()),
+        [a.eval() for a in a_prob],
+        [e.eval() for e in e_level],
+    )
+
+
+def test_full_masks_reinserts_constant_columns():
+    masks, free = full_masks(3, always_on=[0])
+    assert free == [1, 2]
+    assert masks.shape == (4, 3)
+    assert (masks[:, 0] == 1).all()
+    np.testing.assert_array_equal(masks[:, 1:], state_grid(2))
+    m_all, free_all = full_masks(3)
+    np.testing.assert_array_equal(m_all, state_grid(3))
+    assert free_all == [0, 1, 2]
+    with pytest.raises(ValueError):
+        full_masks(3, always_on=[3])
+
+
+def test_always_on_matches_exact_limit_of_full_grid():
+    """always_on = [0] on the 4-state grid must equal the full 8-state grid
+    evaluated with pi[0] = 1 and lambda_on[0] = lambda_off[0] = 0 (the
+    exact-limit machinery of the bridge test), for logZ, a_prob and e_level.
+    a_prob[:, 0] must be exactly 1 in the reduced model."""
+    K, C = 3, 5
+    rng = np.random.default_rng(71)
+    depth, eta, S, lam_on, lam_off, pi = _make_branching_forest(
+        K, C, rng, unobserved=[(2, 1)]
+    )
+    logZ_r, a_r, e_r = _prune_outputs(K, C, depth, eta, S, lam_on, lam_off, pi, (0,))
+
+    lam_on_lim, lam_off_lim, pi_lim = lam_on.copy(), lam_off.copy(), pi.copy()
+    lam_on_lim[0] = lam_off_lim[0] = 0.0
+    pi_lim[0] = 1.0
+    logZ_f, a_f, e_f = _prune_outputs(
+        K, C, depth, eta, S, lam_on_lim, lam_off_lim, pi_lim
+    )
+
+    assert np.isfinite(logZ_r)
+    assert logZ_r == pytest.approx(logZ_f, rel=1e-10)
+    for ar, af, er, ef in zip(a_r, a_f, e_r, e_f):
+        assert (ar[:, 0] == 1.0).all()
+        np.testing.assert_allclose(ar, af, atol=1e-10)
+        np.testing.assert_allclose(er, ef, atol=1e-10)
+        np.testing.assert_allclose(er.sum(axis=-1), 1.0, atol=1e-10)
+
+
+def test_always_on_all_signatures_is_plain_multinomial():
+    """Every signature forced on leaves one state: logZ is the plain
+    multinomial log-likelihood of softmax(eta) @ S over the observed nodes."""
+    from scipy.stats import multinomial
+
+    K, C = 2, 4
+    rng = np.random.default_rng(72)
+    depth, eta, S, lam_on, lam_off, pi = _make_chain_forest(K, C, rng)
+    logZ, a_prob, e_level = _prune_outputs(
+        K, C, depth, eta, S, lam_on, lam_off, pi, (0, 1)
+    )
+    want = 0.0
+    for d, eta_d in enumerate(eta):
+        sm = np.exp(eta_d - eta_d.max(axis=-1, keepdims=True))
+        sm /= sm.sum(axis=-1, keepdims=True)
+        theta = sm @ S
+        for i in range(eta_d.shape[0]):
+            if depth.observed[d][i]:
+                x = depth.counts[d][i].astype(int)
+                want += multinomial.logpmf(x, n=x.sum(), p=theta[i])
+        np.testing.assert_allclose(e_level[d], sm, atol=1e-10)
+        assert (a_prob[d] == 1.0).all()
+    assert logZ == pytest.approx(want, rel=1e-10)
 
 
 # ---------------------------------------------------------------------------
