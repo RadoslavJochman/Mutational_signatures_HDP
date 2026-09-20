@@ -4,11 +4,14 @@ Covers the model-loader contract in build_snv_tree.py's module docstring: the
 96-channel binning, the Newick round-trip against the model loader's own
 parsing, the channel-order guard against cosmic_signatures.csv, VCF/matrix
 plumbing, the Camin-Sokal parsimony search (exhaustive topology enumeration
-and scoring), and LICHeE input/output plumbing (the binary itself is not
+and scoring), and the LICHeE integration: input writing, the java invocation, the
+``.trees.txt`` parser and the tree it builds (the binary itself is not
 exercised -- subprocess calls are mocked, matching this repo's existing
-convention for external-tool wrappers).
+convention for external-tool wrappers). The two fixtures under
+``tests/fixtures/lichee`` are verbatim LICHeE output from real runs.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT / "realdata" / "scripts" / "euler"))
 import build_snv_tree as bt  # noqa: E402
 
 COSMIC_CSV = REPO_ROOT / "COSMIC_sig" / "cosmic_signatures.csv"
+LICHEE_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "lichee"
 
 
 # --------------------------------------------------------------------------- #
@@ -374,8 +378,27 @@ def test_camin_sokal_tree_handles_incompatible_matrix_without_raising():
 
 
 # --------------------------------------------------------------------------- #
-# LICHeE plumbing (the binary itself is not exercised)
+# LICHeE: verify_newick with hidden group nodes
 # --------------------------------------------------------------------------- #
+
+
+def test_verify_newick_accepts_hidden_group_nodes():
+    newick = "((7,8)g1)germline;"
+    bt.verify_newick(newick, {"7", "8"}, "germline", hidden_ids={"g1"})
+    with pytest.raises(AssertionError):  # without hidden_ids the extra node is a defect
+        bt.verify_newick(newick, {"7", "8"}, "germline")
+
+
+def test_verify_newick_rejects_hidden_id_colliding_with_a_cluster():
+    with pytest.raises(AssertionError, match="collide"):
+        bt.verify_newick("((7)g1)germline;", {"7", "g1"}, "germline", hidden_ids={"g1"})
+
+
+# --------------------------------------------------------------------------- #
+# LICHeE: input, home resolution, invocation
+# --------------------------------------------------------------------------- #
+
+COLUMNS = ["germline", "c3", "c7", "c8", "c9", "c10"]  # the fixtures' input header
 
 
 def test_write_lichee_input_format_and_germline_column(tmp_path):
@@ -386,9 +409,9 @@ def test_write_lichee_input_format_and_germline_column(tmp_path):
     out = tmp_path / "lichee_in.txt"
     columns = bt.write_lichee_input(cluster_to_calls, out)
 
-    assert columns == [bt.GERMLINE_ROOT_ID, "7", "8"]
+    assert columns == [bt.GERMLINE_ROOT_ID, "c7", "c8"]
     lines = out.read_text().splitlines()
-    assert lines[0] == "#chr\tposition\tdescription\tgermline\t7\t8"
+    assert lines[0] == "#chr\tposition\tdescription\tgermline\tc7\tc8"
     # 2 SNV rows, sorted by (chrom, pos, ref, alt)
     assert len(lines) == 3
     row_100 = lines[1].split("\t")
@@ -400,113 +423,559 @@ def test_write_lichee_input_format_and_germline_column(tmp_path):
     assert row_200[5] == "0.4000"
 
 
-def test_find_lichee_binary_precedence(monkeypatch):
-    assert bt.find_lichee_binary("explicit/path") == "explicit/path"
-
-    monkeypatch.setenv("LICHEE_BIN", "env/path")
-    assert bt.find_lichee_binary(None) == "env/path"
-
-    monkeypatch.delenv("LICHEE_BIN")
-    default = Path(bt.find_lichee_binary(None))
-    expected = REPO_ROOT / "realdata" / "external" / "lichee" / "release" / "lichee"
-    assert default == expected
+def _fake_home(tmp_path):
+    home = tmp_path / "LICHeE"
+    (home / "release").mkdir(parents=True)
+    (home / "release" / "lichee.jar").write_text("")
+    (home / "lib").mkdir()
+    return home
 
 
-def test_run_lichee_builds_expected_command_and_returns_dot_path(tmp_path, monkeypatch):
-    calls = {}
+def test_resolve_lichee_home_precedence_and_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(bt.shutil, "which", lambda name: "/usr/bin/java")
+    home = _fake_home(tmp_path)
+    jar, lib = bt.resolve_lichee_home(str(home))
+    assert jar == home / "release" / "lichee.jar" and lib == home / "lib"
 
-    def fake_run(cmd, check, stdout, stderr):
-        calls["cmd"] = cmd
-        out_prefix = cmd[cmd.index("-o") + 1]
-        Path(f"{out_prefix}.dot").write_text('"1" -> "2";\n')
+    monkeypatch.setenv("LICHEE_HOME", str(home))
+    assert bt.resolve_lichee_home(None) == (jar, lib)
+
+
+def test_resolve_lichee_home_default_is_the_repo_checkout(monkeypatch):
+    monkeypatch.delenv("LICHEE_HOME", raising=False)
+    with pytest.raises(FileNotFoundError) as err:
+        bt.resolve_lichee_home(None)
+    expected = REPO_ROOT / "realdata" / "external" / "lichee" / "LICHeE"
+    assert str(expected) in str(err.value)
+
+
+def test_resolve_lichee_home_names_everything_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(bt.shutil, "which", lambda name: None)
+    with pytest.raises(FileNotFoundError) as err:
+        bt.resolve_lichee_home(str(tmp_path / "nowhere"))
+    message = str(err.value)
+    assert "lichee.jar" in message and "lib directory" in message
+    assert "java on PATH" in message
+
+
+def _run_lichee(tmp_path, monkeypatch, write=True, returncode=0):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if write:
+            Path(cmd[cmd.index("-o") + 1]).write_text("Nodes:\n")
+        return subprocess.CompletedProcess(cmd, returncode)
 
     monkeypatch.setattr(bt.subprocess, "run", fake_run)
-
-    dot_path = bt.run_lichee(
+    out = tmp_path / "lichee_out.trees.txt"
+    result = bt.run_lichee(
         tmp_path / "in.txt",
-        out_prefix=tmp_path / "lichee_out",
+        out_path=out,
         log_path=tmp_path / "lichee.log",
-        lichee_bin="lichee",
-        normal_index=0,
-        min_vaf_present=0.05,
-        max_vaf_absent=0.0,
+        jar=tmp_path / "release" / "lichee.jar",
+        lib=tmp_path / "lib",
+        tau=0.05,
     )
-    assert dot_path.exists()
-    cmd = calls["cmd"]
-    assert cmd[0] == "lichee"
-    assert "-build" in cmd
+    return result, calls
+
+
+def test_run_lichee_command_is_java_cp_with_an_unexpanded_lib_glob(
+    tmp_path, monkeypatch
+):
+    result, calls = _run_lichee(tmp_path, monkeypatch)
+    cmd = calls[0][0]
+    assert result == tmp_path / "lichee_out.trees.txt"
+    assert cmd[0] == "java"
+    assert cmd[1] == "-cp"
+    # One classpath argument, jar then lib/*, the glob left for Java to expand.
+    assert cmd[2] == f"{tmp_path / 'release' / 'lichee.jar'}:{tmp_path / 'lib'}/*"
+    assert cmd[3] == "lineage.LineageEngine"
+    assert cmd[cmd.index("-s") + 1] == "1"
     assert cmd[cmd.index("-n") + 1] == "0"
+    assert cmd[cmd.index("-o") + 1] == str(tmp_path / "lichee_out.trees.txt")
+    assert "-dot" not in cmd
+    assert "-minClusterSize" not in cmd
     assert (tmp_path / "lichee.log").exists()
 
 
-def test_run_lichee_raises_if_dot_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(bt.subprocess, "run", lambda *a, **k: None)
+def test_run_lichee_uses_tau_for_both_vaf_cutoffs(tmp_path, monkeypatch):
+    _, calls = _run_lichee(tmp_path, monkeypatch)
+    cmd = calls[0][0]
+    assert cmd[cmd.index("-minVAFPresent") + 1] == "0.05"
+    assert cmd[cmd.index("-maxVAFAbsent") + 1] == "0.05"
+
+
+def test_run_lichee_ignores_exit_status_when_the_file_appears(tmp_path, monkeypatch):
+    result, _ = _run_lichee(tmp_path, monkeypatch, returncode=1)
+    assert result.exists()
+
+
+def test_run_lichee_raises_naming_file_and_log_when_no_output(tmp_path, monkeypatch):
+    with pytest.raises(FileNotFoundError) as err:
+        _run_lichee(tmp_path, monkeypatch, write=False)
+    assert "lichee_out.trees.txt" in str(err.value)
+    assert "lichee.log" in str(err.value)
+
+
+def test_run_lichee_removes_a_stale_output_first(tmp_path, monkeypatch):
+    (tmp_path / "lichee_out.trees.txt").write_text("stale")
     with pytest.raises(FileNotFoundError):
-        bt.run_lichee(
-            tmp_path / "in.txt",
-            out_prefix=tmp_path / "lichee_out",
-            log_path=tmp_path / "lichee.log",
-            lichee_bin="lichee",
+        _run_lichee(tmp_path, monkeypatch, write=False)
+    assert not (tmp_path / "lichee_out.trees.txt").exists()
+
+
+# --------------------------------------------------------------------------- #
+# LICHeE: parsing .trees.txt
+# --------------------------------------------------------------------------- #
+
+
+def _parse_fixture(name):
+    return bt.parse_lichee_trees(LICHEE_FIXTURES / name, COLUMNS)
+
+
+def test_parse_nested_chain_fixture():
+    t = _parse_fixture("nested_chain.trees.txt")
+    assert t.profiles == {
+        "3": "011111",
+        "4": "001111",
+        "1": "000111",
+        "2": "000001",
+        "5": "000010",
+    }
+    # VAFs cover the present columns only: node 1 (000111) is present in 3.
+    assert t.vafs["1"] == [0.4, 0.41, 0.41]
+    assert t.vafs["2"] == [0.44]
+    # Tree 0's edges are listed out of order in the file.
+    assert t.parent_of == {"3": "0", "4": "3", "1": "4", "5": "1", "2": "1"}
+    assert t.root == "0" and t.n_trees == 1
+    assert t.decomposition["germline"] == []
+    assert t.decomposition["c9"] == [
+        (1, "011111", 0.415),
+        (2, "001111", 0.4),
+        (3, "000111", 0.405),
+        (4, "000010", 0.43),
+    ]
+
+
+def test_parse_shared_nodes_fixture():
+    t = _parse_fixture("shared_nodes.trees.txt")
+    assert t.parent_of == {"1": "0", "3": "1", "2": "3"}
+    assert t.decomposition["c7"] == [(1, "011111", 0.425), (2, "001111", 0.39)]
+
+
+def _mutate(name, old, new):
+    text = (LICHEE_FIXTURES / name).read_text()
+    assert old in text
+    return text.replace(old, new)
+
+
+def test_parse_counts_extra_tree_blocks(tmp_path):
+    text = _mutate(
+        "shared_nodes.trees.txt",
+        "Error score:",
+        "Error score:",
+    ).replace("Sample decomposition", "****Tree 1****\n0 -> 2\n\nSample decomposition")
+    path = tmp_path / "t.txt"
+    path.write_text(text)
+    t = bt.parse_lichee_trees(path, COLUMNS)
+    assert t.n_trees == 2
+    assert t.parent_of == {"1": "0", "3": "1", "2": "3"}  # Tree 0 only
+
+
+def _write(tmp_path, text):
+    path = tmp_path / "t.txt"
+    path.write_text(text)
+    return path
+
+
+@pytest.mark.parametrize(
+    "old,new,match",
+    [
+        ("Nodes:\n", "", "Nodes"),
+        ("****Tree 0****", "****Tree 5****", "Tree 0"),
+        ("Sample decomposition: ", "SNV info:", "Sample decomposition"),
+        ("1\t011111\t", "1\t01111\t", "bits"),
+        ("1\t011111\t", "1\t111111\t", "germline bit"),
+        ("[ 0.43 0.42 0.45 0.42 0.45]", "[ 0.43 0.42]", "VAFs for"),
+        ("1 -> 3", "1 -> 3\n7 -> 8", "root"),
+        ("3 -> 2", "3 -> 2\n0 -> 2", "two parents"),
+        ("0 -> 1\n", "9 -> 1\n", "root"),
+        (".....011111: 0.435", "...011111: 0.435", "indented"),
+    ],
+)
+def test_parse_failure_paths(tmp_path, old, new, match):
+    path = _write(tmp_path, _mutate("shared_nodes.trees.txt", old, new))
+    with pytest.raises(ValueError, match=match):
+        bt.parse_lichee_trees(path, COLUMNS)
+
+
+# --------------------------------------------------------------------------- #
+# LICHeE: the clone tree
+# --------------------------------------------------------------------------- #
+
+
+def _build(name, tau=0.05):
+    trees = _parse_fixture(name)
+    return bt.build_lichee_clone_tree(trees, COLUMNS, tau)
+
+
+def _edges(tree):
+    return set(tree.edges())
+
+
+def test_nested_chain_gives_five_labelled_nodes_and_preserves_ancestry():
+    r = _build("nested_chain.trees.txt")
+    newick = bt.digraph_to_newick(r.tree, bt.GERMLINE_ROOT_ID)
+    assert newick == "((((9,10)8)7)3)germline;"
+    assert r.hidden_ids == set()
+    assert r.shared == [] and r.absent == [] and r.collapsed_nodes == []
+    assert r.node_of_cluster == {"3": "3", "7": "4", "8": "1", "9": "5", "10": "2"}
+    # ancestry: 3 above 7 above 8 above 9 and 10
+    assert nx.has_path(r.tree, "3", "7") and nx.has_path(r.tree, "7", "8")
+    assert set(r.tree.successors("8")) == {"9", "10"}
+    bt.verify_newick(newick, {"3", "7", "8", "9", "10"}, "germline")
+
+
+def test_shared_nodes_fixture_makes_hidden_group_nodes():
+    r = _build("shared_nodes.trees.txt")
+    assert _edges(r.tree) == {
+        ("germline", "3"),
+        ("3", "g3"),
+        ("g3", "7"),
+        ("g3", "8"),
+        ("g3", "g2"),
+        ("g2", "9"),
+        ("g2", "10"),
+    }
+    newick = bt.digraph_to_newick(r.tree, bt.GERMLINE_ROOT_ID)
+    assert newick == "(((7,8,(9,10)g2)g3)3)germline;"
+    assert r.hidden_ids == {"g3", "g2"}
+    # {c7,c8} share node 3, {c9,c10} share node 2; c3 alone holds node 1.
+    assert {tuple(g) for g in r.shared} == {("7", "8"), ("9", "10")}
+    assert r.group_subtends == {"g3": (2, 4), "g2": (2, 2)}
+    # the labelled cluster set is exactly the five clusters plus the root
+    assert set(r.tree.nodes()) - r.hidden_ids == {
+        "germline", "3", "7", "8", "9", "10"
+    }  # fmt: skip
+    bt.verify_newick(newick, {"3", "7", "8", "9", "10"}, "germline", r.hidden_ids)
+    # c3 stays above the shared nodes, and g3 above g2
+    assert nx.has_path(r.tree, "3", "g3") and nx.has_path(r.tree, "g3", "g2")
+
+
+def test_shared_nodes_diagnostics_name_the_findings():
+    r = _build("shared_nodes.trees.txt")
+    text = "".join(bt._lichee_lines(r))
+    assert "clusters 7,8 indistinguishable by SNV profile" in text
+    assert "clusters 9,10 indistinguishable by SNV profile" in text
+    assert "Hidden group node g3: 2 clusters directly, 4 in its subtree" in text
+    assert "Hidden group node g2: 2 clusters directly, 2 in its subtree" in text
+    assert "Fewer nodes than clusters is expected" in text
+    assert "emitted 2 trees" not in text
+
+
+def test_diagnostics_note_more_than_one_tree():
+    r = _build("shared_nodes.trees.txt")
+    r.n_trees = 3
+    assert "emitted 3 trees; Tree 0" in "".join(bt._lichee_lines(r))
+
+
+# Small synthetic outputs in the same layout, for the paths the fixtures do not hit.
+
+
+def _synthetic(columns, nodes, edges, decomposition):
+    lines = ["Nodes:"]
+    for node, profile, vafs in nodes:
+        lines.append(f"{node}\t{profile}\t[ {' '.join(map(str, vafs))}]\tsnv{node}")
+    lines += ["", "****Tree 0****"] + [f"{a} -> {b}" for a, b in edges]
+    lines += ["Error score: 0.1", "", "Sample decomposition: "]
+    for sample, entries in decomposition.items():
+        lines += [f"\tSample lineage decomposition: {sample}", "GL"]
+        for depth, profile, vaf in entries:
+            lines.append("." * (5 * depth) + f"{profile}: {vaf} [0.0]")
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _build_text(tmp_path, columns, nodes, edges, decomposition, tau=0.05):
+    path = _write(tmp_path, _synthetic(columns, nodes, edges, decomposition))
+    trees = bt.parse_lichee_trees(path, columns)
+    return bt.build_lichee_clone_tree(trees, columns, tau)
+
+
+def test_absent_cluster_hangs_off_the_germline_root_with_a_finding(tmp_path):
+    columns = ["germline", "c3", "c7"]
+    r = _build_text(
+        tmp_path,
+        columns,
+        [("1", "010", [0.4])],
+        [("0", "1")],
+        {"germline": [], "c3": [(1, "010", 0.4)], "c7": []},
+    )
+    assert _edges(r.tree) == {("germline", "3"), ("germline", "7")}
+    assert r.absent == ["7"]
+    assert "cluster(s) 7 are in no LICHeE node" in "".join(bt._lichee_lines(r))
+
+
+def test_node_with_no_cluster_is_collapsed_and_children_lift(tmp_path):
+    columns = ["germline", "c3", "c7"]
+    r = _build_text(
+        tmp_path,
+        columns,
+        [("1", "011", [0.4, 0.4]), ("2", "010", [0.4]), ("3", "001", [0.4])],
+        [("0", "1"), ("1", "2"), ("1", "3")],
+        {
+            "germline": [],
+            "c3": [(1, "011", 0.4), (2, "010", 0.4)],
+            "c7": [(1, "011", 0.4), (2, "001", 0.4)],
+        },
+    )
+    assert r.collapsed_nodes == ["1"]
+    assert _edges(r.tree) == {("germline", "3"), ("germline", "7")}
+    assert "carry no cluster and were collapsed" in "".join(bt._lichee_lines(r))
+
+
+def test_genuine_tie_attaches_at_the_lowest_common_ancestor(tmp_path):
+    columns = ["germline", "c3", "c7", "c8"]
+    r = _build_text(
+        tmp_path,
+        columns,
+        [
+            ("1", "0111", [0.4, 0.4, 0.4]),
+            ("2", "0101", [0.4, 0.4]),
+            ("3", "0011", [0.4, 0.4]),
+        ],
+        [("0", "1"), ("1", "2"), ("1", "3")],
+        {
+            "germline": [],
+            "c3": [(1, "0111", 0.4), (2, "0101", 0.4)],
+            "c7": [(1, "0111", 0.4), (2, "0011", 0.4)],
+            "c8": [(1, "0111", 0.4), (2, "0101", 0.4), (2, "0011", 0.4)],
+        },
+    )
+    # c8 is in both leaves, so it resolves to their parent, node 1.
+    assert r.node_of_cluster["8"] == "1"
+    assert _edges(r.tree) == {
+        ("germline", "8"),
+        ("8", "3"),
+        ("8", "7"),
+    }
+
+
+def test_a_tie_only_at_the_root_attaches_to_the_germline_root(tmp_path):
+    # c3 is in both root-level branches, whose only common ancestor is the root.
+    r = _build_text(
+        tmp_path,
+        ["germline", "c3", "c7", "c8"],
+        [("1", "0110", [0.4, 0.4]), ("2", "0101", [0.4, 0.4])],
+        [("0", "1"), ("0", "2")],
+        {
+            "germline": [],
+            "c3": [(1, "0110", 0.4), (1, "0101", 0.4)],
+            "c7": [(1, "0110", 0.4)],
+            "c8": [(1, "0101", 0.4)],
+        },
+    )
+    assert r.at_root == ["3"]
+    assert ("germline", "3") in _edges(r.tree)
+    assert ("germline", "7") in _edges(r.tree) and ("germline", "8") in _edges(r.tree)
+    assert "cluster(s) 3 tie only at the germline root" in "".join(bt._lichee_lines(r))
+
+
+LEAK_COLUMNS = ["germline", "c3", "c7"]
+LEAK_NODES = [("1", "011", [0.4, 0.4]), ("2", "001", [0.02])]
+LEAK_DECOMPOSITION = {
+    "germline": [],
+    "c3": [(1, "011", 0.4)],
+    "c7": [(1, "011", 0.4), (2, "001", 0.02)],
+}
+
+
+def test_tau_gates_out_sub_threshold_leakage(tmp_path):
+    # c7's 0.02 in node 2 is below tau=0.05, so c7 stays at node 1 with c3.
+    r = _build_text(
+        tmp_path, LEAK_COLUMNS, LEAK_NODES, [("0", "1"), ("1", "2")], LEAK_DECOMPOSITION
+    )
+    assert r.hidden_ids == {"g1"}
+    assert _edges(r.tree) == {("germline", "g1"), ("g1", "3"), ("g1", "7")}
+    assert r.collapsed_nodes == ["2"]
+
+
+def test_a_lower_tau_lets_the_same_leakage_count(tmp_path):
+    r = _build_text(
+        tmp_path,
+        LEAK_COLUMNS,
+        LEAK_NODES,
+        [("0", "1"), ("1", "2")],
+        LEAK_DECOMPOSITION,
+        tau=0.01,
+    )
+    assert _edges(r.tree) == {("germline", "3"), ("3", "7")}
+
+
+# Failure paths of the join.
+
+
+def test_presence_and_decomposition_disagreement_raises(tmp_path):
+    with pytest.raises(ValueError, match="presence puts it at node"):
+        _build_text(
+            tmp_path,
+            ["germline", "c3", "c7"],
+            [("1", "011", [0.4, 0.4]), ("2", "001", [0.4])],
+            [("0", "1"), ("1", "2")],
+            {
+                "germline": [],
+                "c3": [(1, "011", 0.4)],
+                "c7": [(1, "011", 0.4)],  # presence says node 2, this stops at node 1
+            },
         )
 
 
-def test_parse_lichee_dot_edges_and_labels(tmp_path):
-    dot_path = tmp_path / "out.dot"
-    dot_path.write_text(
-        "digraph G {\n"
-        '"n0" [label="germline"];\n'
-        '"n1" [label="7"];\n'
-        '"n0" -> "n1";\n'
-        '"n1" -> "n2";\n'
-        "}\n"
+def test_deepest_decomposition_profile_matching_no_node_raises(tmp_path):
+    with pytest.raises(ValueError, match="matches no Nodes: entry"):
+        _build_text(
+            tmp_path,
+            ["germline", "c3"],
+            [("1", "01", [0.4])],
+            [("0", "1")],
+            {"germline": [], "c3": [(1, "01", 0.4), (2, "11", 0.4)]},
+        )
+
+
+def test_in_no_node_by_presence_but_placed_by_decomposition_raises(tmp_path):
+    with pytest.raises(ValueError, match="in no node by presence"):
+        _build_text(
+            tmp_path,
+            ["germline", "c3", "c7"],
+            [("1", "010", [0.4]), ("2", "001", [0.01])],
+            [("0", "1"), ("0", "2")],
+            {
+                "germline": [],
+                "c3": [(1, "010", 0.4)],
+                "c7": [(1, "001", 0.4)],  # decomposition contradicts the node VAF
+            },
+        )
+
+
+def test_unknown_decomposition_sample_raises(tmp_path):
+    with pytest.raises(ValueError, match="neither 'germline' nor a c<id> column"):
+        _build_text(
+            tmp_path,
+            ["germline", "c3"],
+            [("1", "01", [0.4])],
+            [("0", "1")],
+            {"germline": [], "c3": [(1, "01", 0.4)], "x9": []},
+        )
+
+
+def test_cluster_without_a_decomposition_block_raises(tmp_path):
+    with pytest.raises(ValueError, match="no 'Sample lineage decomposition: c7'"):
+        _build_text(
+            tmp_path,
+            ["germline", "c3", "c7"],
+            [("1", "011", [0.4, 0.4])],
+            [("0", "1")],
+            {"germline": [], "c3": [(1, "011", 0.4)]},
+        )
+
+
+def test_cluster_column_must_carry_the_c_prefix():
+    trees = _parse_fixture("shared_nodes.trees.txt")
+    with pytest.raises(ValueError, match="not c<id>"):
+        bt.build_lichee_clone_tree(
+            trees, ["germline", "3", "c7", "c8", "c9", "c10"], 0.05
+        )
+
+
+def test_group_node_label_colliding_with_a_cluster_raises(tmp_path):
+    with pytest.raises(ValueError, match="collides"):
+        _build_text(
+            tmp_path,
+            ["germline", "cg1", "c7"],
+            [("1", "011", [0.4, 0.4])],
+            [("0", "1")],
+            {
+                "germline": [],
+                "cg1": [(1, "011", 0.4)],
+                "c7": [(1, "011", 0.4)],
+            },
+        )
+
+
+def test_tree_with_a_cycle_raises(tmp_path):
+    path = _write(
+        tmp_path,
+        _synthetic(
+            ["germline", "c3"],
+            [("1", "01", [0.4])],
+            [("0", "1"), ("2", "3"), ("3", "2")],
+            {"germline": [], "c3": [(1, "01", 0.4)]},
+        ),
     )
-    node_labels, edges = bt.parse_lichee_dot(dot_path)
-    assert node_labels["n0"] == "germline"
-    assert node_labels["n1"] == "7"
-    assert {"a": "n0", "b": "n1"} in edges
-    assert {"a": "n1", "b": "n2"} in edges
+    trees = bt.parse_lichee_trees(path, ["germline", "c3"])
+    with pytest.raises(ValueError, match="cycle or a broken chain"):
+        bt.build_lichee_clone_tree(trees, ["germline", "c3"], 0.05)
 
 
-def test_parse_lichee_dot_raises_on_no_edges(tmp_path):
-    dot_path = tmp_path / "empty.dot"
-    dot_path.write_text("digraph G {\n}\n")
-    with pytest.raises(ValueError, match="no parseable"):
-        bt.resolve_lichee_clone_tree(dot_path, ["7", "8"], "germline")
+# --------------------------------------------------------------------------- #
+# Spectra stay one row per cluster, whatever the tree does with shared nodes
+# --------------------------------------------------------------------------- #
 
 
-def test_resolve_lichee_clone_tree_via_node_ids(tmp_path):
-    # DOT nodes named directly after the real cluster IDs (no label attrs) --
-    # the verbatim scheme should resolve immediately.
-    dot_path = tmp_path / "out.dot"
-    dot_path.write_text(
-        'digraph G {\n"germline" -> "m1";\n"m1" -> "7";\n"m1" -> "8";\n}\n'
+def test_clusters_sharing_a_node_keep_separate_spectra_rows():
+    r = _build("shared_nodes.trees.txt")
+    assert {tuple(g) for g in r.shared} == {("7", "8"), ("9", "10")}
+    fasta = _FakeFasta({("1", 98, 101): "ACG", ("1", 198, 201): "ACG"})
+    cluster_to_snvs = {  # 7 and 8 share a node but not their SNVs
+        "7": {("1", 100, "C", "T")},
+        "8": {("1", 100, "C", "T"), ("1", 200, "C", "T")},
+    }
+    spectra, _ = bt.bin_cluster_spectra(cluster_to_snvs, fasta)
+    assert list(spectra.index) == ["7", "8"]
+    assert spectra.loc["7"].sum() == 1 and spectra.loc["8"].sum() == 2
+
+
+def _five_cluster_calls():
+    site = ("1", 100, "C", "T")
+    return {cid: {site: (0.4, 10)} for cid in ["10", "3", "9", "7", "8"]}
+
+
+def test_written_header_matches_the_fixtures_column_order(tmp_path):
+    columns = bt.write_lichee_input(_five_cluster_calls(), tmp_path / "in.txt")
+    assert columns == COLUMNS  # numeric sort: 3, 7, 8, 9, 10 as c<id>
+
+
+def test_write_run_parse_build_verify_chain_as_main_runs_it(tmp_path, monkeypatch):
+    fixture = (LICHEE_FIXTURES / "shared_nodes.trees.txt").read_text()
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[cmd.index("-o") + 1]).write_text(fixture)
+        return subprocess.CompletedProcess(cmd, 1)  # exit status is not trusted
+
+    monkeypatch.setattr(bt.subprocess, "run", fake_run)
+    columns = bt.write_lichee_input(_five_cluster_calls(), tmp_path / "in.txt")
+    trees_path = bt.run_lichee(
+        tmp_path / "in.txt",
+        out_path=tmp_path / bt.LICHEE_OUT_NAME,
+        log_path=tmp_path / "run.log",
+        jar=tmp_path / "lichee.jar",
+        lib=tmp_path / "lib",
+        tau=0.05,
     )
-    tree, source = bt.resolve_lichee_clone_tree(dot_path, ["7", "8"], "germline")
-    assert set(tree.predecessors("7")) == {"germline"}
-    assert set(tree.predecessors("8")) == {"germline"}
-    assert "dot" in source
-
-
-def test_resolve_lichee_clone_tree_via_label_attribute(tmp_path):
-    # Node ids are opaque LICHeE-internal ids; real cluster identity only
-    # appears in each node's label="..." attribute.
-    dot_path = tmp_path / "out.dot"
-    dot_path.write_text(
-        "digraph G {\n"
-        '"n0" [label="germline"];\n'
-        '"n1" [label="7"];\n'
-        '"n2" [label="8"];\n'
-        '"n0" -> "n1";\n'
-        '"n1" -> "n2";\n'
-        "}\n"
+    result = bt.build_lichee_clone_tree(
+        bt.parse_lichee_trees(trees_path, columns), columns, 0.05
     )
-    tree, source = bt.resolve_lichee_clone_tree(dot_path, ["7", "8"], "germline")
-    assert set(tree.predecessors("7")) == {"germline"}
-    assert set(tree.predecessors("8")) == {"7"}
+    newick = bt.digraph_to_newick(result.tree, bt.GERMLINE_ROOT_ID)
+    bt.verify_newick(
+        newick, set(_five_cluster_calls()), bt.GERMLINE_ROOT_ID, result.hidden_ids
+    )
 
 
-def test_resolve_lichee_clone_tree_raises_when_unresolved(tmp_path):
-    dot_path = tmp_path / "out.dot"
-    dot_path.write_text('digraph G {\n"a" -> "b";\n}\n')
-    with pytest.raises(ValueError, match="no consistent"):
-        bt.resolve_lichee_clone_tree(dot_path, ["7", "8"], "germline")
+def test_write_diagnostics_reports_lichee_findings(tmp_path):
+    r = _build("shared_nodes.trees.txt")
+    out = tmp_path / "diag.txt"
+    bt.write_diagnostics(out, {}, {}, 0, "lichee", None, None, r.tree, lichee_result=r)
+    text = out.read_text()
+    assert "## Method used: lichee" in text
+    assert "indistinguishable by SNV profile" in text
+    assert "Hidden group node g3" in text

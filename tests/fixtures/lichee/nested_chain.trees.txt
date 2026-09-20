@@ -1,0 +1,61 @@
+Nodes:
+3	011111	[ 0.43 0.42 0.45 0.42 0.45]	snv1	snv2
+4	001111	[ 0.39 0.41 0.4 0.42]	snv3	snv4
+1	000111	[ 0.4 0.41 0.41]	snv5	snv6
+2	000001	[ 0.44]	snv9	snv10
+5	000010	[ 0.43]	snv7	snv8
+
+****Tree 0****
+0 -> 3
+1 -> 5
+1 -> 2
+3 -> 4
+4 -> 1
+Error score: 0.03570714214271425
+
+Sample decomposition: 
+	Sample lineage decomposition: germline
+GL
+
+	Sample lineage decomposition: c3
+GL
+.....011111: 0.435 [0.015]
+
+	Sample lineage decomposition: c7
+GL
+.....011111: 0.425 [0.015]
+..........001111: 0.39 [0.01]
+
+	Sample lineage decomposition: c8
+GL
+.....011111: 0.445 [0.015]
+..........001111: 0.415 [0.005]
+...............000111: 0.395 [0.005]
+
+	Sample lineage decomposition: c9
+GL
+.....011111: 0.415 [0.015]
+..........001111: 0.4 [0.01]
+...............000111: 0.405 [0.005]
+....................000010: 0.43 [0.01]
+
+	Sample lineage decomposition: c10
+GL
+.....011111: 0.445 [0.005]
+..........001111: 0.425 [0.005]
+...............000111: 0.415 [0.005]
+....................000001: 0.44 [0.01]
+
+
+SNV info:
+snv1: 1 100 trunk1
+snv2: 1 200 trunk2
+snv3: 2 100 c7up1
+snv4: 2 200 c7up2
+snv5: 3 100 c8up1
+snv6: 3 200 c8up2
+snv9: 5 100 c10priv1
+snv10: 5 200 c10priv2
+snv7: 4 100 c9priv1
+snv8: 4 200 c9priv2
+
