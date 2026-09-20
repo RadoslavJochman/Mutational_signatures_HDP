@@ -153,24 +153,22 @@ Reverted:
   `snv_tree_diagnostics.txt` (was `tree_diagnostics.txt`) -- renamed because stage 9 now
   writes to the same `tree_input/` directory.
 - **CNA tree, new.** `09_build_cna_tree.sbatch` / `build_cna_tree.py` infers a
-  copy-number tree with SCICoNE (cbg-ethz) over CellRanger DNA's own per-cell CNV output
-  (`cnv_data.h5`, confirmed hosted alongside slice D's BAM -- HTTP 200, ~2.5 GB, already
-  binned and GC/mappability-corrected by 10x), then collapses it onto the same SECEDO
-  clusters by majority cell assignment, reusing the same nearest-labelled-ancestor
-  collapsing helper the SNV tree's LICHeE integration uses. Writes `cna_tree.nwk` in the
-  same labelled-internal-node/germline-root contract as the SNV tree (no spectra) --
-  independent of the SNV tree, both fed to separate `TreeHDP` runs for comparison, never
-  merged into one tree. `--pseudobulk-fallback` aggregates to one row per cluster and runs
-  SCICoNE over that instead, flagged explicitly (not silently substituted), if per-cell
-  inference proves impractical.
+  copy-number tree with SCICoNE (cbg-ethz), driven through its official Python wrapper
+  (`pyscicone`, `import scicone`) over CellRanger DNA's own per-cell CNV output
+  (`cnv_data.h5`, confirmed hosted alongside slice D's BAM -- HTTP 200, ~2.5 GB), then
+  collapses it onto the same SECEDO clusters by majority cell assignment, reusing the
+  same nearest-labelled-ancestor collapsing helper the SNV tree's LICHeE integration
+  uses. Writes `cna_tree.nwk` in the same labelled-internal-node/germline-root contract
+  as the SNV tree (no spectra, and the same tumour-cluster node set) -- independent of
+  the SNV tree, both fed to separate `TreeHDP` runs for comparison, never merged into
+  one tree. `--pseudobulk-fallback` is a last-resort escape hatch, flagged explicitly.
 
-Neither LICHeE's exact `.dot` output schema nor `cnv_data.h5`'s exact internal layout nor
-SCICoNE's exact CLI/output format could be confirmed against a real run while writing this
-(no LICHeE/SCICoNE binary, no sample `cnv_data.h5`, and 10x's own schema docs page could
-not be reached). Both new scripts flag this plainly in their module docstrings and fail
-loudly, naming what they tried, rather than fabricate a tree from a guessed format -- see
-"Not yet done" below for what must be confirmed before trusting either stage's output on a
-real run.
+LICHeE's exact `.dot` output schema could not be confirmed against a real run while
+writing stage 8 (no LICHeE binary); `build_snv_tree.py` flags this and fails loudly, see
+"Not yet done" below. Stage 9 was rewritten against pyscicone's source, whose 10x
+notebook reads this same dataset family, so its h5 dataset names and outputs are read from
+that code, not guessed; they are still unconfirmed against slice D's own file (see "Stage
+9" below).
 
 ## SECEDO build flags on modern GCC
 
@@ -360,28 +358,48 @@ stages 06-08: it needs only stage 00's `cnv_data.h5` download and stage 04/05's 
 clustering plus pileup `.map` file. Not chained into `submit_all.sh` -- run by hand,
 same as stage 8.
 
-- **Inputs**: `CNV_H5` (CellRanger DNA's per-cell CNV output, stage 00's download),
-  `${PILEUP_DIR}/chromosome_1.map` and `${CLUSTERING_DIR}/clustering` (SECEDO's own
-  cell-index-to-barcode and cell-index-to-cluster files, for mapping `cnv_data.h5`'s
-  barcodes onto SECEDO clusters), `SCICONE_BIN`.
+- **Inputs**: `CNV_H5` (stage 00's download), `${PILEUP_DIR}/chromosome_1.map` and
+  `${CLUSTERING_DIR}/clustering` (SECEDO's cell-index-to-barcode and cell-index-to-cluster
+  files), `SCICONE_BUILD_DIR` (the directory of `scicone-*` binaries), `PATIENT_SEX`
+  (`female` for slice D, recorded in `config.sh`; the script's `--sex` is required with no
+  default because it sets the tree root) and `NORMAL_CLUSTER_ID`.
+- **Environment**: the repo `.venv` needs pyscicone
+  (`pip install realdata/external/SCICoNE/pyscicone/`), which imports PhenoGraph at module
+  top; the sbatch runs `python -c "import scicone"` first so a broken install fails before
+  the job. The SCICoNE binaries must be built in `SCICONE_BUILD_DIR`.
 - **Outputs**, written to the same `${PERSIST_DIR}/tree_input/` as stage 8:
   - `cna_tree.nwk` -- one rooted, labelled-internal-node Newick tree, same
-    germline-root contract as `snv_tree.nwk`, no spectra.
-  - `cna_tree_diagnostics.txt` -- which mode ran (per-cell or `--pseudobulk-fallback`),
-    how many `cnv_data.h5` cells matched a SECEDO cluster, and the resulting topology.
+    germline-root contract and node set as `snv_tree.nwk`, no spectra.
+  - `cna_tree_diagnostics.txt` -- mode, sex and neutral states with the chrX/chrY depth
+    audit, breakpoint and tree-search settings, the cluster-4 fold, and any findings.
+  - `cna_cell_nodes.csv` (per-cell mode) -- barcode, SECEDO cluster and SCICoNE node
+    per filtered cell.
 
-SCICoNE runs over `cnv_data.h5`'s cells x bins raw-counts matrix (already
-GC/mappability-corrected by CellRanger DNA, so this stage does not reimplement that
-correction) and its resulting cell-level tree is collapsed onto SECEDO's clusters by
-majority cell assignment -- each cluster's own cells vote for the SCICoNE node most of
-them were assigned to, then the tree is collapsed the same nearest-labelled-ancestor way
-the SNV tree's LICHeE integration collapses its own tool's raw tree
-(`collapse_by_nearest_labelled_ancestor`, shared between both scripts).
-`--pseudobulk-fallback` (`PSEUDOBULK_FALLBACK=1` in the sbatch wrapper) aggregates raw
-counts to one row per SECEDO cluster and runs SCICoNE over that instead, for when
-per-cell inference proves impractical (too few informative bins, non-convergence at
-~2000 cells, runtime past budget) -- a real, flagged degradation recorded in
-`cna_tree_diagnostics.txt`'s mode line, never a silent substitution.
+Flow: `sci.read_10x` ingests `cnv_data.h5`; breakpoints are detected on a random subsample
+of cells (`--bp-max-cells`, default 200, window 1% of the bin count); `learn_tree` runs
+on all filtered cells with `cluster=True, full=False` (`--n-reps` 10,
+`--copy-number-limit` 4, `--cluster-tree-n-iters` 40000, the pyscicone notebook's values).
+Topology comes from `tree.node_dict[...]['parent_id']` and cell assignments from
+`tree.outputs['cell_node_ids']`. Each SECEDO cluster's cells vote for a SCICoNE node, and
+the tree is collapsed onto the clusters by nearest labelled ancestor. `--pseudobulk-fallback`
+(`PSEUDOBULK_FALLBACK=1` in the sbatch wrapper) averages counts to one row per cluster and
+runs `learn_single_tree` over those rows instead, for when per-cell inference proves
+impractical; a real, flagged degradation recorded in the diagnostics' mode line.
+
+Three confirmations this stage makes, and what to check on the first real run:
+
+- **Filtered-cell barcodes.** `read_10x` drops CellRanger's outlier cells
+  (`is_high_dimapd`) and stores no barcodes, so the barcodes are rebuilt from the h5's
+  `cell_barcodes` and `per_cell_summary_metrics/is_high_dimapd` with the same mask, and the
+  stage raises if either is missing or a length disagrees. It also raises if under 50% of
+  cells match a SECEDO barcode, printing samples from both sides. What to check: that the
+  barcode spelling agrees (a trailing `-1` on one side only is the likely failure).
+- **Region neutral states.** From `--sex`, mapped by chromosome name; an unrecognised
+  chromosome raises. What to check: the diagnostics' chrX/chrY depth against the
+  autosomes (female expects X near 1, Y near 0), which audits the sex choice.
+- **Cluster-4 fold.** The pseudo-normal cluster stays in SCICoNE's inference but is folded
+  into the germline root, so the node set equals the SNV tree's. What to check: that its
+  cells voted for SCICoNE's own root (the diagnostics say so, or raise a finding).
 
 Both trees are independent `TreeHDP` inputs for comparison, not merged into one tree.
 
@@ -400,11 +418,12 @@ Both trees are independent `TreeHDP` inputs for comparison, not merged into one 
   real stage-8 run and extend `build_snv_tree.py`'s `_sample_label_schemes`/DOT parser if
   its actual node labels don't match what `resolve_lichee_clone_tree` assumes (see the
   module docstring's caveat) -- written without access to a LICHeE binary.
-- **Confirm `cnv_data.h5`'s real internal layout** with `h5py` against the downloaded file,
-  and **SCICoNE's real CLI/output format** against `scicone --help`/its README against the
-  built binary, before trusting stage 9's output -- both `build_cna_tree.py`'s dataset-path
-  heuristics and its SCICoNE invocation/parsing were written without access to either (see
-  its module docstring's caveat).
+- **Stage 9 first real run**: `pip install realdata/external/SCICoNE/pyscicone/` into the
+  Euler `.venv`, confirm `import scicone` works headless on a compute node, and pin
+  PhenoGraph and pybiomart in `requirements.txt` (they are listed there unpinned; check
+  they build against numpy 2.2.6). Then read the three confirmations above in
+  `cna_tree_diagnostics.txt`, and check the 1%-of-bins breakpoint window and the
+  24h/10-CPU/6G budget (both unmeasured) against the first run.
 - **Pre-flight, on the first real stage-06 task**: run `samtools view -H` on a couple of
   cluster BAMs and confirm two things before trusting the retagging step or the calls it
   feeds:
