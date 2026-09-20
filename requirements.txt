@@ -136,3 +136,11 @@ webencodings==0.5.1
 websocket-client==1.9.0
 xarray==2025.6.1
 xarray-einstats==0.8.0
+
+# Stage 09 (realdata/scripts/euler/build_cna_tree.py) drives SCICoNE through pyscicone,
+# installed from the clone, not from PyPI:
+#   pip install realdata/external/SCICoNE/pyscicone/
+# Its own requirements are numpy, scipy, pandas, matplotlib, seaborn, h5py, graphviz
+# (all pinned above), plus PhenoGraph and pybiomart, which are NOT pinned yet.
+# `import scicone` imports PhenoGraph at module top, so it is required. Pin both here
+# once installed on Euler, and check they build against numpy 2.2.6 there.

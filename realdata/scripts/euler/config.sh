@@ -32,7 +32,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SECEDO_BUILD="${REPO_ROOT}/realdata/external/secedo/build"
 PILEUP_BIN="${SECEDO_BUILD}/pileup"
 SECEDO_BIN="${SECEDO_BUILD}/secedo"
-SCICONE_BIN="${SCICONE_BIN:-${REPO_ROOT}/realdata/external/SCICoNE/build/scicone}"
+# SCICoNE build directory: holds the scicone-* binaries (breakpoint_detection, inference,
+# ...) that the pyscicone wrapper resolves by name; stage 09 passes it to scicone.SCICoNE.
+SCICONE_BUILD_DIR="${SCICONE_BUILD_DIR:-${REPO_ROOT}/realdata/external/SCICoNE/build}"
 EULER_SCRIPTS="${REPO_ROOT}/realdata/scripts/euler"
 
 # --- 10x download URLs (slice D only -- do not loop over A/B/C/E) ---
@@ -41,11 +43,11 @@ BAI_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/br
 SUMMARY_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_per_cell_summary_metrics.csv"
 
 # --- CellRanger DNA's own per-cell CNV output, stage 09's (build_cna_tree.py)
-# input: the cells x bins raw-counts matrix for SCICoNE, already binned and
-# GC/mappability-corrected by 10x, so this stage does not reimplement that
-# correction. Confirmed hosted alongside the BAM (HTTP 200: cnv_data.h5
-# ~2.5 GB, node_cnv_calls.bed ~32 MB -- CellRanger DNA's own CNV segment
-# calls, kept for cross-check only, not consumed by build_cna_tree.py). ---
+# input: read by pyscicone's read_10x (GC-corrected counts, unmappable bins,
+# chromosome stops, outlier-cell filtering), so this stage does not reimplement any of
+# that. Confirmed hosted alongside the BAM (HTTP 200: cnv_data.h5 ~2.5 GB,
+# node_cnv_calls.bed ~32 MB -- CellRanger DNA's own CNV segment calls, kept for
+# cross-check only, not consumed by build_cna_tree.py). ---
 CNV_H5_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_cnv_data.h5"
 NODE_CNV_CALLS_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_node_cnv_calls.bed"
 CNV_H5="${RAW_DIR}/breast_tissue_D_2k_cnv_data.h5"
@@ -90,6 +92,11 @@ PRESENCE_MIN_ALT_READS="${PRESENCE_MIN_ALT_READS:-2}"
 # cluster from the tumour task list; stage 06/06b call it as Mutect2's -normal. Cluster 4
 # is slice D's matched pseudo-normal, identified from stage 04/05's clustering output. ---
 NORMAL_CLUSTER_ID="${NORMAL_CLUSTER_ID:-4}"
+
+# --- stage 09 (CNA tree): patient sex sets SCICoNE's neutral copy number for chrX/chrY
+# and so the tree root. Slice D is FEMALE; build_cna_tree.py requires --sex explicitly and
+# has no default, so this is the one place it is recorded. ---
+PATIENT_SEX="${PATIENT_SEX:-female}"
 
 mkdir -p "${REF_DIR}" "${RAW_DIR}" "${PREPROC_DIR}" "${CELL_BAMS_DIR}" \
     "${CELL_BAMS_SPLIT_DIR}" "${PILEUP_DIR}" "${CLUSTERING_DIR}" "${CLUSTER_BAMS_DIR}" \
