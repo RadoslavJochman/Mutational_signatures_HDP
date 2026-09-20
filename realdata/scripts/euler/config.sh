@@ -38,9 +38,9 @@ SCICONE_BUILD_DIR="${SCICONE_BUILD_DIR:-${REPO_ROOT}/realdata/external/SCICoNE/b
 EULER_SCRIPTS="${REPO_ROOT}/realdata/scripts/euler"
 
 # --- 10x download URLs (slice D only -- do not loop over A/B/C/E) ---
-BAM_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_possorted_bam.bam"
-BAI_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_possorted_bam.bam.bai"
-SUMMARY_URL="https://cf.10xgenomics.com/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_per_cell_summary_metrics.csv"
+BAM_URL="https://s3-us-west-2.amazonaws.com/10x.files/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_possorted_bam.bam"
+BAI_URL="https://s3-us-west-2.amazonaws.com/10x.files/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_possorted_bam.bam.bai"
+SUMMARY_URL="https://s3-us-west-2.amazonaws.com/10x.files/samples/cell-dna/1.1.0/breast_tissue_D_2k/breast_tissue_D_2k_per_cell_summary_metrics.csv"
 
 # --- CellRanger DNA's own per-cell CNV output, stage 09's (build_cna_tree.py)
 # input: read by pyscicone's read_10x (GC-corrected counts, unmappable bins,
