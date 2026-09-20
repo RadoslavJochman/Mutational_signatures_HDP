@@ -376,7 +376,7 @@ same as stage 8.
     per filtered cell.
 
 Flow: `sci.read_10x` ingests `cnv_data.h5`; breakpoints are detected on a random subsample
-of cells (`--bp-max-cells`, default 200, window 1% of the bin count); `learn_tree` runs
+of cells (`--bp-max-cells`, default 200, window 100 bins as in the notebook); `learn_tree` runs
 on all filtered cells with `cluster=True, full=False` (`--n-reps` 10,
 `--copy-number-limit` 4, `--cluster-tree-n-iters` 40000, the pyscicone notebook's values).
 Topology comes from `tree.node_dict[...]['parent_id']` and cell assignments from
@@ -422,7 +422,7 @@ Both trees are independent `TreeHDP` inputs for comparison, not merged into one 
   Euler `.venv`, confirm `import scicone` works headless on a compute node, and pin
   PhenoGraph and pybiomart in `requirements.txt` (they are listed there unpinned; check
   they build against numpy 2.2.6). Then read the three confirmations above in
-  `cna_tree_diagnostics.txt`, and check the 1%-of-bins breakpoint window and the
+  `cna_tree_diagnostics.txt`, and check the breakpoint region count (100-bin window) and the
   24h/10-CPU/6G budget (both unmeasured) against the first run.
 - **Pre-flight, on the first real stage-06 task**: run `samtools view -H` on a couple of
   cluster BAMs and confirm two things before trusting the retagging step or the calls it

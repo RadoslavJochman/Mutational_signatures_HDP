@@ -27,8 +27,8 @@ Flow (per-cell mode, the primary path)
        removal, chromosome stops and CellRanger's outlier-cell filtering.
     2. ``sci.detect_breakpoints`` on a random subsample of cells
        (``--bp-max-cells``) with the chromosome stops as fixed breakpoints and
-       a window of 1% of the bin count unless ``--bp-window-size`` says
-       otherwise. The tree is then learnt on ALL filtered cells.
+       a window of ``--bp-window-size`` bins (default 100, as in the
+       notebook). The tree is then learnt on ALL filtered cells.
     3. ``sci.learn_tree(cluster=True, full=False)``: SCICoNE clusters the
        cells itself (PhenoGraph) and searches a cluster-level tree.
     4. Topology from ``tree.node_dict[node]['parent_id']`` (the wrapper's
@@ -89,9 +89,9 @@ Runtime. Breakpoint detection over all ~2000 cells at a default window is
 impractical, so it sees ``--bp-max-cells`` cells (default 200, as in
 pyscicone's 10x notebook). ``learn_tree`` uses ``--n-reps`` parallel workers
 (default 10, so ask for that many CPUs), ``--copy-number-limit`` (default 4)
-and ``--cluster-tree-n-iters`` (default 40000), the notebook's values. The
-1%-of-bins window is this script's choice (the notebook used 100 bins), so
-check ``segmented_region_sizes`` in the diagnostics on a first run. The
+and ``--cluster-tree-n-iters`` (default 40000), the notebook's values, as is
+the 100-bin window. The window is fixed rather than scaled with the bin count,
+so if the diagnostics' region count looks off on a first run, adjust it. The
 region-condensing step is done here with ``np.add.reduceat``, equivalent to
 the wrapper's pure-Python loop but fast at this size.
 
@@ -626,9 +626,7 @@ def main() -> None:
     )
     p.add_argument("--pseudobulk-fallback", action="store_true")
     p.add_argument("--bp-max-cells", type=int, default=200)
-    p.add_argument(
-        "--bp-window-size", type=int, default=None, help="default: 1%% of the bins"
-    )
+    p.add_argument("--bp-window-size", type=int, default=100)
     p.add_argument("--bp-threshold", type=float, default=3.0)
     p.add_argument("--n-reps", type=int, default=10)
     p.add_argument("--copy-number-limit", type=int, default=4)
@@ -658,7 +656,7 @@ def main() -> None:
     depth = sex_chromosome_depth(counts, stops)
 
     mode = "pseudobulk" if args.pseudobulk_fallback else "per_cell"
-    window = args.bp_window_size or max(1, int(0.01 * n_bins))
+    window = args.bp_window_size
     subset = subsample_rows(n_cells, args.bp_max_cells, args.seed)
     opts = {
         "n_reps": args.n_reps,
