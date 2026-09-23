@@ -35,7 +35,7 @@
 # wastes allocated task time spinning, and still needs a timeout to fail loudly, which a
 # real SLURM dependency already gives for free):
 #
-#   sbatch --parsable 06b_forcecall.sbatch union              # 1 task: builds all 24 chromosomes' union_sites_<chrom>.vcf
+#   sbatch --parsable 06b_forcecall.sbatch union              # 1 task: builds and indexes all 24 chromosomes' union_sites_<chrom>.vcf
 #   j=<the job id printed above>
 #   sbatch --dependency=afterok:${j} --array=0-N 06b_forcecall.sbatch forcecall
 #
@@ -89,6 +89,7 @@ union)
     # separate "discovery" stage; stage 06 is a single pass again.
     for chrom in {1..22} X Y; do
         union_vcf="${MUTECT_DIR}/union_sites_${chrom}.vcf"
+        union_idx="${union_vcf}.idx"
         {
             echo "##fileformat=VCFv4.2"
             printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'
@@ -102,6 +103,30 @@ union)
             done | sort -k1,1 -k2,2n -k4,4 -k5,5 -u
         } > "${union_vcf}"
         echo "chrom ${chrom}: $(grep -vc '^#' "${union_vcf}") union sites -> ${union_vcf}"
+
+        # Mutect2's --alleles does a random-access query by interval, which needs a
+        # coordinate-sorted, indexed feature file -- confirmed on a real run: without
+        # this, force-call tasks fail at engine init ("must support random access to
+        # enable queries by interval"). The sort above is already numeric on POS
+        # (-k2,2n), not lexical, but this is the silent-corruption class of bug, so
+        # verify rather than assume: fail loudly, naming the file, if any POS goes
+        # backwards before trusting an index to it.
+        rm -f "${union_idx}"
+        awk -F'\t' -v f="${union_vcf}" '
+            !/^#/ {
+                if (prev != "" && $2 + 0 < prev + 0) {
+                    print "ERROR: " f " is not coordinate-sorted: POS " $2 \
+                        " follows " prev > "/dev/stderr"
+                    exit 1
+                }
+                prev = $2
+            }
+        ' "${union_vcf}"
+        gatk --java-options "-Xmx4g" IndexFeatureFile -I "${union_vcf}"
+        if [ ! -f "${union_idx}" ]; then
+            echo "ERROR: IndexFeatureFile did not produce ${union_idx}." >&2
+            exit 1
+        fi
     done
     ;;
 
@@ -121,9 +146,11 @@ forcecall)
     # chrom) VCFs already there, since nothing else currently needs a dedicated namespace
     # for them.
     union_vcf="${MUTECT_DIR}/union_sites_${chrom}.vcf"
-    if [ ! -f "${union_vcf}" ]; then
-        echo "ERROR: ${union_vcf} not found -- run and wait for" \
-             "'sbatch 06b_forcecall.sbatch union' before the force-call array." >&2
+    union_idx="${union_vcf}.idx"
+    if [ ! -f "${union_vcf}" ] || [ ! -f "${union_idx}" ]; then
+        echo "ERROR: ${union_vcf} and/or ${union_idx} not found -- run and wait for" \
+             "'sbatch 06b_forcecall.sbatch union' before the force-call array (it" \
+             "writes both the union VCF and its GATK index)." >&2
         exit 1
     fi
 
@@ -188,8 +215,9 @@ forcecall)
 
 *)
     echo "Usage: sbatch 06b_forcecall.sbatch {union|forcecall}" >&2
-    echo "  union:     one task, builds all 24 chromosomes' union_sites_<chrom>.vcf" \
-         "from pass 1's clone*_*.vcf files. Run and wait for this first." >&2
+    echo "  union:     one task, builds and indexes all 24 chromosomes'" \
+         "union_sites_<chrom>.vcf from pass 1's clone*_*.vcf files. Run and wait for" \
+         "this first." >&2
     echo "  forcecall: array task (one per tasks.tsv line), force-calls one" \
          "(cluster, chromosome) pair at that chromosome's union sites." >&2
     exit 1
