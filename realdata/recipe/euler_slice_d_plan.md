@@ -139,7 +139,14 @@ Reverted:
   pass is **kept**, repointed at the reverted tumour-vs-pseudo-normal output: the mutual-
   consistency problem it solves (every cluster genotyped at the same candidate sites, not
   independently) is orthogonal to which germline-subtraction design pass 1 uses, and it
-  matters more, not less, for a VAF-based tool like LICHeE (below).
+  matters more, not less, for a VAF-based tool like LICHeE (below). The union phase
+  coordinate-sorts each chromosome's union VCF (numeric on POS, not lexical -- a lexical
+  sort would put site 100 before 1000 before 2) and indexes it with GATK's
+  `IndexFeatureFile`, asserting the sort held before indexing: Mutect2's `--alleles`
+  force-calling does a random-access query by interval, which needs a sorted, indexed
+  feature file, and a real run failed at engine init without one ("must support random
+  access to enable queries by interval"). The force-call array now also refuses to start
+  against a union file with no index.
 - **SNV tree method.** SCITE and the mutation-set containment cross-check are retired as
   tree sources -- SCITE is single-cell-designed, mismatched to SECEDO's pseudobulk
   clusters; containment assumes a perfect phylogeny real calls do not satisfy. Stage 8 is
