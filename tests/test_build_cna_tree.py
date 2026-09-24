@@ -88,6 +88,17 @@ def test_barcode_from_bam_name():
     assert ct.barcode_from_bam_name("already_no_suffix") == "already_no_suffix"
 
 
+def test_barcode_from_bam_name_strips_the_stage_01_cb_prefix():
+    # split_by_CBtag.py (stage 01) names per-cell BAMs CB_<barcode>.bam, so stage
+    # 03's pileup .map file carries that prefix; cnv_data.h5's own barcodes never
+    # do. All four forms must resolve to the same bare barcode, -1 suffix intact.
+    expected = "AAACCTGAGTGCTGCC-1"
+    assert ct.barcode_from_bam_name("CB_AAACCTGAGTGCTGCC-1.bam") == expected
+    assert ct.barcode_from_bam_name("CB_AAACCTGAGTGCTGCC-1") == expected
+    assert ct.barcode_from_bam_name("AAACCTGAGTGCTGCC-1.bam") == expected
+    assert ct.barcode_from_bam_name("AAACCTGAGTGCTGCC-1") == expected
+
+
 def test_build_barcode_to_cluster(tmp_path):
     map_file = tmp_path / "chromosome_1.map"
     map_file.write_text("AAA-1.bam\t0\nBBB-1.bam\t1\nCCC-1.bam\t2\n")
@@ -97,6 +108,21 @@ def test_build_barcode_to_cluster(tmp_path):
     mapping = ct.build_barcode_to_cluster(map_file, clustering_file)
     assert mapping == {"BBB-1": "1", "CCC-1": "1"}
     assert "AAA-1" not in mapping  # cluster 0 excluded
+
+
+def test_build_barcode_to_cluster_strips_the_cb_prefix_to_join_h5_barcodes(tmp_path):
+    # The .map file's names carry stage 01's CB_ prefix; cnv_data.h5's barcodes
+    # (bare, as filtered_barcodes returns them) do not. The join must match anyway.
+    map_file = tmp_path / "chromosome_1.map"
+    map_file.write_text("CB_AAA-1.bam\t0\nCB_BBB-1.bam\t1\nCB_CCC-1.bam\t2\n")
+    clustering_file = tmp_path / "clustering"
+    clustering_file.write_text("0,1,1\n")
+
+    mapping = ct.build_barcode_to_cluster(map_file, clustering_file)
+    assert mapping == {"BBB-1": "1", "CCC-1": "1"}
+    # The join check_match_rate performs against cnv_data.h5's own bare barcodes.
+    h5_barcodes = ["AAA-1", "BBB-1", "CCC-1"]
+    assert ct.check_match_rate(h5_barcodes, mapping, min_fraction=0.5) == 2
 
 
 def test_build_barcode_to_cluster_raises_on_length_mismatch(tmp_path):

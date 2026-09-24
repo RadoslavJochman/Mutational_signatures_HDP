@@ -175,11 +175,21 @@ def filtered_barcodes(cnv_h5: Path, n_filtered: int) -> List[str]:
     return kept
 
 
+_CB_PREFIX = "CB_"
+
+
 def barcode_from_bam_name(name: str) -> str:
-    """Strip a trailing ``.bam`` extension from a per-cell BAM name to
-    recover its 10x barcode, matching build_cluster_bams.py's own per-cell
-    BAM naming."""
-    return name[:-4] if name.endswith(".bam") else name
+    """Recover the bare 10x barcode (with its ``-1`` suffix intact) from a
+    per-cell BAM name: strip a trailing ``.bam``, then a single leading
+    ``CB_`` if present. Stage 01's ``split_by_CBtag.py`` names per-cell BAMs
+    ``CB_<barcode>.bam``, so stage 03's pileup ``.map`` file carries that
+    prefix; ``cnv_data.h5``'s own barcodes never do.
+    """
+    if name.endswith(".bam"):
+        name = name[:-4]
+    if name.startswith(_CB_PREFIX):
+        name = name[len(_CB_PREFIX) :]
+    return name
 
 
 def build_barcode_to_cluster(map_file: Path, clustering_file: Path) -> Dict[str, str]:
