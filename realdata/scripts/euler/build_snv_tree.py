@@ -29,7 +29,8 @@ Contract (from `src/models/hdp_inference.py`'s `_BaseTreeHDP`, do not "fix" thes
 
 Calling design: tumour-vs-pseudo-normal (reverted from Attempt 2's tumour-only
 + gnomAD design, which made 85% of SNVs cluster-private and could not support
-a tree). One SECEDO cluster (``NORMAL_CLUSTER_ID``, config.sh) is Mutect2's
+a tree). One SECEDO cluster (``NORMAL_CLUSTER_ID``, config.sh, asserted absent
+from the discovered cluster set by ``--normal-cluster-id``) is Mutect2's
 -normal and never called as a tumour cluster itself -- it has no VCF, is
 absent from ``spectra.csv``, and is not a column in the presence matrix.
 Because independently-assembled clusters can each miss a variant another
@@ -37,8 +38,31 @@ cluster's own assembly supports, stage 06b unions every tumour cluster's
 pass-1 PASS SNP sites per chromosome and force-calls every cluster at that
 union, so presence (and VAF) at every site comes from the same read-support
 test everywhere. This script reads that force-called output
-(``*.forced.vcf``), not stage 06's pass-1 VCFs directly. A site counts as
-PRESENT in a cluster if its force-called record has VAF >=
+(``*.forced.vcf``), not stage 06's pass-1 VCFs directly -- with two
+qualifications confirmed on a real run:
+
+    Sample selection by name. The forced VCFs are tumour-vs-normal Mutect2
+    output, so each has TWO sample columns (the tumour ``clone<id>`` and the
+    pseudo-normal), in GATK's sorted-sample-name order -- not tumour-first.
+    ``parse_forced_vcf_calls`` selects the tumour's column BY NAME from the
+    ``#CHROM`` header, never by position: reading a fixed column silently
+    reads the pseudo-normal's genotype for any cluster ID sorting after
+    ``NORMAL_CLUSTER_ID``.
+
+    Union restriction. Force-calling adds the union alleles to Mutect2's
+    interval, but Mutect2 still emits its own discovery calls on top, and the
+    forced VCF keeps non-PASS records -- so a forced VCF's own records are not
+    already restricted to the union. Presence is decided only at union sites,
+    the whole purpose of the force-call design, so this script rebuilds that
+    union itself from pass-1's PASS VCFs (already in ``--vcf-dir``, exactly as
+    stage 06b builds its own union, so this does not depend on stage 06b's
+    ``union_sites_<chrom>.vcf`` under scratch) and ignores any forced record
+    outside it (``restrict_calls_to_union``), recording how many were dropped
+    per cluster in ``snv_tree_diagnostics.txt``. ``assert_presence_within_union``
+    then checks no cluster's present count exceeds the union size, as a sign
+    the restriction actually took.
+
+A site counts as PRESENT in a cluster if its force-called record has VAF >=
 ``--presence-min-vaf`` and ALT read depth >= ``--presence-min-alt-reads``
 (defaults from config.sh's PRESENCE_MIN_VAF/PRESENCE_MIN_ALT_READS); ABSENT
 otherwise.
@@ -167,6 +191,7 @@ SNVKey = Tuple[str, int, str, str]  # chrom, 1-based pos, ref, alt
 _FORCED_VCF_NAME_RE = re.compile(
     r"^clone(?P<cluster>[^_]+)_(?P<chrom>.+)\.forced\.vcf$"
 )
+_PASS1_VCF_NAME_RE = re.compile(r"^clone(?P<cluster>[^_]+)_(?P<chrom>[^.]+)\.vcf$")
 
 
 # --------------------------------------------------------------------------- #
@@ -235,15 +260,33 @@ def parse_format_values(format_str: str, sample_str: str) -> Dict[str, str]:
     return dict(zip(format_str.split(":"), sample_str.split(":")))
 
 
-def parse_forced_vcf_calls(vcf_path: Path) -> Dict[SNVKey, Tuple[float, int]]:
-    """Parse one force-called, single-sample VCF (stage 06b's pass 2) into
-    ``{snv_key: (vaf, alt_reads)}`` for every single-base-substitution ALT
-    allele at every record.
+def parse_forced_vcf_calls(
+    vcf_path: Path, cluster_id: str
+) -> Dict[SNVKey, Tuple[float, int]]:
+    """Parse one force-called VCF (stage 06b's pass 2) into ``{snv_key: (vaf,
+    alt_reads)}`` for every single-base-substitution ALT allele at every
+    record.
+
+    The forced VCFs come from tumour-vs-normal Mutect2 (stage 06's ``-normal``
+    design) and so carry TWO sample columns, tumour ``clone<cluster_id>`` and
+    the pseudo-normal, in whatever order GATK wrote them (sorted sample name,
+    which puts a cluster ID below the normal's ahead of it and one above
+    behind it). The tumour column is therefore selected BY NAME from the
+    ``#CHROM`` header, never by position: reading a fixed column silently
+    reads the pseudo-normal's genotype for any cluster whose ID sorts after
+    ``NORMAL_CLUSTER_ID`` (confirmed on a real run -- clone7/8/9 came back
+    with implausibly low presence, clone3/10 implausibly high, because 3 and
+    10 sort ahead of the normal's column and 7/8/9 sort after it). Raises
+    ValueError, naming the file and the header's sample columns, if
+    ``clone<cluster_id>`` is not among them.
 
     Every record, PASS or not: pass 2 force-calls every cluster at every
     union site regardless of whether that cluster independently supports it,
     and presence is decided in Python directly off VAF/ALT-read depth (see
-    ``resolve_presence_calls``), not off the FILTER column.
+    ``resolve_presence_calls``), not off the FILTER column. Mutect2 still
+    emits its own discovery calls alongside the forced ones, so this alone
+    is not enough to restrict to the union of candidate sites -- see
+    ``restrict_calls_to_union``, applied by the caller.
 
     SUB-DECISION: AF/AD extraction assumes GATK4 Mutect2's own FORMAT layout
     -- AD is ``ref_depth,alt_depth_1[,alt_depth_2...]`` (one more entry than
@@ -255,16 +298,29 @@ def parse_forced_vcf_calls(vcf_path: Path) -> Dict[SNVKey, Tuple[float, int]]:
     site with no supporting reads at all is an expected "absent here"
     outcome, not a malformed file.
     """
+    sample_name = f"clone{cluster_id}"
     calls: Dict[SNVKey, Tuple[float, int]] = {}
+    sample_col: Optional[int] = None
     with open(vcf_path) as fh:
         for line in fh:
+            if line.startswith("#CHROM"):
+                samples = line.rstrip("\n").split("\t")[9:]
+                if sample_name not in samples:
+                    raise ValueError(
+                        f"{vcf_path} has no sample column {sample_name!r}; "
+                        f"samples found: {samples}"
+                    )
+                sample_col = 9 + samples.index(sample_name)
+                continue
             if line.startswith("#"):
                 continue
+            if sample_col is None:
+                raise ValueError(f"{vcf_path} has records before a #CHROM header")
             fields = line.rstrip("\n").split("\t")
-            if len(fields) < 10:
+            if len(fields) <= sample_col:
                 continue
             chrom, pos, _id, ref, alt_field = fields[:5]
-            format_str, sample_str = fields[8], fields[9]
+            format_str, sample_str = fields[8], fields[sample_col]
             ref = ref.upper()
             if len(ref) != 1 or ref not in "ACGT":
                 continue
@@ -312,6 +368,101 @@ def discover_forced_cluster_vcfs(vcf_dir: Path) -> Dict[str, List[Path]]:
             continue
         out[m.group("cluster")].append(f)
     return dict(out)
+
+
+def discover_pass1_cluster_vcfs(vcf_dir: Path) -> Dict[str, List[Path]]:
+    """Group stage 06's plain ``clone<cluster>_<chrom>.vcf`` files (PASS,
+    SNP-only pass-1 output) by cluster, excluding stage 06b's
+    ``*.forced.vcf`` (``_PASS1_VCF_NAME_RE``'s chromosome group excludes
+    dots, so it cannot match a ``.forced.vcf`` name). Read only for their
+    site keys -- see ``build_union_sites`` -- and to report each cluster's
+    own pass-1 PASS count in the diagnostics.
+    """
+    out: Dict[str, List[Path]] = defaultdict(list)
+    for f in sorted(vcf_dir.glob("clone*_*.vcf")):
+        if f.name.endswith(".forced.vcf"):
+            continue
+        m = _PASS1_VCF_NAME_RE.match(f.name)
+        if not m:
+            continue
+        out[m.group("cluster")].append(f)
+    return dict(out)
+
+
+def parse_vcf_site_keys(vcf_path: Path) -> Set[SNVKey]:
+    """Every single-base-substitution ``(chrom, pos, ref, alt)`` key in a
+    VCF, ignoring genotype columns entirely. Used to reconstruct stage 06b's
+    union of candidate sites from pass-1's own PASS VCFs (see
+    ``build_union_sites``), matching the site key stage 06b's own union
+    build uses (``CHROM``, ``POS``, ``REF``, one ``ALT`` allele).
+    """
+    keys: Set[SNVKey] = set()
+    with open(vcf_path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 5:
+                continue
+            chrom, pos, _id, ref, alt_field = fields[:5]
+            ref = ref.upper()
+            if len(ref) != 1 or ref not in "ACGT":
+                continue
+            for alt in alt_field.split(","):
+                alt = alt.upper()
+                if len(alt) != 1 or alt not in "ACGT":
+                    continue
+                keys.add((chrom, int(pos), ref, alt))
+    return keys
+
+
+def build_union_sites(pass1_vcfs: Dict[str, List[Path]]) -> Set[SNVKey]:
+    """Reconstruct stage 06b's per-chromosome union of pass-1 PASS SNP sites
+    directly from the pass-1 VCFs already in ``--vcf-dir``, rather than
+    depending on stage 06b's own ``union_sites_<chrom>.vcf`` under scratch
+    (``MUTECT_DIR``, which stage 07 does not copy out). Raises ValueError if
+    ``pass1_vcfs`` is empty.
+    """
+    if not pass1_vcfs:
+        raise ValueError(
+            "no pass-1 clone*_*.vcf files to rebuild the union stage 06b "
+            "force-called against"
+        )
+    union: Set[SNVKey] = set()
+    for files in pass1_vcfs.values():
+        for f in files:
+            union |= parse_vcf_site_keys(f)
+    return union
+
+
+def restrict_calls_to_union(
+    calls: Dict[SNVKey, Tuple[float, int]], union_sites: Set[SNVKey]
+) -> Tuple[Dict[SNVKey, Tuple[float, int]], int]:
+    """Keep only the calls whose site key is in ``union_sites``. Force-calling
+    adds the union alleles to Mutect2's own interval, but Mutect2 still emits
+    its own discovery calls on top, and the forced VCF keeps non-PASS
+    records -- presence must be decided only at union sites, which is the
+    whole purpose of the force-call design. Returns ``(kept, n_dropped)``.
+    """
+    kept = {k: v for k, v in calls.items() if k in union_sites}
+    return kept, len(calls) - len(kept)
+
+
+def assert_presence_within_union(
+    cluster_to_snvs: Dict[str, Set[SNVKey]], union_sites: Set[SNVKey]
+) -> None:
+    """Sanity guard: no cluster's present-SNV count can exceed the union
+    size, since presence is resolved only from calls already restricted to
+    it. Raises ValueError, naming the cluster and both counts, if it ever
+    does -- the sign that the union restriction was not actually applied.
+    """
+    for cluster, snvs in cluster_to_snvs.items():
+        if len(snvs) > len(union_sites):
+            raise ValueError(
+                f"cluster {cluster} has {len(snvs)} present SNVs, more than "
+                f"the union's {len(union_sites)} sites -- presence must "
+                "never exceed the union"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -1276,11 +1427,18 @@ def write_diagnostics(
     camin_sokal_stats: Optional[Tuple[int, int]],
     primary_tree: nx.DiGraph,
     lichee_result: Optional[LicheeResult] = None,
+    union_size: Optional[int] = None,
+    cluster_union_stats: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> None:
     """LICHeE is primary when it yields a resolvable tree; Camin-Sokal
     parsimony is the automatic fallback otherwise -- both are real tree
     sources, not a primary/debug-only-cross-check split. Numbers only, plus
     the one plain-language finding line a degenerate result calls for.
+
+    ``cluster_union_stats`` is ``{cluster: {"genotyped", "present",
+    "pass1_pass", "dropped_outside_union"}}`` -- see ``main`` -- reported so a
+    force-called record outside the union (Mutect2's own discovery calls, or
+    a non-PASS record) is visible as a real number, not silently dropped.
     """
     lines = [
         "# Stage 08 (SNV tree) diagnostics\n\n",
@@ -1314,6 +1472,27 @@ def write_diagnostics(
     lines.append(f"\nThree-gamete (perfect-phylogeny) violations: {n_violations}\n")
     total_skipped = sum(skip_counts.values())
     lines.append(f"SNVs skipped in binning: {total_skipped} {dict(skip_counts)}\n")
+
+    if union_size is not None and cluster_union_stats:
+        lines.append(f"\n## Union restriction ({union_size} sites in the union)\n")
+        lines.append(
+            "cluster: union sites genotyped, present, dropped outside union, "
+            "pass-1 PASS count\n"
+        )
+        for cluster in sorted(cluster_union_stats, key=_sort_key):
+            s = cluster_union_stats[cluster]
+            lines.append(
+                f"  clone{cluster}: genotyped {s['genotyped']}, "
+                f"present {s['present']}, dropped {s['dropped_outside_union']}, "
+                f"pass-1 PASS {s['pass1_pass']}\n"
+            )
+            if s["dropped_outside_union"] > 0:
+                lines.append(
+                    f"FINDING: clone{cluster} had {s['dropped_outside_union']} "
+                    "forced record(s) outside the union (Mutect2's own discovery "
+                    "calls, or a record the force-call pass never targeted); "
+                    "ignored.\n"
+                )
 
     lines.append("\n## Topology result\n")
     lines.append(f"Emitted tree: {classify_topology(primary_tree)}\n")
@@ -1382,6 +1561,13 @@ def main() -> None:
         help="go straight to Camin-Sokal parsimony without attempting "
         "LICHeE -- for environments without the LICHeE binary",
     )
+    p.add_argument(
+        "--normal-cluster-id",
+        required=True,
+        help="pseudo-normal SECEDO cluster (NORMAL_CLUSTER_ID in config.sh); "
+        "asserted absent from the discovered cluster set -- it must never "
+        "enter the presence matrix or spectra",
+    )
     args = p.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1401,13 +1587,37 @@ def main() -> None:
     cluster_vcfs = discover_forced_cluster_vcfs(args.vcf_dir)
     if not cluster_vcfs:
         sys.exit(f"no clone*_*.forced.vcf files found in {args.vcf_dir}")
+    if args.normal_cluster_id in cluster_vcfs:
+        sys.exit(
+            f"pseudo-normal cluster {args.normal_cluster_id!r} has its own forced "
+            f"VCF in {args.vcf_dir}; it must never enter the presence matrix or "
+            "spectra (check --normal-cluster-id against config.sh's NORMAL_CLUSTER_ID)"
+        )
+
+    # The union stage 06b force-called against: reconstructed from pass-1's own PASS
+    # VCFs, already in --vcf-dir, rather than depending on stage 06b's union file
+    # under scratch. Presence is decided only at these sites -- see
+    # restrict_calls_to_union below.
+    pass1_vcfs = discover_pass1_cluster_vcfs(args.vcf_dir)
+    union_sites = build_union_sites(pass1_vcfs)
+    pass1_counts = {
+        cluster: len(set().union(*(parse_vcf_site_keys(f) for f in files)))
+        for cluster, files in pass1_vcfs.items()
+    }
 
     cluster_to_calls: Dict[str, Dict[SNVKey, Tuple[float, int]]] = {}
+    cluster_union_stats: Dict[str, Dict[str, int]] = {}
     for cluster, files in cluster_vcfs.items():
-        calls: Dict[SNVKey, Tuple[float, int]] = {}
+        raw_calls: Dict[SNVKey, Tuple[float, int]] = {}
         for f in files:
-            calls.update(parse_forced_vcf_calls(f))
+            raw_calls.update(parse_forced_vcf_calls(f, cluster))
+        calls, n_dropped = restrict_calls_to_union(raw_calls, union_sites)
         cluster_to_calls[cluster] = calls
+        cluster_union_stats[cluster] = {
+            "genotyped": len(calls),
+            "dropped_outside_union": n_dropped,
+            "pass1_pass": pass1_counts.get(cluster, 0),
+        }
 
     # Presence, per cluster: VAF and ALT-read thresholds applied directly to the
     # force-called genotype, not the FILTER column. This same call set backs
@@ -1415,6 +1625,9 @@ def main() -> None:
     cluster_to_snvs = resolve_presence_calls(
         cluster_to_calls, args.presence_min_vaf, args.presence_min_alt_reads
     )
+    assert_presence_within_union(cluster_to_snvs, union_sites)
+    for cluster, snvs in cluster_to_snvs.items():
+        cluster_union_stats[cluster]["present"] = len(snvs)
 
     snv_matrix = build_snv_presence_matrix(cluster_to_snvs)
     snv_matrix.to_csv(args.out_dir / "clone_snv_matrix.csv")
@@ -1482,6 +1695,8 @@ def main() -> None:
         camin_sokal_stats,
         primary_tree,
         lichee_result,
+        len(union_sites),
+        cluster_union_stats,
     )
 
     print(
@@ -1489,9 +1704,14 @@ def main() -> None:
         f"{len(cluster_to_snvs)}"
     )
     print(f"Tree method used: {method_used}")
-    print("Somatic SNV count per cluster:")
+    print(f"Union size: {len(union_sites)} sites")
+    print("Per cluster: union sites genotyped, present, pass-1 PASS count:")
     for cid in sorted(cluster_to_snvs, key=_sort_key):
-        print(f"  clone{cid}: {len(cluster_to_snvs[cid])}")
+        s = cluster_union_stats[cid]
+        print(
+            f"  clone{cid}: genotyped {s['genotyped']}, present {s['present']}, "
+            f"pass-1 PASS {s['pass1_pass']}"
+        )
 
 
 if __name__ == "__main__":

@@ -78,6 +78,7 @@ fi
     --cosmic-signatures "${REPO_ROOT}/COSMIC_sig/cosmic_signatures.csv" \
     --out-dir "${TREE_OUT_DIR}" \
     --lichee-home "${LICHEE_HOME}" \
+    --normal-cluster-id "${NORMAL_CLUSTER_ID}" \
     ${SKIP_LICHEE_ARGS[@]+"${SKIP_LICHEE_ARGS[@]}"}
 
 echo "Wrote snv_tree.nwk, spectra.csv, clone_snv_matrix.csv, snv_tree_diagnostics.txt" \

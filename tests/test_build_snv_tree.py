@@ -152,12 +152,26 @@ def test_bin_cluster_spectra_skips_ambiguous_and_ref_mismatch():
 
 _FORCED_VCF_TEXT = """\
 ##fileformat=VCFv4.2
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE
-1\t100\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/1:8,12:0.600:20
-1\t200\t.\tC\tT\t.\tgermline\t.\tGT:AD:AF:DP\t0/0:20,1:0.048:21
-1\t300\t.\tCA\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/1:5,5:0.500:10
-1\t400\t.\tC\tT,G\t.\tPASS\t.\tGT:AD:AF:DP\t0/1/2:10,3,2:0.300,0.200:15
-1\t500\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t./.:.:.:0
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tclone4\tclone7
+1\t100\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/0:20,0:0.0:20\t0/1:8,12:0.600:20
+1\t200\t.\tC\tT\t.\tgermline\t.\tGT:AD:AF:DP\t0/0:19,1:0.05:20\t0/0:20,1:0.048:21
+1\t300\t.\tCA\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/0:9,0:0.0:9\t0/1:5,5:0.500:10
+1\t400\t.\tC\tT,G\t.\tPASS\t.\tGT:AD:AF:DP\t0/0:14,0,0:0.0,0.0:14\t0/1/2:10,3,2:0.300,0.200:15
+1\t500\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/0:10,0:0.0:10\t./.:.:.:0
+"""
+
+# Same records, but the tumour's column comes FIRST in the header (GATK writes sample
+# columns in sorted name order, so which side the tumour lands on depends on the
+# cluster ID and NORMAL_CLUSTER_ID -- clone3/clone10 sort ahead of clone4, clone7/8/9
+# sort after it). Column values are swapped to match the swapped header.
+_FORCED_VCF_TEXT_TUMOUR_FIRST = """\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tclone7\tclone4
+1\t100\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/1:8,12:0.600:20\t0/0:20,0:0.0:20
+1\t200\t.\tC\tT\t.\tgermline\t.\tGT:AD:AF:DP\t0/0:20,1:0.048:21\t0/0:19,1:0.05:20
+1\t300\t.\tCA\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/1:5,5:0.500:10\t0/0:9,0:0.0:9
+1\t400\t.\tC\tT,G\t.\tPASS\t.\tGT:AD:AF:DP\t0/1/2:10,3,2:0.300,0.200:15\t0/0:14,0,0:0.0,0.0:14
+1\t500\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t./.:.:.:0\t0/0:10,0:0.0:10
 """
 
 
@@ -170,10 +184,15 @@ def test_parse_format_values():
     }
 
 
-def test_parse_forced_vcf_calls(tmp_path):
+@pytest.mark.parametrize(
+    "text",
+    [_FORCED_VCF_TEXT, _FORCED_VCF_TEXT_TUMOUR_FIRST],
+    ids=["normal-first", "tumour-first"],
+)
+def test_parse_forced_vcf_calls_reads_the_tumour_column_by_name(tmp_path, text):
     vcf_path = tmp_path / "clone7_1.forced.vcf"
-    vcf_path.write_text(_FORCED_VCF_TEXT)
-    calls = bt.parse_forced_vcf_calls(vcf_path)
+    vcf_path.write_text(text)
+    calls = bt.parse_forced_vcf_calls(vcf_path, "7")
 
     assert calls[("1", 100, "C", "T")] == (pytest.approx(0.6), 12)
     assert calls[("1", 200, "C", "T")] == (
@@ -187,6 +206,24 @@ def test_parse_forced_vcf_calls(tmp_path):
     )  # multi-allelic, split
     assert calls[("1", 400, "C", "G")] == (pytest.approx(0.2), 2)
     assert calls[("1", 500, "C", "T")] == (0.0, 0)  # "." fields -> zero, not raised
+
+
+@pytest.mark.parametrize("text", [_FORCED_VCF_TEXT, _FORCED_VCF_TEXT_TUMOUR_FIRST])
+def test_parse_forced_vcf_calls_reads_the_normal_column_for_its_own_id(tmp_path, text):
+    # Reading cluster "4" (the pseudo-normal's own column) gets its low/zero values,
+    # not the tumour's -- confirms the selection really is by name, not position.
+    vcf_path = tmp_path / "clone4_1.forced.vcf"
+    vcf_path.write_text(text)
+    calls = bt.parse_forced_vcf_calls(vcf_path, "4")
+    assert calls[("1", 100, "C", "T")] == (0.0, 0)
+
+
+def test_parse_forced_vcf_calls_raises_when_the_sample_column_is_absent(tmp_path):
+    vcf_path = tmp_path / "clone9_1.forced.vcf"
+    vcf_path.write_text(_FORCED_VCF_TEXT)
+    with pytest.raises(ValueError, match="clone9") as err:
+        bt.parse_forced_vcf_calls(vcf_path, "9")
+    assert "clone4" in str(err.value) and "clone7" in str(err.value)
 
 
 def test_resolve_presence_calls_thresholds_vaf_and_alt_reads():
@@ -218,6 +255,89 @@ def test_discover_forced_cluster_vcfs(tmp_path):
         "clone1_1.forced.vcf",
         "clone1_2.forced.vcf",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Rebuilding stage 06b's union from pass-1's own PASS VCFs
+# --------------------------------------------------------------------------- #
+
+_PASS1_VCF_TEXT = """\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tclone4\tclone7
+1\t100\t.\tC\tT\t.\tPASS\t.\tGT:AD:AF:DP\t0/0:20,0:0.0:20\t0/1:8,12:0.600:20
+1\t150\t.\tC\tA\t.\tPASS\t.\tGT:AD:AF:DP\t0/0:20,0:0.0:20\t0/1:8,12:0.600:20
+"""
+
+
+def test_discover_pass1_cluster_vcfs_excludes_forced_vcfs(tmp_path):
+    (tmp_path / "clone7_1.vcf").write_text(_PASS1_VCF_TEXT)
+    (tmp_path / "clone7_2.vcf").write_text(_PASS1_VCF_TEXT)
+    (tmp_path / "clone7_1.forced.vcf").write_text(_FORCED_VCF_TEXT)
+    (tmp_path / "clone9_1.vcf").write_text(_PASS1_VCF_TEXT)
+
+    found = bt.discover_pass1_cluster_vcfs(tmp_path)
+    assert set(found) == {"7", "9"}
+    assert sorted(f.name for f in found["7"]) == ["clone7_1.vcf", "clone7_2.vcf"]
+
+
+def test_parse_vcf_site_keys_ignores_genotypes_and_indels(tmp_path):
+    text = _PASS1_VCF_TEXT.replace("1\t150\t.\tC\tA", "1\t150\t.\tCA\tA")
+    vcf_path = tmp_path / "clone7_1.vcf"
+    vcf_path.write_text(text)
+    assert bt.parse_vcf_site_keys(vcf_path) == {("1", 100, "C", "T")}  # indel excluded
+
+
+def test_parse_vcf_site_keys(tmp_path):
+    vcf_path = tmp_path / "clone7_1.vcf"
+    vcf_path.write_text(_PASS1_VCF_TEXT)
+    assert bt.parse_vcf_site_keys(vcf_path) == {
+        ("1", 100, "C", "T"),
+        ("1", 150, "C", "A"),
+    }
+
+
+def test_build_union_sites_unions_across_clusters_and_files(tmp_path):
+    (tmp_path / "clone7_1.vcf").write_text(_PASS1_VCF_TEXT)
+    other = _PASS1_VCF_TEXT.replace("1\t150", "1\t250")
+    (tmp_path / "clone9_1.vcf").write_text(other)
+    pass1_vcfs = bt.discover_pass1_cluster_vcfs(tmp_path)
+
+    union = bt.build_union_sites(pass1_vcfs)
+    assert union == {
+        ("1", 100, "C", "T"),
+        ("1", 150, "C", "A"),
+        ("1", 250, "C", "A"),
+    }
+
+
+def test_build_union_sites_raises_when_empty():
+    with pytest.raises(ValueError, match="no pass-1"):
+        bt.build_union_sites({})
+
+
+def test_restrict_calls_to_union_drops_records_outside_it():
+    calls = {
+        ("1", 100, "C", "T"): (0.6, 12),  # in the union
+        ("1", 999, "C", "A"): (0.9, 20),  # Mutect2's own discovery call, not in it
+    }
+    union_sites = {("1", 100, "C", "T")}
+    kept, n_dropped = bt.restrict_calls_to_union(calls, union_sites)
+    assert kept == {("1", 100, "C", "T"): (0.6, 12)}
+    assert n_dropped == 1
+
+
+def test_assert_presence_within_union_passes_when_within_bounds():
+    bt.assert_presence_within_union(
+        {"7": {("1", 100, "C", "T")}}, {("1", 100, "C", "T"), ("1", 200, "C", "A")}
+    )  # no raise
+
+
+def test_assert_presence_within_union_raises_when_exceeded():
+    with pytest.raises(ValueError, match="cluster 7 has 2 present SNVs"):
+        bt.assert_presence_within_union(
+            {"7": {("1", 100, "C", "T"), ("1", 200, "C", "A")}},
+            {("1", 100, "C", "T")},
+        )
 
 
 def test_build_snv_presence_matrix_and_mutation_sets_roundtrip():
