@@ -84,6 +84,19 @@ Wrapper behaviours worth knowing (read from pyscicone's source):
       fallback calls ``learn_single_tree`` directly.
     - The wrapper changes directory while it runs; the work directory is
       resolved to an absolute path and used as the working directory.
+    - ``detect_breakpoints`` unconditionally calls
+      ``scicone.utils.get_region_gene_map`` afterwards, which queries Ensembl
+      BioMart over the network (confirmed: compute nodes have none, so the
+      job dies with ``ConnectionRefusedError``) and is GRCh38 besides, wrong
+      for our GRCh37 data. There is no parameter to skip it (confirmed
+      against the installed source: ``detect_breakpoints`` takes no such
+      argument). It feeds only ``Tree.set_gene_event_dicts``, a purely
+      additive annotation this script never reads (``node_dict``'s
+      ``parent_id``/``region_event_dict``, ``outputs['cell_node_ids']`` and
+      ``.score`` are untouched by it, confirmed by reading every use of
+      ``region_gene_map`` in the package), so ``detect_bps`` stubs
+      ``scicone.utils.get_region_gene_map`` to a no-op for the duration of
+      the call (``_no_gene_mapping``), rather than routing it anywhere real.
 
 Runtime. Breakpoint detection over all ~2000 cells at a default window is
 impractical, so it sees ``--bp-max-cells`` cells (default 200, as in
@@ -102,6 +115,18 @@ SCICoNE's single-tree search runs over those rows, so each cluster's node is
 read off by row order. It is a real, flagged degradation (coarser than
 cell-level history), never a silent substitution: the diagnostics record which
 mode ran.
+
+Breakpoint detection is the slow step (hours on the full ``cnv_data.h5``,
+confirmed on a real run), so its result is persisted to
+``<out_dir>/scicone_breakpoints.npz`` (``save_breakpoints``) once it succeeds.
+``--reuse-breakpoints`` loads that file instead of recomputing
+(``load_breakpoints``), raising if its saved bin count does not match the
+current filtered counts -- a sign ``cnv_data.h5`` or its filtering changed
+since it was saved, so the saved breakpoints no longer apply.
+``cna_tree_diagnostics.txt`` records whether breakpoints were computed or
+reused, how many were found, and ``--bp-limit`` (pyscicone's own cap on the
+breakpoint count, exposed here rather than left at its default so a run that
+hits it is visible rather than silently truncated).
 """
 
 from __future__ import annotations
@@ -546,16 +571,40 @@ def _working_dir(path: Path) -> Iterator[None]:
         os.chdir(previous)
 
 
-def detect_bps(sci, counts, stops, subset, window_size, threshold):
+@contextlib.contextmanager
+def _no_gene_mapping(scicone_module) -> Iterator[None]:
+    """``detect_breakpoints`` unconditionally calls
+    ``scicone.utils.get_region_gene_map``, which queries Ensembl BioMart over
+    the network -- unreachable from a compute node, and GRCh38 besides, wrong
+    for our GRCh37 data (see module docstring). It feeds only
+    ``Tree.set_gene_event_dicts``, an annotation this script never reads, so
+    it is stubbed to a no-op for the scope of this context manager and
+    restored afterwards, rather than routed anywhere real.
+    """
+    original = scicone_module.utils.get_region_gene_map
+    scicone_module.utils.get_region_gene_map = lambda *args, **kwargs: None
+    try:
+        yield
+    finally:
+        scicone_module.utils.get_region_gene_map = original
+
+
+def detect_bps(
+    sci, scicone_module, counts, stops, subset, window_size, threshold, bp_limit
+):
     """Breakpoints from a cell subsample, with the chromosome stops as fixed
-    breakpoints. Raises ValueError if the wrapper returned none (it ignores a
-    failing binary)."""
-    bps = sci.detect_breakpoints(
-        data=counts[subset],
-        window_size=window_size,
-        threshold=threshold,
-        input_breakpoints=list(stops.values()),
-    )
+    breakpoints, run under ``_no_gene_mapping`` so the unconditional Ensembl
+    query never fires. Raises ValueError if the wrapper returned none (it
+    ignores a failing binary).
+    """
+    with _no_gene_mapping(scicone_module):
+        bps = sci.detect_breakpoints(
+            data=counts[subset],
+            window_size=window_size,
+            threshold=threshold,
+            input_breakpoints=list(stops.values()),
+            bp_limit=bp_limit,
+        )
     for key in ("segmented_regions", "segmented_region_sizes"):
         if key not in bps:
             raise ValueError(
@@ -563,6 +612,54 @@ def detect_bps(sci, counts, stops, subset, window_size, threshold):
                 "The breakpoint binary probably failed; see its output above."
             )
     return bps
+
+
+_BREAKPOINTS_FILE = "scicone_breakpoints.npz"
+
+
+def save_breakpoints(out_dir: Path, bps: Dict[str, np.ndarray], n_bins: int) -> Path:
+    """Persist ``detect_breakpoints``' result to ``out_dir`` (the slow step,
+    hours on the full ``cnv_data.h5``), so a rerun can load it via
+    ``load_breakpoints`` instead of recomputing. ``n_bins`` (the current
+    filtered bin count) is saved alongside so a rerun can tell whether it
+    still applies. Returns the path written.
+    """
+    path = out_dir / _BREAKPOINTS_FILE
+    np.savez(
+        path,
+        segmented_regions=np.asarray(bps["segmented_regions"]),
+        segmented_region_sizes=np.asarray(bps["segmented_region_sizes"]),
+        n_bins=np.asarray(n_bins),
+    )
+    return path
+
+
+def load_breakpoints(out_dir: Path, n_bins: int) -> Dict[str, np.ndarray]:
+    """Load a breakpoint result saved by ``save_breakpoints``. Raises
+    FileNotFoundError, naming the path, if ``--reuse-breakpoints`` was passed
+    but nothing was saved yet, and ValueError if the saved bin count does not
+    match ``n_bins`` -- the filtered counts have changed (a different
+    ``cnv_data.h5``, or different outlier filtering) and the saved
+    breakpoints no longer apply.
+    """
+    path = out_dir / _BREAKPOINTS_FILE
+    if not path.exists():
+        raise FileNotFoundError(
+            f"--reuse-breakpoints was passed but {path} does not exist; run "
+            "once without it first"
+        )
+    saved = np.load(path)
+    saved_n_bins = int(saved["n_bins"])
+    if saved_n_bins != n_bins:
+        raise ValueError(
+            f"{path} was saved for {saved_n_bins} bins, but the current "
+            f"filtered counts have {n_bins} -- cnv_data.h5 or its filtering "
+            "must have changed; rerun without --reuse-breakpoints"
+        )
+    return {
+        "segmented_regions": saved["segmented_regions"],
+        "segmented_region_sizes": saved["segmented_region_sizes"],
+    }
 
 
 def run_per_cell(sci, seg_counts, region_sizes, neutral_states, opts):
@@ -638,6 +735,20 @@ def main() -> None:
     p.add_argument("--bp-max-cells", type=int, default=200)
     p.add_argument("--bp-window-size", type=int, default=100)
     p.add_argument("--bp-threshold", type=float, default=3.0)
+    p.add_argument(
+        "--bp-limit",
+        type=int,
+        default=300,
+        help="pyscicone's own cap on the number of breakpoints detect_breakpoints "
+        "reports (its own default); exposed here so a run that hits it is visible",
+    )
+    p.add_argument(
+        "--reuse-breakpoints",
+        action="store_true",
+        help="load a previously saved breakpoint result from --out-dir instead of "
+        "recomputing (see save_breakpoints/load_breakpoints); raises if none was "
+        "saved or if the bin count no longer matches",
+    )
     p.add_argument("--n-reps", type=int, default=10)
     p.add_argument("--copy-number-limit", type=int, default=4)
     p.add_argument("--cluster-tree-n-iters", type=int, default=40000)
@@ -646,6 +757,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42, help="breakpoint cell subsample")
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    args.out_dir = args.out_dir.resolve()
     work_dir = (args.out_dir / "scicone_tmp").resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -676,7 +788,17 @@ def main() -> None:
     }
 
     with _working_dir(work_dir):
-        bps = detect_bps(sci, counts, stops, subset, window, args.bp_threshold)
+        if args.reuse_breakpoints:
+            bps = load_breakpoints(args.out_dir, n_bins)
+            breakpoints_reused = True
+        else:
+            bps = detect_bps(
+                sci, scicone, counts, stops, subset, window, args.bp_threshold,
+                args.bp_limit,
+            )  # fmt: skip
+            save_breakpoints(args.out_dir, bps, n_bins)
+            breakpoints_reused = False
+        n_breakpoints_found = len(np.asarray(bps["segmented_regions"]).ravel())
         region_sizes = np.asarray(bps["segmented_region_sizes"]).ravel()
         neutral_states = scicone.utils.set_region_neutral_states(
             bps["segmented_regions"], list(stops.values()), chrom_states
@@ -746,6 +868,9 @@ def main() -> None:
         f"chrY {_fmt(depth['Y'])} (female expects X near 1, Y near 0; male, "
         "both near 0.5)\n",
         "\n## Breakpoints and tree search\n",
+        f"Breakpoints: {'reused' if breakpoints_reused else 'computed'} "
+        f"({args.out_dir / _BREAKPOINTS_FILE}); {n_breakpoints_found} found "
+        f"(bp_limit {args.bp_limit})\n",
         f"Breakpoint cells: {len(subset)}/{n_cells}, window {window}, "
         f"threshold {args.bp_threshold}; {len(region_sizes)} regions\n",
         f"n_reps {args.n_reps}, copy_number_limit {args.copy_number_limit}, "
@@ -759,6 +884,12 @@ def main() -> None:
         f"{normal_node} ({normal_where}); folded into {GERMLINE_ROOT_ID}, "
         "not emitted\n",
     ]
+    if n_breakpoints_found >= args.bp_limit:
+        diagnostics.append(
+            f"FINDING: breakpoint detection hit its cap of {args.bp_limit} -- "
+            "there may be more breakpoints than reported; rerun with a higher "
+            "--bp-limit if that matters here.\n"
+        )
     if not normal_at_root:
         diagnostics.append(
             "FINDING: the pseudo-normal cluster did not vote for SCICoNE's root, "

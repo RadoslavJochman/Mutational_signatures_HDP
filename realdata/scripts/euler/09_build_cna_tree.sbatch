@@ -66,8 +66,14 @@ EXTRA_ARGS=()
 [ -n "${N_REPS:-}" ] && EXTRA_ARGS+=(--n-reps "${N_REPS}")
 [ -n "${COPY_NUMBER_LIMIT:-}" ] && EXTRA_ARGS+=(--copy-number-limit "${COPY_NUMBER_LIMIT}")
 [ -n "${CLUSTER_TREE_N_ITERS:-}" ] && EXTRA_ARGS+=(--cluster-tree-n-iters "${CLUSTER_TREE_N_ITERS}")
+[ -n "${BP_LIMIT:-}" ] && EXTRA_ARGS+=(--bp-limit "${BP_LIMIT}")
 if [ "${PSEUDOBULK_FALLBACK:-0}" = "1" ]; then
     EXTRA_ARGS+=(--pseudobulk-fallback)
+fi
+if [ "${REUSE_BREAKPOINTS:-0}" = "1" ]; then
+    # Breakpoint detection ran to completion in a previous attempt and its result is
+    # saved in --out-dir (TREE_OUT_DIR below); skip recomputing it (see build_cna_tree.py).
+    EXTRA_ARGS+=(--reuse-breakpoints)
 fi
 
 "${PY}" "${EULER_SCRIPTS}/build_cna_tree.py" \

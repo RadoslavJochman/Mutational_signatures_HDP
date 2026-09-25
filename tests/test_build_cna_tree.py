@@ -362,14 +362,125 @@ def test_shared_node_groups():
 
 
 # --------------------------------------------------------------------------- #
+# Stubbing detect_breakpoints' unconditional Ensembl BioMart query
+# --------------------------------------------------------------------------- #
+
+
+def test_no_gene_mapping_stubs_and_restores():
+    def real_get_region_gene_map(*args, **kwargs):
+        raise AssertionError("would have queried Ensembl BioMart")
+
+    module = SimpleNamespace(
+        utils=SimpleNamespace(get_region_gene_map=real_get_region_gene_map)
+    )
+    with ct._no_gene_mapping(module):
+        assert module.utils.get_region_gene_map is not real_get_region_gene_map
+        assert module.utils.get_region_gene_map(1, 2, 3, 4) is None  # no raise
+    assert module.utils.get_region_gene_map is real_get_region_gene_map
+
+
+def test_detect_bps_never_lets_get_region_gene_map_reach_the_network():
+    def network_get_region_gene_map(*args, **kwargs):
+        raise AssertionError("get_region_gene_map should have been stubbed")
+
+    module = SimpleNamespace(
+        utils=SimpleNamespace(get_region_gene_map=network_get_region_gene_map)
+    )
+
+    def detect_breakpoints(**kwargs):
+        # Mirrors pyscicone: detect_breakpoints itself calls
+        # utils.get_region_gene_map once it has computed breakpoints.
+        module.utils.get_region_gene_map(0, {}, [], [])
+        return {
+            "segmented_regions": np.array([2, 5]),
+            "segmented_region_sizes": np.array([3, 3]),
+        }
+
+    sci = SimpleNamespace(detect_breakpoints=detect_breakpoints)
+    bps = ct.detect_bps(
+        sci, module, np.ones((3, 4)), {"1": 3}, np.arange(3), 2, 3.0, 300
+    )
+    assert list(bps["segmented_regions"]) == [2, 5]  # no raise -- the stub was active
+    assert module.utils.get_region_gene_map is network_get_region_gene_map  # restored
+
+
+# --------------------------------------------------------------------------- #
 # Wrapper calls (mocked)
 # --------------------------------------------------------------------------- #
+
+
+def _fake_module_no_network():
+    return SimpleNamespace(
+        utils=SimpleNamespace(get_region_gene_map=lambda *a, **k: None)
+    )
 
 
 def test_detect_bps_raises_when_the_binary_produced_nothing():
     sci = SimpleNamespace(detect_breakpoints=lambda **kw: {"cmd_output": None})
     with pytest.raises(ValueError, match="segmented_regions"):
-        ct.detect_bps(sci, np.ones((3, 4)), {"1": 3}, np.arange(3), 2, 3.0)
+        ct.detect_bps(
+            sci, _fake_module_no_network(), np.ones((3, 4)), {"1": 3}, np.arange(3),
+            2, 3.0, 300,
+        )  # fmt: skip
+
+
+def test_detect_bps_passes_bp_limit_through():
+    seen = {}
+
+    def detect_breakpoints(**kwargs):
+        seen.update(kwargs)
+        return {
+            "segmented_regions": np.array([1]),
+            "segmented_region_sizes": np.array([4]),
+        }
+
+    sci = SimpleNamespace(detect_breakpoints=detect_breakpoints)
+    ct.detect_bps(
+        sci,
+        _fake_module_no_network(),
+        np.ones((3, 4)),
+        {"1": 3},
+        np.arange(3),
+        2,
+        3.0,
+        300,
+    )
+    assert seen["bp_limit"] == 300
+
+
+# --------------------------------------------------------------------------- #
+# Persisting and reusing breakpoint detection's result
+# --------------------------------------------------------------------------- #
+
+
+def test_save_and_load_breakpoints_round_trip(tmp_path):
+    bps = {
+        "segmented_regions": np.array([2, 5, 8]),
+        "segmented_region_sizes": np.array([3, 3, 4]),
+    }
+    path = ct.save_breakpoints(tmp_path, bps, n_bins=10)
+    assert path == tmp_path / ct._BREAKPOINTS_FILE and path.exists()
+
+    loaded = ct.load_breakpoints(tmp_path, n_bins=10)
+    assert list(loaded["segmented_regions"]) == [2, 5, 8]
+    assert list(loaded["segmented_region_sizes"]) == [3, 3, 4]
+
+
+def test_load_breakpoints_raises_when_nothing_saved(tmp_path):
+    with pytest.raises(FileNotFoundError, match="run once without it first"):
+        ct.load_breakpoints(tmp_path, n_bins=10)
+
+
+def test_load_breakpoints_raises_on_bin_count_mismatch(tmp_path):
+    ct.save_breakpoints(
+        tmp_path,
+        {"segmented_regions": np.array([2]), "segmented_region_sizes": np.array([5])},
+        n_bins=10,
+    )
+    with pytest.raises(
+        ValueError, match="saved for 10 bins.*current filtered counts have 12"
+    ):
+        ct.load_breakpoints(tmp_path, n_bins=12)
 
 
 OPTS = {"n_reps": 3, "max_tries": 1, "copy_number_limit": 4, "cluster_tree_n_iters": 9}
@@ -421,6 +532,12 @@ def test_run_pseudobulk_drops_zero_neutral_regions():
 # --------------------------------------------------------------------------- #
 
 
+def _network_get_region_gene_map(*args, **kwargs):
+    raise AssertionError(
+        "get_region_gene_map should have been stubbed by _no_gene_mapping"
+    )
+
+
 class _FakeSCICoNE:
     """Stands in for scicone.SCICoNE: 7 kept cells x 12 bins, 4 regions."""
 
@@ -435,6 +552,11 @@ class _FakeSCICoNE:
         assert Path(path).exists()
 
     def detect_breakpoints(self, **kwargs):
+        # Mirrors pyscicone: detect_breakpoints itself calls
+        # utils.get_region_gene_map once breakpoints are found, unconditionally --
+        # build_cna_tree.py's _no_gene_mapping must have replaced this attribute for
+        # the call to succeed rather than raise.
+        _FAKE_SCICONE_MODULE.utils.get_region_gene_map(0, {}, [], [])
         return {
             "segmented_regions": np.array([2, 5, 8, 11]),
             "segmented_region_sizes": np.array([3, 3, 3, 3]),
@@ -450,13 +572,19 @@ class _FakeSCICoNE:
         )
 
 
-def _fake_scicone_module():
-    utils = SimpleNamespace(
+_FAKE_SCICONE_MODULE = SimpleNamespace(
+    SCICoNE=_FakeSCICoNE,
+    utils=SimpleNamespace(
         set_region_neutral_states=lambda regions, stops, states: np.full(
             len(regions), 2
-        )
-    )
-    return SimpleNamespace(SCICoNE=_FakeSCICoNE, utils=utils)
+        ),
+        get_region_gene_map=_network_get_region_gene_map,
+    ),
+)
+
+
+def _fake_scicone_module():
+    return _FAKE_SCICONE_MODULE
 
 
 def _write_inputs(tmp_path):
@@ -501,6 +629,44 @@ def test_main_end_to_end_folds_the_normal_cluster(tmp_path, monkeypatch):
     rows = (out / "cna_cell_nodes.csv").read_text().splitlines()
     assert rows[0] == "barcode,secedo_cluster,scicone_node"
     assert len(rows) == 1 + 7  # the outlier cell is absent
+
+
+def test_main_saves_breakpoints_and_records_computed_in_diagnostics(
+    tmp_path, monkeypatch
+):
+    out = _run_main(tmp_path, monkeypatch)
+    assert (out / ct._BREAKPOINTS_FILE).exists()
+    diagnostics = (out / "cna_tree_diagnostics.txt").read_text()
+    assert "Breakpoints: computed" in diagnostics
+    assert "4 found (bp_limit 300)" in diagnostics
+
+
+def test_main_reuse_breakpoints_skips_detection(tmp_path, monkeypatch):
+    _run_main(tmp_path, monkeypatch)  # first run: computes and saves
+
+    def detect_breakpoints_should_not_run(**kwargs):
+        raise AssertionError(
+            "detect_breakpoints should not run with --reuse-breakpoints"
+        )
+
+    monkeypatch.setattr(
+        _FakeSCICoNE, "detect_breakpoints", detect_breakpoints_should_not_run
+    )
+    out = _run_main(tmp_path, monkeypatch, extra=["--reuse-breakpoints"])
+    diagnostics = (out / "cna_tree_diagnostics.txt").read_text()
+    assert "Breakpoints: reused" in diagnostics
+    assert (out / "cna_tree.nwk").exists()  # the rest of the pipeline still ran
+
+
+def test_main_reuse_breakpoints_raises_when_none_saved(tmp_path, monkeypatch):
+    with pytest.raises(FileNotFoundError):
+        _run_main(tmp_path, monkeypatch, extra=["--reuse-breakpoints"])
+
+
+def test_main_flags_hitting_the_breakpoint_cap(tmp_path, monkeypatch):
+    out = _run_main(tmp_path, monkeypatch, extra=["--bp-limit", "4"])
+    diagnostics = (out / "cna_tree_diagnostics.txt").read_text()
+    assert "FINDING: breakpoint detection hit its cap of 4" in diagnostics
 
 
 def test_main_requires_sex(tmp_path, monkeypatch):
