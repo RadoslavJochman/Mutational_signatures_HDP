@@ -37,8 +37,13 @@ Flow (per-cell mode, the primary path)
        filtered cells.
     5. Each SECEDO cluster majority-votes its cells onto a SCICoNE node
        (``majority_cluster_nodes``), then the tree is collapsed onto the
-       clusters (``collapse_by_nearest_labelled_ancestor``, shared with
-       build_snv_tree.py) and written as ``cna_tree.nwk``.
+       clusters with ``build_snv_tree.attach_option_a`` -- one labelled leaf
+       per cluster, the same attachment stage 08's LICHeE integration uses,
+       so a SCICoNE node shared by two clusters is resolved the same way a
+       shared LICHeE node is (see that function; a node's own nearest-
+       ancestor walk is not symmetric when two clusters share it, confirmed
+       wrong on a real run -- see git history) -- and written as
+       ``cna_tree.nwk``.
 
 Three things this stage audits rather than assumes; each fails loudly, naming
 what it tried, and is recorded in ``cna_tree_diagnostics.txt``:
@@ -69,8 +74,9 @@ what it tried, and is recorded in ``cna_tree_diagnostics.txt``:
     that was SCICoNE's own root, the expected outcome. A tumour cluster that
     votes for SCICoNE's root has no CNA of its own, so it becomes a direct
     child of the germline root instead of displacing it. Clusters that share a
-    SCICoNE node are reported as a finding, since the CNA tree cannot tell
-    them apart.
+    SCICoNE node become sibling leaves under a hidden group node (see
+    ``attach_option_a``), reported in the diagnostics along with that node's
+    region events, since the CNA tree cannot otherwise tell them apart.
 
 Wrapper behaviours worth knowing (read from pyscicone's source):
     - ``learn_tree`` forwards keyword arguments to every replicate and lets
@@ -137,7 +143,7 @@ import os
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, Hashable, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -145,9 +151,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_cluster_bams import read_clustering, read_map  # noqa: E402
 from build_snv_tree import (  # noqa: E402
     GERMLINE_ROOT_ID,
+    OptionAAttachment,
     _sort_key,
+    attach_option_a,
     classify_topology,
-    collapse_by_nearest_labelled_ancestor,
     digraph_to_newick,
     verify_newick,
 )
@@ -514,32 +521,24 @@ def build_cna_tree(
     parent_of: Dict[str, str],
     tumour_nodes: Dict[str, str],
     root_node: str,
-):
-    """Collapse SCICoNE's tree onto the tumour clusters. A cluster whose
-    majority node is SCICoNE's own root has no CNA of its own: it hangs
-    directly off ``GERMLINE_ROOT_ID`` and is never an ancestor of others
-    (which would displace the root). Returns ``(tree, clusters_at_root)``.
+) -> Tuple[OptionAAttachment, List[str]]:
+    """Collapse SCICoNE's tree onto the tumour clusters with
+    ``attach_option_a`` (one labelled leaf per cluster; a shared SCICoNE node
+    becomes a hidden group node with its clusters as sibling leaves -- see
+    that function). A cluster whose majority node is SCICoNE's own root has
+    no CNA of its own: it hangs directly off ``GERMLINE_ROOT_ID`` as a root
+    item rather than through the tree, and is never an ancestor of others
+    (which would displace the root). Returns ``(attachment,
+    clusters_at_root)``.
     """
     at_root = sorted(
         (c for c, n in tumour_nodes.items() if n == root_node), key=_sort_key
     )
     placed = {c: n for c, n in tumour_nodes.items() if n != root_node}
-    tree = collapse_by_nearest_labelled_ancestor(parent_of, placed, GERMLINE_ROOT_ID)
-    for cid in at_root:
-        tree.add_edge(GERMLINE_ROOT_ID, cid)
-    return tree, at_root
-
-
-def shared_node_groups(node_of_cluster: Dict[str, str]) -> List[List[str]]:
-    """Groups of clusters that voted for the same SCICoNE node."""
-    by_node: Dict[Hashable, List[str]] = defaultdict(list)
-    for cid, node in node_of_cluster.items():
-        by_node[node].append(cid)
-    return [
-        sorted(cids, key=_sort_key)
-        for _, cids in sorted(by_node.items(), key=lambda kv: str(kv[0]))
-        if len(cids) > 1
-    ]
+    attachment = attach_option_a(
+        parent_of, placed, root_node, root_items=at_root, germline_id=GERMLINE_ROOT_ID
+    )
+    return attachment, at_root
 
 
 # --------------------------------------------------------------------------- #
@@ -839,9 +838,12 @@ def main() -> None:
     tumour_nodes, normal_node, normal_at_root = fold_normal_cluster(
         node_of_cluster, normal_id, root_node
     )
-    cna_tree, at_root = build_cna_tree(parent_of, tumour_nodes, root_node)
+    attachment, at_root = build_cna_tree(parent_of, tumour_nodes, root_node)
+    cna_tree = attachment.tree
     newick_str = digraph_to_newick(cna_tree, GERMLINE_ROOT_ID)
-    verify_newick(newick_str, set(tumour_nodes), GERMLINE_ROOT_ID)
+    verify_newick(
+        newick_str, set(tumour_nodes), GERMLINE_ROOT_ID, attachment.hidden_ids
+    )
     (args.out_dir / "cna_tree.nwk").write_text(newick_str + "\n")
 
     if mode == "per_cell":
@@ -854,7 +856,6 @@ def main() -> None:
     def _fmt(x: Optional[float]) -> str:
         return "n/a (no bins after filtering)" if x is None else f"{x:.2f}"
 
-    shared = shared_node_groups(tumour_nodes)
     normal_where = "the root, as expected" if normal_at_root else "NOT the root"
     diagnostics = [
         "# Stage 09 (CNA tree) diagnostics\n\n",
@@ -900,11 +901,21 @@ def main() -> None:
             f"FINDING: tumour cluster(s) {at_root} voted for SCICoNE's root (no "
             f"CNA of their own); placed directly under {GERMLINE_ROOT_ID}.\n"
         )
-    if shared:
+    for cids in attachment.shared:
         diagnostics.append(
-            f"FINDING: cluster group(s) {shared} share one SCICoNE node, so the "
-            "CNA tree cannot tell them apart; their placement among siblings is "
-            "arbitrary.\n"
+            f"FINDING: clusters {','.join(cids)} share one SCICoNE node, so the "
+            "CNA tree cannot tell them apart; attached as siblings under a "
+            "hidden group node.\n"
+        )
+    for group, (direct, below) in sorted(attachment.group_subtends.items()):
+        diagnostics.append(
+            f"Hidden group node {group}: {direct} clusters directly, {below} "
+            "in its subtree.\n"
+        )
+    if attachment.collapsed_nodes:
+        diagnostics.append(
+            f"SCICoNE node(s) with no cluster of their own, collapsed: "
+            f"{','.join(attachment.collapsed_nodes)}\n"
         )
     if unmatched:
         diagnostics.append(
@@ -914,6 +925,15 @@ def main() -> None:
     diagnostics.append(f"\nEmitted tree: {classify_topology(cna_tree)}\n")
     if classify_topology(cna_tree).startswith("linear chain"):
         diagnostics.append("FINDING: the emitted CNA tree is a non-branching chain.\n")
+
+    diagnostics.append("\n## SCICoNE node region events\n")
+    for node in sorted(tree.node_dict, key=_sort_key):
+        info = tree.node_dict[node]
+        diagnostics.append(
+            f"  node {node} (parent {info.get('parent_id')}): "
+            f"{info.get('region_event_dict', {})}\n"
+        )
+
     (args.out_dir / "cna_tree_diagnostics.txt").write_text("".join(diagnostics))
 
     print(

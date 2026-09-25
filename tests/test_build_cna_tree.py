@@ -231,10 +231,10 @@ def test_aggregate_counts_by_cluster_takes_the_mean():
 # --------------------------------------------------------------------------- #
 
 NODE_DICT = {
-    "0": {"parent_id": "NULL"},
-    "1": {"parent_id": "0"},
-    "2": {"parent_id": "1"},
-    "3": {"parent_id": "0"},
+    "0": {"parent_id": "NULL", "region_event_dict": {}},
+    "1": {"parent_id": "0", "region_event_dict": {"12": "1"}},
+    "2": {"parent_id": "1", "region_event_dict": {"12": "1", "45": "-1"}},
+    "3": {"parent_id": "0", "region_event_dict": {"7": "-1"}},
 }
 
 
@@ -340,25 +340,49 @@ def test_fold_normal_cluster_raises_when_normal_has_no_cells():
 
 def test_build_cna_tree_collapses_onto_the_tumour_clusters():
     parent_of, root = ct.node_parent_map(NODE_DICT)
-    tree, at_root = ct.build_cna_tree(parent_of, {"7": "1", "8": "2", "9": "3"}, root)
+    attachment, at_root = ct.build_cna_tree(
+        parent_of, {"7": "1", "8": "2", "9": "3"}, root
+    )
     assert at_root == []
-    newick = ct.digraph_to_newick(tree, ct.GERMLINE_ROOT_ID)
+    newick = ct.digraph_to_newick(attachment.tree, ct.GERMLINE_ROOT_ID)
     ct.verify_newick(newick, {"7", "8", "9"}, ct.GERMLINE_ROOT_ID)  # no raise
     assert newick == "((8)7,9)germline;"
 
 
 def test_build_cna_tree_keeps_a_root_voting_cluster_under_germline():
     parent_of, root = ct.node_parent_map(NODE_DICT)
-    tree, at_root = ct.build_cna_tree(parent_of, {"7": "0", "8": "1"}, root)
+    attachment, at_root = ct.build_cna_tree(parent_of, {"7": "0", "8": "1"}, root)
     assert at_root == ["7"]
     # The root-voting cluster must not become 8's parent.
-    assert set(tree.predecessors("8")) == {ct.GERMLINE_ROOT_ID}
-    assert set(tree.predecessors("7")) == {ct.GERMLINE_ROOT_ID}
+    assert set(attachment.tree.predecessors("8")) == {ct.GERMLINE_ROOT_ID}
+    assert set(attachment.tree.predecessors("7")) == {ct.GERMLINE_ROOT_ID}
 
 
-def test_shared_node_groups():
-    groups = ct.shared_node_groups({"7": "1", "8": "1", "9": "2"})
-    assert groups == [["7", "8"]]
+def test_build_cna_tree_resolves_a_shared_node_via_attach_option_a():
+    # SCICoNE nodes: 0 root -> 32 -> {30, 21}; 21 -> 25 (confirmed real-run
+    # topology). Cells: 3,4 -> 30; 7,8 -> 21; 9,10 -> 25; cluster 4 folded.
+    # The old nearest-ancestor collapse made 7 the ancestor of 9,10 with 8 a
+    # mere sibling, though 7 and 8 share node 21 equally -- attach_option_a
+    # resolves this symmetrically via a hidden group node instead.
+    node_dict = {
+        "0": {"parent_id": "NULL"},
+        "32": {"parent_id": "0"},
+        "30": {"parent_id": "32"},
+        "21": {"parent_id": "32"},
+        "25": {"parent_id": "21"},
+    }
+    parent_of, root = ct.node_parent_map(node_dict)
+    tumour_nodes = {"3": "30", "7": "21", "8": "21", "9": "25", "10": "25"}
+    attachment, at_root = ct.build_cna_tree(parent_of, tumour_nodes, root)
+    assert at_root == []
+    newick = ct.digraph_to_newick(attachment.tree, ct.GERMLINE_ROOT_ID)
+    assert newick == "(3,(7,8,(9,10)g25)g21)germline;"
+    ct.verify_newick(
+        newick, {"3", "7", "8", "9", "10"}, ct.GERMLINE_ROOT_ID, attachment.hidden_ids
+    )
+    assert attachment.hidden_ids == {"g21", "g25"}
+    assert {tuple(g) for g in attachment.shared} == {("7", "8"), ("9", "10")}
+    assert attachment.group_subtends == {"g21": (2, 4), "g25": (2, 2)}
 
 
 # --------------------------------------------------------------------------- #
@@ -629,6 +653,8 @@ def test_main_end_to_end_folds_the_normal_cluster(tmp_path, monkeypatch):
     rows = (out / "cna_cell_nodes.csv").read_text().splitlines()
     assert rows[0] == "barcode,secedo_cluster,scicone_node"
     assert len(rows) == 1 + 7  # the outlier cell is absent
+    assert "## SCICoNE node region events" in diagnostics
+    assert "node 2 (parent 1): {'12': '1', '45': '-1'}" in diagnostics
 
 
 def test_main_saves_breakpoints_and_records_computed_in_diagnostics(
@@ -667,6 +693,82 @@ def test_main_flags_hitting_the_breakpoint_cap(tmp_path, monkeypatch):
     out = _run_main(tmp_path, monkeypatch, extra=["--bp-limit", "4"])
     diagnostics = (out / "cna_tree_diagnostics.txt").read_text()
     assert "FINDING: breakpoint detection hit its cap of 4" in diagnostics
+
+
+_REAL_RUN_NODE_DICT = {
+    "0": {"parent_id": "NULL", "region_event_dict": {}},
+    "32": {"parent_id": "0", "region_event_dict": {"3": "1"}},
+    "30": {"parent_id": "32", "region_event_dict": {}},
+    "21": {"parent_id": "32", "region_event_dict": {"9": "1"}},
+    "25": {"parent_id": "21", "region_event_dict": {"14": "-1"}},
+}
+
+
+class _FakeSCICoNESharedNode(_FakeSCICoNE):
+    """The real-run topology: 0 -> 32 -> {30, 21}; 21 -> 25. 6 kept cells x
+    12 bins, one per cluster (3, 4, 7, 8, 9, 10 in that order)."""
+
+    def __init__(self, build_dir, out_dir, verbose=False):
+        rng = np.random.default_rng(0)
+        self.data = {
+            "filtered_counts": rng.poisson(20, size=(6, 12)).astype(float),
+            "filtered_chromosome_stops": {"1": 5, "X": 11},
+        }
+
+    def learn_tree(self, data, sizes, **kwargs):
+        assert data.shape == (6, 4)
+        # Cell order: cluster 3, 4, 7, 8, 9, 10 -> SCICoNE node 30, 30, 21, 21, 25, 25.
+        nodes = ["30", "30", "21", "21", "25", "25"]
+        arr = np.column_stack([np.arange(6), np.array(nodes, dtype=float)])
+        return SimpleNamespace(
+            node_dict=_REAL_RUN_NODE_DICT, outputs={"cell_node_ids": arr}, score=-1.0
+        )
+
+
+def _fake_scicone_module_shared_node():
+    return SimpleNamespace(
+        SCICoNE=_FakeSCICoNESharedNode, utils=_FAKE_SCICONE_MODULE.utils
+    )
+
+
+def test_main_end_to_end_resolves_a_shared_node_via_attach_option_a(
+    tmp_path, monkeypatch
+):
+    # Confirmed real-run bug: the old nearest-ancestor collapse made cluster 7 the
+    # ancestor of 9,10 and 8 a mere sibling, though 7 and 8 share SCICoNE node 21
+    # equally. attach_option_a resolves it symmetrically via a hidden group node.
+    names = [f"{c}-1" for c in "ABCDEF"]
+    _write_h5(tmp_path / "cnv.h5", [n.encode() for n in names], [0] * 6)
+    (tmp_path / "chromosome_1.map").write_text(
+        "".join(f"{n}.bam\t{i}\n" for i, n in enumerate(names))
+    )
+    (tmp_path / "clustering").write_text("3,4,7,8,9,10\n")
+    monkeypatch.setattr(ct, "_import_scicone", _fake_scicone_module_shared_node)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_cna_tree.py",
+            "--cnv-h5", str(tmp_path / "cnv.h5"),
+            "--map-file", str(tmp_path / "chromosome_1.map"),
+            "--clustering-file", str(tmp_path / "clustering"),
+            "--out-dir", str(tmp_path / "out"),
+            "--scicone-build-dir", str(tmp_path),
+            "--sex", "female",
+            "--normal-cluster-id", "4",
+        ],
+    )  # fmt: skip
+    ct.main()
+    out = tmp_path / "out"
+    assert (out / "cna_tree.nwk").read_text().strip() == (
+        "(3,(7,8,(9,10)g25)g21)germline;"
+    )
+    diagnostics = (out / "cna_tree_diagnostics.txt").read_text()
+    assert "clusters 7,8 share one SCICoNE node" in diagnostics
+    assert "clusters 9,10 share one SCICoNE node" in diagnostics
+    assert "Hidden group node g21: 2 clusters directly, 4 in its subtree" in diagnostics
+    assert "Hidden group node g25: 2 clusters directly, 2 in its subtree" in diagnostics
+    assert "node 25 (parent 21): {'14': '-1'}" in diagnostics
 
 
 def test_main_requires_sex(tmp_path, monkeypatch):

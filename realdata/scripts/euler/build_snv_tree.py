@@ -121,7 +121,14 @@ as sibling leaves (an unresolved polytomy) and its descendants beneath it; a
 node holding none is collapsed. The labelled set is thus exactly the SECEDO
 clusters plus the germline root, plus the hidden ``g<id>`` nodes, which have no
 spectra row and which the model treats as latent (each adds one random-walk step
-for the clusters below it, so they are named in the diagnostics).
+for the clusters below it, so they are named in the diagnostics). This
+attachment ("option (a)") is tool-agnostic -- ``attach_option_a`` implements it
+once, and ``build_cna_tree.py``'s SCICoNE integration reuses it too, so a
+cluster shared between two tools' nodes is always resolved the same way rather
+than each script growing its own (a shared node used to be resolved by
+``collapse_by_nearest_labelled_ancestor``'s nearest-ancestor walk, which is not
+symmetric when two clusters share one node -- confirmed wrong on a real
+SCICoNE run, see that script's history).
 ``spectra.csv`` is unaffected: one row per cluster from that cluster's own
 SNVs, whatever its position in the tree.
 
@@ -1084,6 +1091,111 @@ def _lca(nodes: List[str], parent_of: Dict[str, str], root: str) -> str:
     return next(a for a in chains[0] if a in common)  # nearest to the nodes
 
 
+@dataclass
+class OptionAAttachment:
+    """The result of ``attach_option_a``: the emitted tree plus everything a
+    caller's diagnostics report about how items were attached to it."""
+
+    tree: nx.DiGraph
+    hidden_ids: Set[str]
+    shared: List[List[str]]  # items sharing one source node, one list per node
+    collapsed_nodes: List[str]  # source nodes carrying no item
+    group_subtends: Dict[str, Tuple[int, int]]  # g<v> -> (direct, in subtree)
+
+
+def attach_option_a(
+    parent_of: Dict[str, str],
+    node_of_item: Dict[str, str],
+    root: str,
+    root_items: Iterable[str] = (),
+    germline_id: str = GERMLINE_ROOT_ID,
+    group_prefix: str = _GROUP_NODE_PREFIX,
+) -> OptionAAttachment:
+    """Collapse an arbitrary rooted tree (``parent_of``, a tool's own
+    ``{child: parent}`` node space) onto a set of items, each already
+    resolved to one node in that space (``node_of_item``), one labelled leaf
+    per item ("option (a)"). Shared by build_snv_tree.py's LICHeE integration
+    and build_cna_tree.py's SCICoNE integration, so a shared node is resolved
+    the same way regardless of which tool produced it.
+
+    ``C(v)``, the items resolving to a node ``v``: ``|C(v)|=1`` with
+    children -- the item labels ``v``, ``v``'s child subtrees hang under it;
+    ``|C(v)|=1`` no children -- leaf; ``|C(v)|>=2`` -- a hidden group node
+    ``<group_prefix><v>`` stands in for ``v``, its items are sibling leaves
+    under it (an unresolved polytomy) and ``v``'s children hang under it too;
+    ``|C(v)|=0`` -- ``v`` is collapsed and its children lift to the nearest
+    emitted ancestor.
+
+    ``root_items`` are attached directly under ``germline_id`` rather than
+    resolved through the tree (an item tied only at the root, or with no node
+    of its own) -- passed straight through, never looked up in
+    ``node_of_item``.
+
+    Several items sharing one node is the normal case this attachment exists
+    for, not an error (a node-per-sample tool would never need it): this
+    raises ValueError only if a hidden group node's label collides with a
+    real item ID or the germline ID.
+    """
+    children_of: Dict[str, List[str]] = defaultdict(list)
+    for child, parent in parent_of.items():
+        children_of[parent].append(child)
+
+    by_node: Dict[str, List[str]] = defaultdict(list)
+    for item, node in node_of_item.items():
+        by_node[node].append(item)
+    for items in by_node.values():
+        items.sort(key=_sort_key)
+
+    for node in by_node:
+        group = f"{group_prefix}{node}"
+        if group in node_of_item or group == germline_id:
+            raise ValueError(f"group node label {group!r} collides with a real label")
+
+    tree = nx.DiGraph()
+    tree.add_node(germline_id)
+    hidden_ids: Set[str] = set()
+    collapsed: List[str] = []
+    direct_count: Dict[str, int] = {}
+
+    def place(node: str, attach_to: str) -> None:
+        here = by_node.get(node, [])
+        kids = sorted(children_of.get(node, []), key=_sort_key)
+        if not here:
+            collapsed.append(node)
+            for kid in kids:
+                place(kid, attach_to)
+        elif len(here) == 1:
+            tree.add_edge(attach_to, here[0])
+            for kid in kids:
+                place(kid, here[0])
+        else:
+            group = f"{group_prefix}{node}"
+            hidden_ids.add(group)
+            direct_count[group] = len(here)
+            tree.add_edge(attach_to, group)
+            for item in here:
+                tree.add_edge(group, item)
+            for kid in kids:
+                place(kid, group)
+
+    for kid in sorted(children_of.get(root, []), key=_sort_key):
+        place(kid, germline_id)
+    for item in sorted(root_items, key=_sort_key):
+        tree.add_edge(germline_id, item)
+
+    subtends = {
+        g: (direct_count[g], len(nx.descendants(tree, g) - hidden_ids))
+        for g in hidden_ids
+    }
+    return OptionAAttachment(
+        tree=tree,
+        hidden_ids=hidden_ids,
+        shared=[items for _, items in sorted(by_node.items()) if len(items) > 1],
+        collapsed_nodes=sorted(collapsed, key=_sort_key),
+        group_subtends=subtends,
+    )
+
+
 def build_lichee_clone_tree(
     trees: LicheeTrees,
     column_order: List[str],
@@ -1099,16 +1211,11 @@ def build_lichee_clone_tree(
     cross-checked against the cluster's deepest decomposition line above
     ``tau`` (the same set of nodes must come out) and a disagreement raises.
 
-    Attachment. ``C(v)`` is the set of clusters resolving to node ``v``.
-    One cluster: it labels ``v`` (a leaf if ``v`` has no children, else the
-    internal node its child subtrees hang under). Several: a hidden group node
-    ``g<v>`` stands in for ``v``, the clusters are its sibling leaves and
-    ``v``'s child subtrees hang under it. None: ``v`` is collapsed and its
-    children lift to the nearest emitted ancestor. A cluster in no node (its
+    Attachment is ``attach_option_a`` -- see there. A cluster in no node (its
     decomposition is GL-only) or tied only at the germline root hangs directly
-    off the germline root. Several clusters sharing a node is the normal case,
-    not an error: LICHeE groups SNVs by presence pattern, so it emits fewer
-    nodes than there are clusters.
+    off the germline root, as a root item. Several clusters sharing a node is
+    the normal case, not an error: LICHeE groups SNVs by presence pattern, so
+    it emits fewer nodes than there are clusters.
     """
     if column_order[0] != germline_id:
         raise ValueError(f"column 0 is {column_order[0]!r}, expected {germline_id!r}")
@@ -1206,99 +1313,30 @@ def build_lichee_clone_tree(
         else:
             node_of_cluster[cid] = node
 
-    hidden_ids: Set[str] = set()
-    for node in {n for n in node_of_cluster.values()}:
-        group = f"{_GROUP_NODE_PREFIX}{node}"
-        if group in clusters or group == germline_id:
-            raise ValueError(f"group node label {group!r} collides with a real label")
-
-    by_node: Dict[str, List[str]] = defaultdict(list)
-    for cid, node in node_of_cluster.items():
-        by_node[node].append(cid)
-    for cids in by_node.values():
-        cids.sort(key=_sort_key)
-
-    tree = nx.DiGraph()
-    tree.add_node(germline_id)
-    collapsed: List[str] = []
-    direct_count: Dict[str, int] = {}
-
-    def place(node: str, attach_to: str) -> None:
-        here = by_node.get(node, [])
-        kids = sorted(children_of.get(node, []), key=_sort_key)
-        if not here:
-            collapsed.append(node)
-            for kid in kids:
-                place(kid, attach_to)
-        elif len(here) == 1:
-            tree.add_edge(attach_to, here[0])
-            for kid in kids:
-                place(kid, here[0])
-        else:
-            group = f"{_GROUP_NODE_PREFIX}{node}"
-            hidden_ids.add(group)
-            direct_count[group] = len(here)
-            tree.add_edge(attach_to, group)
-            for cid in here:
-                tree.add_edge(group, cid)
-            for kid in kids:
-                place(kid, group)
-
-    for kid in sorted(children_of.get(root, []), key=_sort_key):
-        place(kid, germline_id)
-    for cid in sorted(absent + at_root, key=_sort_key):
-        tree.add_edge(germline_id, cid)
-
-    placed = set(tree.nodes()) - hidden_ids - {germline_id}
+    attachment = attach_option_a(
+        parent_of,
+        node_of_cluster,
+        root,
+        root_items=absent + at_root,
+        germline_id=germline_id,
+    )
+    placed = set(attachment.tree.nodes()) - attachment.hidden_ids - {germline_id}
     if placed != set(clusters):
         raise ValueError(
             f"emitted clusters {sorted(placed)} != input clusters {sorted(clusters)}"
         )
-    subtends = {
-        g: (direct_count[g], len(nx.descendants(tree, g) - hidden_ids))
-        for g in hidden_ids
-    }
     return LicheeResult(
-        tree=tree,
-        hidden_ids=hidden_ids,
+        tree=attachment.tree,
+        hidden_ids=attachment.hidden_ids,
         node_of_cluster=node_of_cluster,
-        shared=[cids for _, cids in sorted(by_node.items()) if len(cids) > 1],
+        shared=attachment.shared,
         absent=sorted(absent, key=_sort_key),
         at_root=sorted(at_root, key=_sort_key),
-        collapsed_nodes=sorted(collapsed, key=_sort_key),
-        group_subtends=subtends,
+        collapsed_nodes=attachment.collapsed_nodes,
+        group_subtends=attachment.group_subtends,
         n_trees=trees.n_trees,
         n_nodes=len(parent_of),
     )
-
-
-def collapse_by_nearest_labelled_ancestor(
-    parent_of: Dict[Hashable, Hashable],
-    node_of_cluster: Dict[str, Hashable],
-    root: str,
-) -> nx.DiGraph:
-    """Collapse an arbitrary tree (given as a ``{child: parent}`` dict over
-    some tool's own node space) onto a small set of labelled clusters, each
-    already resolved to one node in that space (``node_of_cluster``): every
-    cluster's parent in the result is the nearest OTHER cluster's node found
-    by walking up ``parent_of`` from its own node, or ``root`` if none is
-    found before the top.
-
-    Shared by every "collapse a tool's raw tree onto our observed clusters"
-    case in this pipeline (SCICoNE's cell tree in ``build_cna_tree.py``) --
-    the same idiom this module used for SCITE's mutation tree before SCITE
-    was retired.
-    """
-    node_to_cluster = {node: cid for cid, node in node_of_cluster.items()}
-    tree = nx.DiGraph()
-    tree.add_node(root)
-    for cid, node in node_of_cluster.items():
-        ancestor = parent_of.get(node)
-        while ancestor is not None and ancestor not in node_to_cluster:
-            ancestor = parent_of.get(ancestor)
-        parent_cluster = node_to_cluster.get(ancestor, root)
-        tree.add_edge(parent_cluster, cid)
-    return tree
 
 
 # --------------------------------------------------------------------------- #

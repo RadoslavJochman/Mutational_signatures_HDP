@@ -731,6 +731,60 @@ def test_parse_failure_paths(tmp_path, old, new, match):
 
 
 # --------------------------------------------------------------------------- #
+# attach_option_a: the tool-agnostic attachment shared with build_cna_tree.py
+# --------------------------------------------------------------------------- #
+
+_CHAIN_PARENT_OF = {"1": "0", "2": "1", "3": "0"}  # 0 -> {1, 3}, 1 -> 2
+
+
+def test_attach_option_a_single_item_per_node_labels_the_node():
+    a = bt.attach_option_a(_CHAIN_PARENT_OF, {"a": "1", "b": "2", "c": "3"}, "0")
+    assert a.hidden_ids == set() and a.shared == [] and a.collapsed_nodes == []
+    assert bt.digraph_to_newick(a.tree, bt.GERMLINE_ROOT_ID) == "((b)a,c)germline;"
+
+
+def test_attach_option_a_shared_node_makes_a_hidden_group():
+    # node 1 carries no children of its own beyond {2, 3}, neither of which
+    # gets an item, so both collapse and the group has nothing beneath it.
+    a = bt.attach_option_a(_CHAIN_PARENT_OF, {"a": "1", "b": "1"}, "0")
+    assert a.hidden_ids == {"g1"}
+    assert a.shared == [["a", "b"]]
+    assert a.collapsed_nodes == ["2", "3"]
+    assert a.group_subtends == {"g1": (2, 2)}  # nothing beyond the 2 direct items
+    assert bt.digraph_to_newick(a.tree, bt.GERMLINE_ROOT_ID) == "((a,b)g1)germline;"
+
+
+def test_attach_option_a_shared_node_carries_its_descendants():
+    # node 1 (shared by a, b) has child node 2 (item c): c hangs off the
+    # group node too, so the group subtends 2 items directly, 3 in total.
+    a = bt.attach_option_a(_CHAIN_PARENT_OF, {"a": "1", "b": "1", "c": "2"}, "0")
+    assert a.group_subtends == {"g1": (2, 3)}
+    assert set(a.tree.edges()) == {
+        (bt.GERMLINE_ROOT_ID, "g1"),
+        ("g1", "a"),
+        ("g1", "b"),
+        ("g1", "c"),
+    }
+
+
+def test_attach_option_a_collapses_nodes_with_no_item():
+    # node 1 carries no item; node 2 (its child) does, so 2's item lifts to root.
+    a = bt.attach_option_a(_CHAIN_PARENT_OF, {"x": "2"}, "0")
+    assert a.collapsed_nodes == ["1", "3"]
+    assert set(a.tree.edges()) == {(bt.GERMLINE_ROOT_ID, "x")}
+
+
+def test_attach_option_a_root_items_attach_directly_under_germline():
+    a = bt.attach_option_a(_CHAIN_PARENT_OF, {}, "0", root_items=["z"])
+    assert set(a.tree.edges()) == {(bt.GERMLINE_ROOT_ID, "z")}
+
+
+def test_attach_option_a_raises_on_a_group_label_collision():
+    with pytest.raises(ValueError, match="collides"):
+        bt.attach_option_a(_CHAIN_PARENT_OF, {"g1": "1", "b": "1"}, "0")
+
+
+# --------------------------------------------------------------------------- #
 # LICHeE: the clone tree
 # --------------------------------------------------------------------------- #
 
