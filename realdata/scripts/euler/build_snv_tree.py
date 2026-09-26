@@ -12,9 +12,13 @@ stage 8, `realdata/recipe/euler_slice_d_plan.md`).
 Contract (from `src/models/hdp_inference.py`'s `_BaseTreeHDP`, do not "fix" these)
     - Newick is labelled-internal-node form, e.g. ``((c2,c3)c1)germline;``.
       Observed clusters sit at internal nodes carrying their SECEDO cluster-ID
-      label; the ancestor-as-tip idiom is not used, and every internal node
-      (other than the germline root) is a real, spectrum-bearing cluster --
-      there are no hidden/unlabelled Steiner nodes anywhere in this tree.
+      label when a tool's own node happens to coincide with one (LICHeE's
+      integration, kept as an optional comparison -- see below); Dollo, the
+      primary method, always makes clusters leaves, since no SECEDO cluster
+      is ancestral to another (each is a sampled population), and every
+      internal node is a hidden ancestor, labelled ``g<k>`` and passed to
+      ``verify_newick`` via ``hidden_ids``. Either way, every node that is
+      NOT in ``hidden_ids`` is a real, spectrum-bearing cluster.
     - The tree is rooted at ``GERMLINE_ROOT_ID``, an implicit, spectrum-less
       latent node standing for the germline/empty-mutation state -- not a
       pseudo-normal cluster (see below). It carries no spectrum and is never a
@@ -67,88 +71,96 @@ A site counts as PRESENT in a cluster if its force-called record has VAF >=
 (defaults from config.sh's PRESENCE_MIN_VAF/PRESENCE_MIN_ALT_READS); ABSENT
 otherwise.
 
-Tree construction: LICHeE (Popic et al. 2015) is the primary method, with an
-in-house Camin-Sokal parsimony search as the automatic fallback -- not a
-debug-only escape hatch, a real second method -- if LICHeE fails to run, fails
-to parse, or its cluster attachments cannot be resolved from its output.
-Neither SCITE nor the mutation-set containment heuristic this module used to
-carry is used any more: SCITE is designed for single-cell genotype matrices,
-mismatched to SECEDO's pseudobulk clusters, and the containment heuristic
-assumes a perfect phylogeny real calls do not satisfy (581k three-gamete
-violations, 0.27-0.36 edge containment, and an implausible linear chain on the
-earlier tumour-vs-pseudo-normal differential calls -- see git history for the
-retired ``build_clone_tree``/``containment_fraction`` code). Three-gamete
-(perfect-phylogeny) violations are still reported in snv_tree_diagnostics.txt as a
-general compatibility diagnostic, independent of which tree method is used.
+Tree construction: Dollo parsimony over trees with hidden internal nodes
+(``dollo_tree``) is the SOLE source of ``snv_tree.nwk``. Neither SCITE nor the
+mutation-set containment heuristic this module used to carry is used any
+more (SCITE is designed for single-cell genotype matrices, mismatched to
+SECEDO's pseudobulk clusters; containment assumes a perfect phylogeny real
+calls do not satisfy -- see git history for the retired
+``build_clone_tree``/``containment_fraction`` code), and neither are LICHeE
+or Camin-Sokal, both tried and rejected on real slice D data before Dollo:
 
-LICHeE takes a per-sample VAF table and a required baseline/normal column
-(``-n``, 0-based). This pipeline has no cluster standing in for that baseline
-(the pseudo-normal cluster is never itself genotyped; it is Mutect2's -normal,
-not a row in the VAF matrix), so ``write_lichee_input`` synthesises one: an
-all-zero VAF column named after ``GERMLINE_ROOT_ID``, which is exactly what a
-true germline baseline would show at every somatic site and lines up
-semantically with this tree's own latent root. The clusters are the remaining
-columns, headed ``c<cluster id>``, which LICHeE echoes back verbatim.
+    LICHeE (Popic et al. 2015), at the tau this pipeline's presence calls
+    already use (0.05), found 0 valid trees: pervasive dropout (a trunk or
+    clade mutation missed by one cluster's own force-called genotype) makes
+    its hard absence/presence constraints unsatisfiable. Widening its own
+    ambiguity band (``-maxVAFAbsent`` above ``-minVAFPresent``) does not
+    rescue it -- it instead turns every cluster's low-level leakage into
+    "shared", collapsing the whole tree to one node.
 
-LICHeE is run as ``java -cp <LICHEE_HOME>/release/lichee.jar:<LICHEE_HOME>/lib/*
-lineage.LineageEngine -build ... -s 1 -o <out_dir>/lichee_out.trees.txt`` (the
-``release/lichee`` launcher cannot find its dependencies on JDK 11; ``lib/*`` is
-one classpath entry that Java expands itself). ``-dot`` is never used: it needs
-a display and throws HeadlessException on compute nodes, and the ``.trees.txt``
-carries the whole topology. Its exit status is unreliable, so success is that
-file existing. ``--presence-min-vaf`` (tau) is passed as both ``-minVAFPresent``
-and ``-maxVAFAbsent``, one cutoff for "absent" everywhere, so sub-threshold
-mixture leakage cannot manufacture ties; LICHeE's default clustering flags are
-used as they are.
+    An in-house Camin-Sokal parsimony search (kept until this change,
+    exhaustive over every rooted topology with clusters as its only
+    candidate internal nodes) returned a star: it can only place an
+    OBSERVED cluster as an internal node and forbids losses entirely, so it
+    cannot represent a hidden ancestor -- exactly what this presence matrix
+    needs. Its dominant patterns are "all but one cluster" (e.g. 4 of 5
+    tumour clusters sharing a mutation the fifth's own force-called
+    genotype missed), which look like dropout from a real clade, not
+    independent gains in every cluster but one.
 
-``parse_lichee_trees`` reads the ``.trees.txt``'s three blocks: ``Nodes:`` (a
-presence profile over the input columns, left to right, bit 0 the germline, and
-the VAFs of the present columns), ``****Tree 0****`` (parent -> child edges over
-node ids, node 0 the germline root) and ``Sample decomposition:``. A cluster is
-"in" a node when its profile bit is set and its VAF there exceeds tau, and it
-attaches to the deepest such node (the lowest common ancestor of a genuine tie),
-cross-checked against its deepest decomposition line.
+LICHeE is kept as an optional COMPARISON only (``--run-lichee``, default
+off): it never produces ``snv_tree.nwk``, and its own verdict (including a
+literal "0 valid trees"-style line, quoted verbatim via
+``extract_lichee_verdict``) is recorded in ``snv_tree_diagnostics.txt``
+alongside its tree, when it runs. Its own VAF thresholds, ``-minClusterSize``
+and ``-e`` (error margin) are independently configurable
+(``--lichee-min-vaf-present``/``--lichee-max-vaf-absent``/
+``--lichee-min-cluster-size``/``--lichee-error-margin``), since exploring
+them is now the whole point of running it. Everything about how it is
+invoked and how ``build_lichee_clone_tree`` attaches clusters to its output
+(via the shared ``attach_option_a``, also used by ``build_cna_tree.py``'s
+SCICoNE integration, so a node shared between two clusters is always
+resolved the same way) is unchanged from when it was primary; see
+``run_lichee``, ``parse_lichee_trees`` and ``build_lichee_clone_tree`` for
+the mechanics. Camin-Sokal's code is gone (git history keeps it).
 
-LICHeE clusters SSNVs by cross-sample presence pattern and builds a tree over
-those mutation-presence GROUPS, not one node per sample, so several SECEDO
-clusters routinely share a node and the tree can have fewer nodes than there
-are clusters. This is intrinsic to LICHeE, not a tuning problem, and is treated
-as the normal case. ``build_lichee_clone_tree`` keeps LICHeE's own topology as
-the skeleton and hangs the clusters on it, one labelled leaf per cluster: a node
-holding one cluster is labelled by it (an internal node if it has descendants);
-a node holding several becomes a hidden group node ``g<id>`` with those clusters
-as sibling leaves (an unresolved polytomy) and its descendants beneath it; a
-node holding none is collapsed. The labelled set is thus exactly the SECEDO
-clusters plus the germline root, plus the hidden ``g<id>`` nodes, which have no
-spectra row and which the model treats as latent (each adds one random-walk step
-for the clusters below it, so they are named in the diagnostics). This
-attachment ("option (a)") is tool-agnostic -- ``attach_option_a`` implements it
-once, and ``build_cna_tree.py``'s SCICoNE integration reuses it too, so a
-cluster shared between two tools' nodes is always resolved the same way rather
-than each script growing its own (a shared node used to be resolved by
-``collapse_by_nearest_labelled_ancestor``'s nearest-ancestor walk, which is not
-symmetric when two clusters share one node -- confirmed wrong on a real
-SCICoNE run, see that script's history).
-``spectra.csv`` is unaffected: one row per cluster from that cluster's own
-SNVs, whatever its position in the tree.
+Dollo (``dollo_tree``): clusters are leaves -- no SECEDO cluster is
+ancestral to another, each is a sampled population -- and every internal
+node is a hidden ancestor, found by exhaustive search over every rooted
+BINARY topology (``enumerate_dollo_topologies``, ``(2n-3)!!`` of them, 105
+at n=5, capped at ``--dollo-max-clusters`` (7) rather than hang). A
+mutation's Dollo cost on one topology is one gain at its presence pattern's
+LCA, plus one loss per maximal fully-absent clade beneath that LCA
+(``dollo_pattern_cost``) -- Dollo, unlike Camin-Sokal, allows a mutation to
+be lost, exactly the dropout this data shows. Costs are precomputed once per
+topology per distinct pattern (``dollo_cost_table``): a bootstrap replicate
+only ever reweights this same fixed pattern universe, never introduces a
+new one, so scoring 1000 replicates is a fast weighted sum, not 1000 fresh
+tree walks.
 
-Camin-Sokal parsimony here is not the retired containment heuristic renamed:
-every node in this pipeline's tree is an OBSERVED cluster with a fully known
-presence/absence call at every mutation (unlike classical parsimony's usual
-setting, where only leaves are observed and internal-node states are
-inferred), so scoring a candidate topology needs no latent-state DP -- it is
-a fixed count, per edge, of gain events (parent absent, child present, cost 1
-each -- multiple independent gains, i.e. homoplasy, are allowed) and reversal
-events (parent present, child absent -- forbidden under strict Camin-Sokal,
-penalised heavily rather than made literally infinite so a well-defined
-minimum-cost tree always exists even when the data has a genuine
-incompatibility, the same "always-succeeding" property the retired
-containment method had). ``camin_sokal_tree`` searches EVERY rooted topology
-over the cluster set exhaustively (every node's parent drawn from {germline}
-union the other clusters, filtered to acyclic trees) -- tractable at the
-handful-of-clusters scale SECEDO produces for one slice, not a general-purpose
-phylogenetics tool; ``--camin-sokal-max-clusters`` refuses to run past a
-configurable cap rather than hang.
+Ties at the minimum cost are never broken arbitrarily: their STRICT
+CONSENSUS is emitted (``strict_consensus_clades`` -- clades not common to
+every optimal topology collapse into a polytomy; the intersection of
+laminar clade families is itself laminar, so this is always a well-defined
+tree, down to a star when nothing beyond the full leaf set is common).
+Support for each consensus clade comes from the bootstrap: resample SNVs
+with replacement ``--dollo-bootstrap`` times (a multinomial draw over the
+fixed pattern universe, mathematically equivalent to resampling rows and
+far cheaper) and recompute that replicate's own optimal consensus; a clade's
+support is the fraction of replicates it survives in. Any clade below
+``--dollo-min-clade-support`` (0.7) is dropped before the final tree is
+built (dropping members from a laminar family keeps it laminar, so this
+needs no separate graph-collapse pass -- ``build_tree_from_clades`` is
+called once, on the already-filtered set). The diagnostics also report,
+per bootstrap replicate, how often the optimal topology and the runner-up
+each win outright -- the direct instability signal between the two closest
+topologies -- and a per-edge gain/loss breakdown on the emitted tree
+(``dollo_edge_report``, generalised to the polytomies consensus/collapse
+can produce), trunk mutations landing on ``germline`` -> the MRCA.
+
+Verified against the real slice D pattern counts (5 tumour clusters, 15
+distinct presence patterns): the unique optimum is
+``render_topology``'s ``(3,(10,((7,8),9)))``, cost 1996 above the baseline
+every topology shares (singleton and full-set patterns cost 1 -- one gain,
+no losses -- on every topology, so they never affect which one wins); the
+runner-up, 30 more, swaps whether 9 or 10 joins the ``{7,8}`` clade first.
+Confirmed independently by hand and by script before trusting the
+implementation.
+
+``--compare-tree <path>`` (e.g. stage 9's ``cna_tree.nwk``) reports
+clade-level agreement against another tree over the same clusters
+(``compare_tree_clades``), ignoring hidden-node names on both sides -- a
+clade is just a leaf-set.
 
 Channel ordering was recovered empirically (cosmic_signatures.csv carries no
 channel labels, only ``Channel_0..Channel_95``): SBS1's four dominant channels

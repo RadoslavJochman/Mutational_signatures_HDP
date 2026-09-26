@@ -176,6 +176,30 @@ whose 10x notebook reads this same dataset family, so its h5 dataset names and o
 are read from that code, not guessed; they are still unconfirmed against slice D's own
 file (see "Stage 9" below).
 
+## Correction: Dollo parsimony replaces LICHeE and Camin-Sokal (2026-09-26)
+
+Both of stage 8's tree methods were tried against real slice D data and rejected:
+
+- LICHeE, at the tau (0.05) the presence calls already use, found 0 valid trees --
+  pervasive dropout makes its hard absence/presence constraints unsatisfiable. Widening
+  its own ambiguity band (`-maxVAFAbsent` above `-minVAFPresent`) does not rescue it;
+  it instead turns every cluster's leakage into "shared", collapsing the tree to one
+  node.
+- Camin-Sokal returned a star: it can only place an observed cluster as an internal
+  node and forbids losses, so it cannot represent a hidden ancestor -- exactly what the
+  data needs. Its dominant patterns are "all but one cluster" (4 of 5 tumour clusters
+  sharing a mutation the fifth's own genotype missed), which look like dropout from a
+  real clade, not independent gains everywhere but one.
+
+Dollo parsimony over trees with hidden internal nodes (`dollo_tree`) is now the sole
+source of `snv_tree.nwk`: clusters are leaves, every internal node a hidden ancestor,
+found by exhaustive search over every rooted binary topology, allowing losses (Dollo's
+point, unlike Camin-Sokal). Ties emit their strict consensus, never an arbitrary pick;
+bootstrap resampling gives each consensus clade a support value, and any clade below
+`--dollo-min-clade-support` collapses into a polytomy. See "Stage 8" below for the
+mechanics and the real-run result. LICHeE is kept as an optional comparison only
+(`RUN_LICHEE=1`); Camin-Sokal's code is removed (git history keeps it).
+
 ## SECEDO build flags on modern GCC
 
 Undocumented until now: building `secedo` (stage 06's upstream dependency, not part of
@@ -309,15 +333,17 @@ into `submit_all.sh`'s dependency block -- run by hand once 07 has copied the VC
   - `snv_tree.nwk` -- one rooted, labelled-internal-node Newick tree.
   - `spectra.csv` -- per-cluster 96-channel spectra, ready to load as `TreeHDP`'s
     `data_matrix` via `pd.read_csv(index_col=0)`.
-  - `clone_snv_matrix.csv` -- the clone x SNV binary presence matrix the tree was built
-    from (provenance, and LICHeE's/Camin-Sokal's input).
-  - `snv_tree_diagnostics.txt` -- which method was used (LICHeE or the Camin-Sokal
-    fallback, with the reason), the perfect-phylogeny (three-gamete) violation count,
-    SNVs skipped in binning, and the resulting topology (branching or a linear chain).
-    For LICHeE it also names the clusters sharing a node, any cluster in no node, and the
-    hidden group nodes with the clusters each subtends.
+  - `clone_snv_matrix.csv` -- the clone x SNV binary presence matrix Dollo was scored
+    against (provenance, and LICHeE's input when `--run-lichee` is on).
+  - `snv_tree_diagnostics.txt` -- the Dollo search (topology count, best and runner-up
+    cost, the optimal and runner-up topologies, tie count), bootstrap results (per-clade
+    support including any collapsed for low support, and how often the optimal and
+    runner-up topologies each win a replicate), a per-edge gain/loss breakdown, the
+    perfect-phylogeny (three-gamete) violation count, SNVs skipped in binning, the
+    resulting topology (branching or a linear chain), LICHeE's comparison result when
+    `--run-lichee` is on, and the `--compare-tree` clade agreement when given.
   - `lichee_input.txt`, `lichee_out.trees.txt`, `lichee_run.log` -- LICHeE's input, its
-    output (the file the tree is read from) and its captured stdout and stderr.
+    output and its captured stdout and stderr, written only when `--run-lichee` is on.
 
 Two contracts this stage exists to uphold (see `build_snv_tree.py`'s module docstring and
 `_BaseTreeHDP` in `src/models/hdp_inference.py` for the model-side half of each):
@@ -349,44 +375,57 @@ A,C,G,T), i.e. the alphabetical order of COSMIC's own `Type` strings (`A[C>A]A` 
 `build_snv_tree.py` implements exactly this order, so `spectra.csv` aligns positionally
 with the fixed-signatures matrix.
 
-Tree construction: LICHeE is fed the per-cluster VAF table directly (a synthetic all-zero
-germline baseline column is prepended, since LICHeE requires a normal/baseline column and
-this pipeline has none genotyped; the clusters are headed `c<id>`). It is run as `java -cp
-$LICHEE_HOME/release/lichee.jar:$LICHEE_HOME/lib/* lineage.LineageEngine -build ... -s 1
--o lichee_out.trees.txt`, because the `release/lichee` launcher cannot find its
-dependencies on JDK 11 (`lib/*` is one classpath entry, expanded by Java). `-dot` is never
-used: it needs a display and throws HeadlessException on compute nodes, and the
-`.trees.txt` carries the whole topology, so no Xvfb is needed. LICHeE's exit status is
-unreliable, so success is that file existing. `PRESENCE_MIN_VAF` (tau) is passed as both
-`-minVAFPresent` and `-maxVAFAbsent`, so sub-threshold mixture leakage cannot manufacture
-ties.
+Tree construction: Dollo parsimony over trees with hidden internal nodes
+(`dollo_tree`) is the sole source of `snv_tree.nwk` (see the correction above for why
+LICHeE and Camin-Sokal were tried and rejected on real slice D data first). SECEDO
+clusters are leaves -- no cluster is ancestral to another, each is a sampled
+population -- and every internal node is a hidden ancestor, found by exhaustive search
+over every rooted binary topology (`(2n-3)!!` of them, 105 at slice D's 5 tumour
+clusters, capped at `--dollo-max-clusters` (7) rather than hang). A mutation's cost on
+one topology is one gain at its presence pattern's LCA plus one loss per maximal
+fully-absent clade beneath it -- Dollo, unlike Camin-Sokal, allows losses, which is
+exactly the dropout this data shows. Costs are precomputed once per topology per
+distinct pattern, so scoring `--dollo-bootstrap` (1000) replicates is a fast weighted
+sum, not a fresh tree walk each time.
 
-The `.trees.txt` is parsed for its `Nodes:` block (presence profiles over the input
-columns, germline first, and the VAFs of the present columns), `****Tree 0****` (edges
-over node ids, node 0 the germline root) and `Sample decomposition:`. A cluster is in a
-node when its profile bit is set and its VAF there exceeds tau, and it attaches to the
-deepest such node (the lowest common ancestor of a genuine tie), cross-checked against
-its deepest decomposition line; a disagreement raises.
+Ties at the minimum cost emit their strict consensus, never an arbitrary pick: clades
+not common to every optimal topology collapse into a polytomy. Each consensus clade's
+support comes from the bootstrap (resample SNVs with replacement, recompute that
+replicate's own optimal consensus, per-clade support is the fraction of replicates it
+survives in); any clade below `--dollo-min-clade-support` (0.7) is dropped before the
+final tree is built. The diagnostics also report, per bootstrap replicate, how often
+the optimal topology and the runner-up each win outright -- the direct instability
+signal between the two closest topologies -- and a per-edge gain/loss breakdown on the
+emitted tree, trunk mutations landing on `germline` -> the MRCA (a hidden node,
+germline's only child). Hidden nodes are labelled `g<k>` and carry no row in
+`spectra.csv`; the model treats them as latent, each adding one random-walk step for
+the clusters below it. `spectra.csv` is unaffected regardless: one row per cluster
+from its own SNVs.
 
-LICHeE builds its tree over mutation-presence groups, not one node per sample, so several
-SECEDO clusters routinely share a node and the tree has fewer nodes than clusters. That
-is intrinsic to LICHeE (unchanged under relaxed clustering flags) and is the normal case.
-LICHeE's own topology is kept as the skeleton and one labelled leaf per cluster hangs on
-it: a node holding one cluster is labelled by it, a node holding several becomes a hidden
-group node `g<id>` with those clusters as sibling leaves (an unresolved polytomy), and a
-node holding none is collapsed. `snv_tree.nwk` therefore carries the SECEDO clusters and
-the germline root plus the hidden `g<id>` nodes, which have no row in `spectra.csv`; the
-model treats them as latent, and each adds one random-walk step for the clusters below
-it, which the diagnostics name so it can be audited against the CNA-tree comparison.
-`spectra.csv` is unaffected: one row per cluster from its own SNVs, wherever it sits.
-A cluster in no node (all its SNVs below tau) hangs off the germline root with a finding.
-If LICHeE is unavailable, fails, or its output cannot be parsed and joined, an
-in-house Camin-Sokal parsimony search runs instead: exhaustive over every rooted topology
-of the cluster set (tractable at SECEDO's handful-of-clusters scale), scoring each by gain
-events (allowed, possibly independent/homoplasious) plus a heavy penalty per reversal
-event (forbidden under strict Camin-Sokal, but penalised rather than made literally
-infinite so a well-defined tree always exists even on genuinely incompatible data).
-`snv_tree_diagnostics.txt` records which method actually ran and the resulting topology.
+Verified against the real slice D pattern counts (5 tumour clusters, 15 distinct
+presence patterns): the unique optimum nests `{7,8}` inside `{7,8,9}` inside
+`{7,8,9,10}`, with cluster 3 basal (cost 1996 above the baseline every topology
+shares); the runner-up, 30 more, swaps whether 9 or 10 joins the `{7,8}` clade first.
+This matches the independent CNA tree (SCICoNE), which separately puts cluster 3
+apart from `{7,8,9,10}` and 7 with 8.
+
+`--run-lichee` (off by default) runs LICHeE purely as a comparison, never as the
+source of `snv_tree.nwk`: fed the per-cluster VAF table directly (a synthetic all-zero
+germline baseline column prepended, since LICHeE requires one and this pipeline has
+none genotyped), run as `java -cp $LICHEE_HOME/release/lichee.jar:$LICHEE_HOME/lib/*
+lineage.LineageEngine -build ... -s 1 -o lichee_out.trees.txt` (the `release/lichee`
+launcher cannot find its dependencies on JDK 11), with `--lichee-min-vaf-present`,
+`--lichee-max-vaf-absent`, `--lichee-min-cluster-size` and `--lichee-error-margin`
+independently configurable now that exploring them is the point of running it at all.
+Its own verdict (including a literal "0 valid trees"-style line, if LICHeE prints one)
+is quoted verbatim in the diagnostics alongside its tree, when it produces one; the
+attachment (one labelled leaf per cluster, a hidden group node where several share a
+LICHeE node) is unchanged from when LICHeE was primary, and is the same
+`attach_option_a` stage 9's SCICoNE integration uses.
+
+`--compare-tree <path>` (e.g. stage 9's `cna_tree.nwk`, passed automatically by
+`08_build_snv_tree.sbatch` once that file exists) reports clade-level agreement
+against another tree over the same clusters, ignoring hidden-node names on both sides.
 
 ## Stage 9: CNA tree for TreeHDP
 
@@ -449,14 +488,17 @@ Both trees are independent `TreeHDP` inputs for comparison, not merged into one 
 - Building `secedo` itself with the GCC flags now documented above
   (`-Wno-error=stringop-overflow -Wno-error=restrict`).
 - Building SCICoNE (stage 9) into `realdata/external/` -- not cloned or built yet.
-  LICHeE is built and runs on Euler (via `java -cp`, JDK 11); `08_build_snv_tree.sbatch`'s
-  `SKIP_LICHEE=1` still runs straight to the Camin-Sokal fallback.
-- **Stage 8 first real run on slice D's VAF table.** The `.trees.txt` format, the `java
-  -cp` invocation and the join rule are confirmed on Euler probe runs (two are kept
-  verbatim as `tests/fixtures/lichee/`), not yet on slice D's own data. Read the findings
-  in `snv_tree_diagnostics.txt`: which clusters share a node, any cluster in no node, and
-  the hidden group nodes. Fewer nodes than clusters is expected, and if everything ends up
-  under one group node the SNV profiles simply do not separate the clusters.
+  LICHeE is built and runs on Euler (via `java -cp`, JDK 11), needed only for
+  `RUN_LICHEE=1`'s optional comparison; Dollo needs neither LICHeE nor a JDK.
+- **Stage 8 on slice D's own presence matrix.** The Dollo search, consensus and
+  bootstrap are verified against the real slice D pattern counts (see the correction
+  above) and against hand-checked synthetic cases (see `tests/test_build_snv_tree.py`),
+  not yet against a fresh end-to-end run of this stage. Read `snv_tree_diagnostics.txt`:
+  the best and runner-up cost and topologies, the tie count, per-clade bootstrap
+  support (including anything collapsed for low support), and the top-two win rate.
+  LICHeE's `.trees.txt` format and the `java -cp` invocation are separately confirmed
+  on Euler probe runs (two kept verbatim as `tests/fixtures/lichee/`), relevant only
+  when `RUN_LICHEE=1`.
 - **Stage 9 first real run**: `pip install realdata/external/SCICoNE/pyscicone/` into the
   Euler `.venv`, confirm `import scicone` works headless on a compute node, and pin
   PhenoGraph and pybiomart in `requirements.txt` (they are listed there unpinned; check
