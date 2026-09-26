@@ -35,7 +35,8 @@ SECEDO_BIN="${SECEDO_BUILD}/secedo"
 # SCICoNE build directory: holds the scicone-* binaries (breakpoint_detection, inference,
 # ...) that the pyscicone wrapper resolves by name; stage 09 passes it to scicone.SCICoNE.
 SCICONE_BUILD_DIR="${SCICONE_BUILD_DIR:-${REPO_ROOT}/realdata/external/SCICoNE/build}"
-# LICHeE checkout (stage 08's primary tree builder). Stage 08 runs it as `java -cp
+# LICHeE checkout (stage 08's optional comparison only, RUN_LICHEE=1 -- Dollo
+# parsimony is the sole source of snv_tree.nwk). Stage 08 runs it as `java -cp
 # release/lichee.jar:lib/* lineage.LineageEngine`, not through release/lichee, whose
 # launcher cannot find its dependencies on JDK 11; it needs the jar and lib/ from here.
 LICHEE_HOME="${LICHEE_HOME:-${REPO_ROOT}/realdata/external/lichee/LICHeE}"

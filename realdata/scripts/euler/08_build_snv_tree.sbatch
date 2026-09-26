@@ -13,20 +13,17 @@
 # build_snv_tree.py's module docstring for the tree-construction and channel-binning
 # contracts. (The CNA-side tree is built separately by stage 09/build_cna_tree.py.)
 #
-# LICHeE is the primary tree builder; an in-house Camin-Sokal parsimony search is the
-# automatic fallback (not debug-only) if LICHeE is unavailable, fails, or its
-# .trees.txt output cannot be parsed and joined to the clusters. LICHeE is run through
-# java -cp (see build_snv_tree.py's module docstring) and its .trees.txt is parsed;
-# -dot is never used, so no display or Xvfb is needed. It builds a tree over
-# mutation-presence groups, so several clusters can share one node: fewer distinct
-# nodes than clusters is expected, not an error.
+# Dollo parsimony over trees with hidden internal nodes is the sole source of
+# snv_tree.nwk: real slice D data needs a hidden ancestor (dropout, not independent
+# gains, explains the dominant near-complete presence patterns), which neither LICHeE
+# nor Camin-Sokal can represent. LICHeE is an optional comparison only (RUN_LICHEE=1
+# below), never used for snv_tree.nwk.
 #
 # Needs a python environment with pandas, numpy, networkx, phylox, and pysam
 # installed (the repo's own .venv works if present on this cluster). pysam is
 # the one dependency this stage adds beyond what run_inference.py needs --
-# pinned in requirements.txt. Also needs a JDK (JAVA_MODULE below) and LICHeE built at
-# LICHEE_HOME (config.sh): release/lichee.jar and lib/. Pass --skip-lichee
-# (SKIP_LICHEE=1 below) to go straight to Camin-Sokal if it isn't available yet.
+# pinned in requirements.txt. A JDK and LICHeE built at LICHEE_HOME (config.sh:
+# release/lichee.jar and lib/) are needed only when RUN_LICHEE=1.
 
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
@@ -34,11 +31,8 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/config.sh"
 TREE_OUT_DIR="${PERSIST_DIR}/tree_input"
 mkdir -p "${TREE_OUT_DIR}"
 
-# pysam's htslib libs need the stack at runtime, same as the other stages. LICHeE needs a
-# JDK: openjdk/11 is confirmed to work; override with JAVA_MODULE if Euler's naming moves.
-JAVA_MODULE="${JAVA_MODULE:-openjdk/11}"
+# pysam's htslib libs need the stack at runtime, same as the other stages.
 module load stack/2024-06 gcc/12.2.0 2>/dev/null || true
-module load "${JAVA_MODULE}" 2>/dev/null || true
 
 # SLURM jobs don't inherit an interactively-activated conda/venv, so use the
 # repo's own venv interpreter explicitly rather than ambient python3.
@@ -48,14 +42,36 @@ if [ ! -x "${PY}" ]; then
     exit 1
 fi
 
-SKIP_LICHEE="${SKIP_LICHEE:-0}"
+# Dollo search/bootstrap knobs; defaults live in build_snv_tree.py, override by
+# exporting before sbatch. Empty means "use the script's default".
+DOLLO_ARGS=()
+[ -n "${DOLLO_MAX_CLUSTERS:-}" ] && DOLLO_ARGS+=(--dollo-max-clusters "${DOLLO_MAX_CLUSTERS}")
+[ -n "${DOLLO_BOOTSTRAP:-}" ] && DOLLO_ARGS+=(--dollo-bootstrap "${DOLLO_BOOTSTRAP}")
+[ -n "${DOLLO_MIN_CLADE_SUPPORT:-}" ] && DOLLO_ARGS+=(--dollo-min-clade-support "${DOLLO_MIN_CLADE_SUPPORT}")
+[ -n "${SEED:-}" ] && DOLLO_ARGS+=(--seed "${SEED}")
 
-SKIP_LICHEE_ARGS=()
-if [ "${SKIP_LICHEE}" = "1" ]; then
-    SKIP_LICHEE_ARGS=(--skip-lichee)
-else
+# Compare against the CNA tree automatically once stage 9 has produced one.
+CNA_TREE="${TREE_OUT_DIR}/cna_tree.nwk"
+if [ -f "${CNA_TREE}" ]; then
+    DOLLO_ARGS+=(--compare-tree "${CNA_TREE}")
+fi
+
+# LICHeE: optional comparison only (RUN_LICHEE=1), never snv_tree.nwk's source. Needs
+# a JDK: openjdk/11 is confirmed to work; override with JAVA_MODULE if Euler's naming
+# moves.
+RUN_LICHEE="${RUN_LICHEE:-0}"
+LICHEE_ARGS=()
+if [ "${RUN_LICHEE}" = "1" ]; then
+    LICHEE_ARGS+=(--run-lichee --lichee-home "${LICHEE_HOME}")
+    [ -n "${LICHEE_MIN_VAF_PRESENT:-}" ] && LICHEE_ARGS+=(--lichee-min-vaf-present "${LICHEE_MIN_VAF_PRESENT}")
+    [ -n "${LICHEE_MAX_VAF_ABSENT:-}" ] && LICHEE_ARGS+=(--lichee-max-vaf-absent "${LICHEE_MAX_VAF_ABSENT}")
+    [ -n "${LICHEE_MIN_CLUSTER_SIZE:-}" ] && LICHEE_ARGS+=(--lichee-min-cluster-size "${LICHEE_MIN_CLUSTER_SIZE}")
+    [ -n "${LICHEE_ERROR_MARGIN:-}" ] && LICHEE_ARGS+=(--lichee-error-margin "${LICHEE_ERROR_MARGIN}")
+
+    JAVA_MODULE="${JAVA_MODULE:-openjdk/11}"
+    module load "${JAVA_MODULE}" 2>/dev/null || true
     if ! command -v java >/dev/null 2>&1; then
-        echo "ERROR: java not on PATH (JAVA_MODULE=${JAVA_MODULE}); load a JDK or set SKIP_LICHEE=1." >&2
+        echo "ERROR: java not on PATH (JAVA_MODULE=${JAVA_MODULE}); load a JDK or unset RUN_LICHEE." >&2
         exit 1
     fi
     # Fail the job now, not partway through, if LICHeE cannot launch. Judged on the
@@ -77,9 +93,9 @@ fi
     --ref-fasta "${REF_FASTA}" \
     --cosmic-signatures "${REPO_ROOT}/COSMIC_sig/cosmic_signatures.csv" \
     --out-dir "${TREE_OUT_DIR}" \
-    --lichee-home "${LICHEE_HOME}" \
     --normal-cluster-id "${NORMAL_CLUSTER_ID}" \
-    ${SKIP_LICHEE_ARGS[@]+"${SKIP_LICHEE_ARGS[@]}"}
+    ${DOLLO_ARGS[@]+"${DOLLO_ARGS[@]}"} \
+    ${LICHEE_ARGS[@]+"${LICHEE_ARGS[@]}"}
 
 echo "Wrote snv_tree.nwk, spectra.csv, clone_snv_matrix.csv, snv_tree_diagnostics.txt" \
      "to ${TREE_OUT_DIR}."
