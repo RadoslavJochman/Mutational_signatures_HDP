@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -401,8 +402,232 @@ def test_compare_topologies_disagrees_on_star_vs_chain():
 
 
 # --------------------------------------------------------------------------- #
-# Camin-Sokal parsimony
+# Dollo parsimony over trees with hidden internal nodes
 # --------------------------------------------------------------------------- #
+
+
+def test_dollo_pattern_cost_hand_checked():
+    # ((a,c),b): S={a,b} spans both of the root's children, so the root is the
+    # LCA; the (a,c) side needs one loss (c is absent under a present-mixed
+    # subtree), the b side needs none (b itself is present) -- 1 gain + 1 loss.
+    topology = frozenset([frozenset(["a", "c"]), "b"])
+    assert bt.dollo_pattern_cost(topology, frozenset(["a", "b"])) == (2, 1)
+
+
+def test_dollo_pattern_cost_singleton_and_full_set_are_topology_invariant():
+    topologies = bt.enumerate_dollo_topologies(["a", "b", "c"])
+    for t in topologies:
+        assert bt.dollo_pattern_cost(t, frozenset(["a"])) == (1, 0)
+        assert bt.dollo_pattern_cost(t, frozenset(["a", "b", "c"])) == (1, 0)
+
+
+def test_enumerate_dollo_topologies_count():
+    # (2n-3)!! rooted binary topologies: 105 for n=5.
+    assert len(bt.enumerate_dollo_topologies(["1", "2", "3", "4", "5"])) == 105
+    assert len(bt.enumerate_dollo_topologies(["1", "2"])) == 1
+    assert len(bt.enumerate_dollo_topologies(["1"])) == 1
+
+
+def test_enumerate_dollo_topologies_raises_past_the_cap():
+    with pytest.raises(ValueError, match="exceeds the exhaustive search cap"):
+        bt.enumerate_dollo_topologies(["1", "2", "3"], max_clusters=2)
+
+
+def test_enumerate_dollo_topologies_raises_on_no_clusters():
+    with pytest.raises(ValueError, match="no clusters"):
+        bt.enumerate_dollo_topologies([])
+
+
+# The real slice D pattern counts over columns [3, 7, 8, 9, 10] (see the
+# module docstring's real-run derivation): confirmed by hand and by
+# independent script, the unique optimum is (3,(10,(9,(7,8)))), cost 1996
+# above the topology-invariant baseline (10609 total), runner-up 2026 above
+# (10639 total) -- swapping whether 9 or 10 joins the {7,8} clade first.
+REAL_RUN_PATTERNS = {
+    frozenset(["10"]): 3931,
+    frozenset(["8"]): 1087,
+    frozenset(["7"]): 917,
+    frozenset(["9"]): 909,
+    frozenset(["3"]): 900,
+    frozenset(["3", "7", "8", "9", "10"]): 869,
+    frozenset(["7", "8", "9", "10"]): 390,
+    frozenset(["3", "7", "8", "9"]): 201,
+    frozenset(["3", "7", "8", "10"]): 135,
+    frozenset(["7", "8", "9"]): 130,
+    frozenset(["7", "8"]): 110,
+    frozenset(["7", "8", "10"]): 100,
+    frozenset(["3", "7", "9", "10"]): 90,
+    frozenset(["3", "8", "9", "10"]): 88,
+    frozenset(["7", "9", "10"]): 69,
+}
+REAL_RUN_LEAVES = ["3", "7", "8", "9", "10"]
+
+
+def test_dollo_best_topologies_matches_the_real_run_derivation():
+    topologies = bt.enumerate_dollo_topologies(REAL_RUN_LEAVES)
+    table = bt.dollo_cost_table(topologies, REAL_RUN_PATTERNS.keys())
+    best_cost, best = bt.dollo_best_topologies(topologies, REAL_RUN_PATTERNS, table)
+    assert best_cost == 10609
+    assert len(best) == 1
+    assert bt.render_topology(best[0]) == "(3,(10,((7,8),9)))"
+
+
+def test_dollo_tree_real_run_fixture_emits_high_support_784_clade():
+    result = bt.dollo_tree(REAL_RUN_PATTERNS, REAL_RUN_LEAVES, n_bootstrap=200, seed=0)
+    assert result.best_cost == 10609
+    assert result.runner_up_cost == 10639
+    assert result.n_ties == 1
+
+    clades_by_leaves = {frozenset(k): v for k, v in result.clade_support.items()}
+    support_7_8_9_10 = clades_by_leaves.get(frozenset(["7", "8", "9", "10"]))
+    assert support_7_8_9_10 is not None and support_7_8_9_10 >= 0.7
+    newick = bt.digraph_to_newick(result.tree, bt.GERMLINE_ROOT_ID)
+    bt.verify_newick(
+        newick, set(REAL_RUN_LEAVES), bt.GERMLINE_ROOT_ID, result.hidden_ids
+    )
+    # {7,8} and {9,10} are not asserted -- report only, per the real-run
+    # instructions: whether the {7,8,9} split survives depends on its own
+    # reported bootstrap support, not on an assumption made here.
+    print("clade support:", clades_by_leaves)
+    print("top2_win_rate:", result.top2_win_rate)
+
+
+def test_dollo_tree_ties_emit_the_strict_consensus_as_a_polytomy():
+    # Two patterns of equal weight favour opposite pairings among 3 leaves,
+    # so no clade beyond the full set (the MRCA) is common to every optimal
+    # topology: the consensus is a star under the MRCA, not one pairing
+    # picked arbitrarily.
+    patterns = {frozenset(["a", "b"]): 10, frozenset(["b", "c"]): 10}
+    result = bt.dollo_tree(patterns, ["a", "b", "c"], n_bootstrap=0)
+    assert result.n_ties > 1
+    assert len(result.hidden_ids) == 1  # just the MRCA, no {a,b}/{b,c} split kept
+    mrca = next(iter(result.hidden_ids))
+    assert set(result.tree.successors(bt.GERMLINE_ROOT_ID)) == {mrca}
+    assert set(result.tree.successors(mrca)) == {"a", "b", "c"}
+    newick = bt.digraph_to_newick(result.tree, bt.GERMLINE_ROOT_ID)
+    bt.verify_newick(newick, {"a", "b", "c"}, bt.GERMLINE_ROOT_ID, result.hidden_ids)
+
+
+def test_dollo_tree_all_private_data_gives_a_star():
+    patterns = {
+        frozenset(["a"]): 5,
+        frozenset(["b"]): 5,
+        frozenset(["c"]): 5,
+        frozenset(["d"]): 5,
+        frozenset(["a", "b", "c", "d"]): 5,
+    }
+    result = bt.dollo_tree(patterns, ["a", "b", "c", "d"], n_bootstrap=0)
+    # exactly one hidden node (the MRCA), every leaf a direct child of it.
+    assert len(result.hidden_ids) == 1
+    mrca = next(iter(result.hidden_ids))
+    assert set(result.tree.successors(bt.GERMLINE_ROOT_ID)) == {mrca}
+    assert set(result.tree.successors(mrca)) == {"a", "b", "c", "d"}
+
+
+def test_dollo_tree_single_cluster_is_trivial():
+    result = bt.dollo_tree({frozenset(["a"]): 3}, ["a"], n_bootstrap=0)
+    assert set(result.tree.edges()) == {(bt.GERMLINE_ROOT_ID, "a")}
+    assert result.hidden_ids == set()
+
+
+def test_dollo_bootstrap_is_deterministic_given_a_seed():
+    r1 = bt.dollo_tree(REAL_RUN_PATTERNS, REAL_RUN_LEAVES, n_bootstrap=50, seed=7)
+    r2 = bt.dollo_tree(REAL_RUN_PATTERNS, REAL_RUN_LEAVES, n_bootstrap=50, seed=7)
+    assert r1.clade_support == r2.clade_support
+    assert r1.top2_win_rate == r2.top2_win_rate
+
+
+def test_dollo_low_support_clade_is_collapsed():
+    # {a,b}'s only support is one weak pattern (count 1), heavily outweighed
+    # by private mutations on a and b individually: the point estimate still
+    # picks {a,b} as the optimal clade (cost 406, unique), but its bootstrap
+    # support (confirmed deterministic at seed=0: 0.68) falls just under the
+    # default 0.7 threshold, so it must not survive into the emitted tree.
+    patterns = {
+        frozenset(["a", "b"]): 1,
+        frozenset(["a"]): 200,
+        frozenset(["b"]): 200,
+        frozenset(["a", "b", "c"]): 5,
+    }
+    result = bt.dollo_tree(
+        patterns, ["a", "b", "c"], n_bootstrap=200, min_clade_support=0.7, seed=0
+    )
+    assert result.n_ties == 1
+    support = {frozenset(k): v for k, v in result.clade_support.items()}
+    assert support[frozenset(["a", "b"])] < 0.7
+    assert frozenset(["a", "b"]) in {frozenset(c) for c in result.collapsed_clades}
+    # collapsed: a, b and c all sit directly under the one hidden MRCA node.
+    assert len(result.hidden_ids) == 1
+    mrca = next(iter(result.hidden_ids))
+    assert set(result.tree.successors(mrca)) == {"a", "b", "c"}
+
+
+def test_dollo_recovers_a_known_tree_under_dropout():
+    # Known tree: germline -> mrca -> {e, X}; X -> {d, Y}; Y -> {c, {a,b}}.
+    # Each clade gets its own defining mutations; a dropout rate removes some
+    # 1s (a present cluster read as absent), the realistic failure mode.
+    rng = np.random.default_rng(0)
+    leaves = ["a", "b", "c", "d", "e"]
+    clade_mutation_counts = {
+        frozenset(["a", "b"]): 40,
+        frozenset(["a", "b", "c"]): 40,
+        frozenset(["a", "b", "c", "d"]): 40,
+        frozenset(leaves): 40,
+    }
+    private_counts = {frozenset([leaf]): 40 for leaf in leaves}
+
+    dropout_rate = 0.07
+    resampled_patterns = {}
+    for pattern, n in {**clade_mutation_counts, **private_counts}.items():
+        for _ in range(n):
+            observed = frozenset(
+                leaf for leaf in pattern if rng.random() >= dropout_rate
+            )
+            if observed:
+                resampled_patterns[observed] = resampled_patterns.get(observed, 0) + 1
+
+    result = bt.dollo_tree(resampled_patterns, leaves, n_bootstrap=200, seed=1)
+    support = {frozenset(k): v for k, v in result.clade_support.items()}
+    for true_clade in [
+        frozenset(["a", "b"]),
+        frozenset(["a", "b", "c"]),
+        frozenset(["a", "b", "c", "d"]),
+    ]:
+        assert support.get(true_clade, 0.0) >= 0.7, (true_clade, support)
+
+
+# --------------------------------------------------------------------------- #
+# --compare-tree: clade-level agreement, ignoring hidden-node names
+# --------------------------------------------------------------------------- #
+
+
+def test_compare_tree_clades_agreement(tmp_path):
+    # SNV tree: ((7,8)g1,9,10)germline -- clade {7,8}.
+    snv_tree = nx.DiGraph(
+        [
+            ("germline", "g1"),
+            ("g1", "7"),
+            ("g1", "8"),
+            ("germline", "9"),
+            ("germline", "10"),
+        ]
+    )
+    other_path = tmp_path / "other.nwk"
+    # CNA tree: ((7,8)h1,(9,10)h2)germline -- clades {7,8} and {9,10}.
+    other_path.write_text("((7,8)h1,(9,10)h2)germline;\n")
+
+    result = bt.compare_tree_clades(snv_tree, "germline", other_path)
+    assert result["both"] == [["7", "8"]]
+    assert result["only_second"] == [["9", "10"]]
+    assert result["only_first"] == []
+
+
+def test_compare_tree_clades_raises_on_multiple_roots(tmp_path):
+    other_path = tmp_path / "other.nwk"
+    other_path.write_text("(a,b)r1;(c,d)r2;\n")  # two distinctly-labelled roots
+    snv_tree = nx.DiGraph([("germline", "a")])
+    with pytest.raises(ValueError, match="exactly one root"):
+        bt.compare_tree_clades(snv_tree, "germline", other_path)
 
 
 def test_enumerate_rooted_trees_count_and_validity():
@@ -578,7 +803,7 @@ def test_resolve_lichee_home_names_everything_missing(tmp_path, monkeypatch):
     assert "java on PATH" in message
 
 
-def _run_lichee(tmp_path, monkeypatch, write=True, returncode=0):
+def _run_lichee(tmp_path, monkeypatch, write=True, returncode=0, **extra):
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -595,7 +820,9 @@ def _run_lichee(tmp_path, monkeypatch, write=True, returncode=0):
         log_path=tmp_path / "lichee.log",
         jar=tmp_path / "release" / "lichee.jar",
         lib=tmp_path / "lib",
-        tau=0.05,
+        min_vaf_present=0.05,
+        max_vaf_absent=0.05,
+        **extra,
     )
     return result, calls
 
@@ -619,11 +846,34 @@ def test_run_lichee_command_is_java_cp_with_an_unexpanded_lib_glob(
     assert (tmp_path / "lichee.log").exists()
 
 
-def test_run_lichee_uses_tau_for_both_vaf_cutoffs(tmp_path, monkeypatch):
+def test_run_lichee_uses_the_given_vaf_cutoffs(tmp_path, monkeypatch):
     _, calls = _run_lichee(tmp_path, monkeypatch)
     cmd = calls[0][0]
     assert cmd[cmd.index("-minVAFPresent") + 1] == "0.05"
     assert cmd[cmd.index("-maxVAFAbsent") + 1] == "0.05"
+
+
+def test_run_lichee_passes_optional_flags_only_when_given(tmp_path, monkeypatch):
+    _, calls = _run_lichee(tmp_path, monkeypatch)
+    assert "-minClusterSize" not in calls[0][0]
+    assert "-e" not in calls[0][0]
+
+    _, calls = _run_lichee(tmp_path, monkeypatch, min_cluster_size=50, error_margin=0.2)
+    cmd = calls[0][0]
+    assert cmd[cmd.index("-minClusterSize") + 1] == "50"
+    assert cmd[cmd.index("-e") + 1] == "0.2"
+
+
+def test_extract_lichee_verdict_quotes_the_line_verbatim(tmp_path):
+    log = tmp_path / "lichee.log"
+    log.write_text("some chatter\nFound 0 valid trees\nmore chatter\n")
+    assert bt.extract_lichee_verdict(log) == "Found 0 valid trees"
+
+
+def test_extract_lichee_verdict_none_when_absent(tmp_path):
+    log = tmp_path / "lichee.log"
+    log.write_text("nothing relevant here\n")
+    assert bt.extract_lichee_verdict(log) is None
 
 
 def test_run_lichee_ignores_exit_status_when_the_file_appears(tmp_path, monkeypatch):
@@ -1134,7 +1384,8 @@ def test_write_run_parse_build_verify_chain_as_main_runs_it(tmp_path, monkeypatc
         log_path=tmp_path / "run.log",
         jar=tmp_path / "lichee.jar",
         lib=tmp_path / "lib",
-        tau=0.05,
+        min_vaf_present=0.05,
+        max_vaf_absent=0.05,
     )
     result = bt.build_lichee_clone_tree(
         bt.parse_lichee_trees(trees_path, columns), columns, 0.05
@@ -1145,11 +1396,16 @@ def test_write_run_parse_build_verify_chain_as_main_runs_it(tmp_path, monkeypatc
     )
 
 
-def test_write_diagnostics_reports_lichee_findings(tmp_path):
+def test_write_diagnostics_reports_lichee_as_comparison_only(tmp_path):
     r = _build("shared_nodes.trees.txt")
+    dollo = bt.dollo_tree({frozenset(["7", "8"]): 5}, ["7", "8"], n_bootstrap=0)
     out = tmp_path / "diag.txt"
-    bt.write_diagnostics(out, {}, {}, 0, "lichee", None, None, r.tree, lichee_result=r)
+    bt.write_diagnostics(
+        out, 0, {}, dollo, lichee_result=r, lichee_verdict="Found 3 valid trees"
+    )
     text = out.read_text()
-    assert "## Method used: lichee" in text
+    assert "## Method used: dollo" in text
+    assert "LICHeE (comparison only, not used for snv_tree.nwk)" in text
+    assert "Found 3 valid trees" in text
     assert "indistinguishable by SNV profile" in text
     assert "Hidden group node g3" in text
