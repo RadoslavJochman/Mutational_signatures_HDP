@@ -11,6 +11,8 @@ convention for external-tool wrappers). The two fixtures under
 ``tests/fixtures/lichee`` are verbatim LICHeE output from real runs.
 """
 
+import itertools
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -65,12 +67,31 @@ def test_verify_newick_rejects_missing_cluster():
 def test_three_gamete_violations():
     # x: cluster 1 only, y: cluster 3 only, both: cluster 2 -- all three gametes
     # (10, 01, 11) present for the pair (x, y), a perfect-phylogeny violation.
-    mutation_sets = {"1": {"x"}, "2": {"x", "y"}, "3": {"y"}}
-    assert bt.three_gamete_violations(mutation_sets) == 1
+    states = pd.DataFrame(
+        {"1": [1, 0], "2": [1, 1], "3": [0, 1]}, index=["x", "y"], dtype=float
+    )
+    assert bt.three_gamete_violations(states) == 1
 
     # nested sets never violate: every mutation in 1 also sits in 2
-    nested = {"1": {"x"}, "2": {"x", "y"}}
+    nested = pd.DataFrame({"1": [1], "2": [1]}, index=["x"], dtype=float)
     assert bt.three_gamete_violations(nested) == 0
+
+
+def test_three_gamete_violations_ignores_clusters_unknown_at_either_snv():
+    # Same triple as above, but cluster 3's own call at y is unknown (NaN):
+    # the pair is no longer known-in-both anywhere that would show "only y",
+    # so the violation must not fire.
+    states = pd.DataFrame(
+        {"1": [1, 0], "2": [1, 1], "3": [0, np.nan]}, index=["x", "y"], dtype=float
+    )
+    assert bt.three_gamete_violations(states) == 0
+
+
+def test_three_gamete_violations_skips_pairs_with_no_cluster_known_in_both():
+    states = pd.DataFrame(
+        {"1": [1, np.nan], "2": [np.nan, 1]}, index=["x", "y"], dtype=float
+    )
+    assert bt.three_gamete_violations(states) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -195,18 +216,14 @@ def test_parse_forced_vcf_calls_reads_the_tumour_column_by_name(tmp_path, text):
     vcf_path.write_text(text)
     calls = bt.parse_forced_vcf_calls(vcf_path, "7")
 
-    assert calls[("1", 100, "C", "T")] == (pytest.approx(0.6), 12)
-    assert calls[("1", 200, "C", "T")] == (
-        pytest.approx(0.048),
-        1,
-    )  # non-PASS still parsed
+    # (alt_reads, depth), depth = sum of the whole AD array -- never Mutect2's own
+    # FORMAT AF, which is confirmed not to equal alt/depth on real slice D calls.
+    assert calls[("1", 100, "C", "T")] == (12, 20)  # AD=8,12
+    assert calls[("1", 200, "C", "T")] == (1, 21)  # AD=20,1; non-PASS still parsed
     assert ("1", 300, "C", "T") not in calls  # multi-base REF (indel) excluded
-    assert calls[("1", 400, "C", "T")] == (
-        pytest.approx(0.3),
-        3,
-    )  # multi-allelic, split
-    assert calls[("1", 400, "C", "G")] == (pytest.approx(0.2), 2)
-    assert calls[("1", 500, "C", "T")] == (0.0, 0)  # "." fields -> zero, not raised
+    assert calls[("1", 400, "C", "T")] == (3, 15)  # AD=10,3,2; multi-allelic, split
+    assert calls[("1", 400, "C", "G")] == (2, 15)
+    assert calls[("1", 500, "C", "T")] == (0, 0)  # "." AD -> zero, not raised
 
 
 @pytest.mark.parametrize("text", [_FORCED_VCF_TEXT, _FORCED_VCF_TEXT_TUMOUR_FIRST])
@@ -216,7 +233,7 @@ def test_parse_forced_vcf_calls_reads_the_normal_column_for_its_own_id(tmp_path,
     vcf_path = tmp_path / "clone4_1.forced.vcf"
     vcf_path.write_text(text)
     calls = bt.parse_forced_vcf_calls(vcf_path, "4")
-    assert calls[("1", 100, "C", "T")] == (0.0, 0)
+    assert calls[("1", 100, "C", "T")] == (0, 20)  # AD=20,0
 
 
 def test_parse_forced_vcf_calls_raises_when_the_sample_column_is_absent(tmp_path):
@@ -227,16 +244,199 @@ def test_parse_forced_vcf_calls_raises_when_the_sample_column_is_absent(tmp_path
     assert "clone4" in str(err.value) and "clone7" in str(err.value)
 
 
-def test_resolve_presence_calls_thresholds_vaf_and_alt_reads():
-    cluster_to_calls = {
-        "7": {("1", 100, "C", "T"): (0.6, 12), ("1", 200, "C", "T"): (0.048, 1)},
-        "8": {("1", 100, "C", "T"): (0.02, 5)},  # enough reads, VAF too low
-    }
-    presence = bt.resolve_presence_calls(
-        cluster_to_calls, min_vaf=0.05, min_alt_reads=2
+# --------------------------------------------------------------------------- #
+# Three-state classification (present / absent / unknown)
+# --------------------------------------------------------------------------- #
+
+
+def test_implied_min_depth_matches_the_documented_default():
+    # ceil(log(0.05) / log(0.75)) == 11, confirmed by hand and by script.
+    assert bt.implied_min_depth(0.25, 0.05) == 11
+
+
+def test_implied_min_depth_raises_on_out_of_range_inputs():
+    with pytest.raises(ValueError, match="expected_vaf"):
+        bt.implied_min_depth(1.5, 0.05)
+    with pytest.raises(ValueError, match="alpha"):
+        bt.implied_min_depth(0.25, 0.0)
+
+
+def test_classify_snv_state_present_needs_both_thresholds():
+    assert bt.classify_snv_state(2, 40, min_alt_reads=2, min_vaf=0.05) == (
+        "present",
+        None,
     )
-    assert presence["7"] == {("1", 100, "C", "T")}  # the 200 site fails both thresholds
-    assert presence["8"] == set()
+    # enough reads, VAF too low
+    assert bt.classify_snv_state(2, 100, min_alt_reads=2, min_vaf=0.05) == (
+        "unknown",
+        bt.UNKNOWN_ALT_GE2_LOW_VAF,
+    )
+
+
+def test_classify_snv_state_absent_needs_depth_at_or_above_the_implied_minimum():
+    # alt==0, depth==11 (the implied minimum at the defaults): exactly absent.
+    assert bt.classify_snv_state(0, 11, 2, 0.05) == ("absent", None)
+    # one shallower: not enough depth to trust the absence.
+    assert bt.classify_snv_state(0, 10, 2, 0.05) == (
+        "unknown",
+        bt.UNKNOWN_LOW_DEPTH_ZERO,
+    )
+
+
+def test_classify_snv_state_one_alt_read_is_always_unknown_regardless_of_depth():
+    assert bt.classify_snv_state(1, 8, 2, 0.05) == ("unknown", bt.UNKNOWN_ONE_ALT_READ)
+    assert bt.classify_snv_state(1, 200, 2, 0.05) == (
+        "unknown",
+        bt.UNKNOWN_ONE_ALT_READ,
+    )
+
+
+def test_classify_snv_state_zero_depth_is_unknown_not_absent():
+    assert bt.classify_snv_state(0, 0, 2, 0.05) == (
+        "unknown",
+        bt.UNKNOWN_LOW_DEPTH_ZERO,
+    )
+
+
+def test_classify_cluster_states_marks_a_missing_record_not_genotyped():
+    union_sites = {("1", 1, "C", "T"), ("1", 2, "C", "T")}
+    calls = {("1", 1, "C", "T"): (10, 20)}  # site 2 has no record at all
+    states = bt.classify_cluster_states(calls, union_sites, 2, 0.05)
+    assert states[("1", 1, "C", "T")] == ("present", None)
+    assert states[("1", 2, "C", "T")] == ("unknown", bt.UNKNOWN_NOT_GENOTYPED)
+
+
+def test_present_snvs_from_states_matches_the_present_branch_only():
+    cluster_states = {
+        "7": {
+            ("1", 1, "C", "T"): ("present", None),
+            ("1", 2, "C", "T"): ("absent", None),
+            ("1", 3, "C", "T"): ("unknown", bt.UNKNOWN_ONE_ALT_READ),
+        }
+    }
+    assert bt.present_snvs_from_states(cluster_states) == {"7": {("1", 1, "C", "T")}}
+
+
+# --------------------------------------------------------------------------- #
+# Ternary matrices, site patterns, and the diagnostics they feed
+# --------------------------------------------------------------------------- #
+
+
+def _three_cluster_states():
+    sites = [("1", i, "C", "T") for i in range(1, 5)]
+    # site1: 7,8 present, 9 absent (informative). site2: 7 present, 8,9 unknown
+    # (not informative -- no confirmed absence). site3: nobody present (excluded
+    # from the tree). site4: all three present (the full set, cost-invariant).
+    return {
+        "7": {
+            sites[0]: ("present", None),
+            sites[1]: ("present", None),
+            sites[2]: ("unknown", bt.UNKNOWN_ONE_ALT_READ),
+            sites[3]: ("present", None),
+        },
+        "8": {
+            sites[0]: ("present", None),
+            sites[1]: ("unknown", bt.UNKNOWN_LOW_DEPTH_ZERO),
+            sites[2]: ("unknown", bt.UNKNOWN_NOT_GENOTYPED),
+            sites[3]: ("present", None),
+        },
+        "9": {
+            sites[0]: ("absent", None),
+            sites[1]: ("unknown", bt.UNKNOWN_ALT_GE2_LOW_VAF),
+            sites[2]: ("absent", None),
+            sites[3]: ("present", None),
+        },
+    }, set(sites)
+
+
+def test_site_ternary_patterns_and_pattern_counts():
+    cluster_states, union_sites = _three_cluster_states()
+    site_patterns = bt.site_ternary_patterns(cluster_states, union_sites)
+    assert site_patterns[("1", 1, "C", "T")] == (
+        frozenset(["7", "8"]),
+        frozenset(["9"]),
+    )
+    assert site_patterns[("1", 2, "C", "T")] == (frozenset(["7"]), frozenset())
+    assert site_patterns[("1", 3, "C", "T")] == (frozenset(), frozenset(["9"]))
+    assert site_patterns[("1", 4, "C", "T")] == (
+        frozenset(["7", "8", "9"]),
+        frozenset(),
+    )
+
+    pattern_counts = bt.dollo_pattern_counts(site_patterns)
+    # site3 (no present cluster) is excluded; the other three each keep their
+    # own distinct pattern (count 1 apiece here, since none repeat).
+    assert sum(pattern_counts.values()) == 3
+    assert (frozenset(), frozenset(["9"])) not in pattern_counts
+
+
+def test_site_pattern_summary_counts_no_present_tree_eligible_and_informative():
+    cluster_states, union_sites = _three_cluster_states()
+    site_patterns = bt.site_ternary_patterns(cluster_states, union_sites)
+    summary = bt.site_pattern_summary(site_patterns)
+    assert summary == {"no_present": 1, "tree_eligible": 3, "informative": 1}
+
+
+def test_top_ternary_patterns_ranks_by_count_and_tags_informative():
+    cluster_states, union_sites = _three_cluster_states()
+    site_patterns = bt.site_ternary_patterns(cluster_states, union_sites)
+    ranked = bt.top_ternary_patterns(site_patterns, n=10)
+    by_pattern = {
+        pattern: (count, informative) for pattern, count, informative in ranked
+    }
+    assert by_pattern[(frozenset(["7", "8"]), frozenset(["9"]))] == (1, True)
+    assert by_pattern[(frozenset(["7"]), frozenset())] == (1, False)
+
+
+def test_build_ternary_states_matrix_covers_the_full_union(tmp_path):
+    cluster_states, union_sites = _three_cluster_states()
+    states_df, reasons_df = bt.build_ternary_states_matrix(cluster_states, union_sites)
+    assert len(states_df) == 4  # every union site, including the no-present one
+    assert states_df.loc["1:1:C>T", "7"] == 1.0
+    assert states_df.loc["1:1:C>T", "9"] == 0.0
+    assert pd.isna(states_df.loc["1:2:C>T", "8"])
+    assert reasons_df.loc["1:2:C>T", "8"] == bt.UNKNOWN_LOW_DEPTH_ZERO
+    assert pd.isna(reasons_df.loc["1:1:C>T", "7"])  # present -> no reason
+
+
+def test_cluster_state_summary_counts_and_median_depth():
+    cluster_states, _ = _three_cluster_states()
+    cluster_to_calls = {
+        "7": {
+            ("1", 1, "C", "T"): (10, 20),
+            ("1", 2, "C", "T"): (1, 15),
+            ("1", 4, "C", "T"): (12, 22),
+        },  # site 3 not_genotyped for 7? no -- 7 has no site3 key: matches states
+        "8": {("1", 1, "C", "T"): (8, 18), ("1", 4, "C", "T"): (9, 19)},
+        "9": {
+            ("1", 1, "C", "T"): (0, 12),
+            ("1", 3, "C", "T"): (0, 14),
+            ("1", 4, "C", "T"): (10, 20),
+        },
+    }
+    summary = bt.cluster_state_summary(cluster_states, cluster_to_calls)
+    assert summary["7"]["present"] == 3  # site1, site2, site4
+    assert summary["7"]["unknown"] == 1  # site3, one_alt_read
+    assert summary["7"]["reasons"] == {bt.UNKNOWN_ONE_ALT_READ: 1}
+    assert summary["7"]["median_depth"] == 20  # median of 20, 15, 22
+    assert summary["9"]["absent"] == 2
+    assert summary["9"]["present"] == 1
+
+
+def test_detectability_table_restricts_to_sites_present_in_every_other_cluster():
+    cluster_states, _ = _three_cluster_states()
+    cluster_to_calls = {
+        "7": {("1", 1, "C", "T"): (10, 20), ("1", 4, "C", "T"): (12, 22)},
+        "8": {("1", 1, "C", "T"): (8, 18), ("1", 4, "C", "T"): (9, 19)},
+        "9": {("1", 1, "C", "T"): (0, 12), ("1", 4, "C", "T"): (10, 20)},
+    }
+    table = bt.detectability_table(cluster_states, cluster_to_calls)
+    # Only site1 and site4 have every OTHER cluster present for cluster 9's row
+    # (site2/site3 fail that for at least one of 7/8); at both, 9 is present or
+    # absent, never unknown, in this fixture.
+    assert table["9"]["n_sites"] == 2
+    assert table["9"]["present"] + table["9"]["absent"] == 2
+    assert table["9"]["median_depth"] == 16  # median of 12, 20
 
 
 def test_discover_forced_cluster_vcfs(tmp_path):
@@ -407,18 +607,115 @@ def test_compare_topologies_disagrees_on_star_vs_chain():
 
 
 def test_dollo_pattern_cost_hand_checked():
-    # ((a,c),b): S={a,b} spans both of the root's children, so the root is the
-    # LCA; the (a,c) side needs one loss (c is absent under a present-mixed
-    # subtree), the b side needs none (b itself is present) -- 1 gain + 1 loss.
+    # ((a,c),b): present={a,b} spans both of the root's children, so the
+    # root is the LCA; the (a,c) side needs one loss (c is a CONFIRMED
+    # absence under a present-mixed subtree), the b side needs none (b
+    # itself is present) -- 1 gain + 1 loss.
     topology = frozenset([frozenset(["a", "c"]), "b"])
-    assert bt.dollo_pattern_cost(topology, frozenset(["a", "b"])) == (2, 1)
+    assert bt.dollo_pattern_cost(topology, frozenset(["a", "b"]), frozenset(["c"])) == (
+        2,
+        1,
+    )
+
+
+def test_dollo_pattern_cost_unknown_only_absence_is_free():
+    # Same topology and present set, but c is UNKNOWN rather than confirmed
+    # absent: no loss is needed, since c can be assigned present for free.
+    topology = frozenset([frozenset(["a", "c"]), "b"])
+    assert bt.dollo_pattern_cost(topology, frozenset(["a", "b"]), frozenset()) == (1, 0)
+
+
+def test_dollo_pattern_cost_a_single_confirmed_absence_in_a_clade_costs_one():
+    # ((a,c),b): present={a,b} spans the root, so a's sibling leaf c -- a
+    # maximal no-present subtree of size 1 -- needs its own loss precisely
+    # because it is CONFIRMED absent (this is the same case
+    # test_dollo_pattern_cost_hand_checked already covers as its headline
+    # example; repeated here under this test's own name for the "a single
+    # confirmed absence in a clade costs one" case the spec calls out).
+    topology = frozenset([frozenset(["a", "c"]), "b"])
+    assert bt.dollo_pattern_cost(topology, frozenset(["a", "b"]), frozenset(["c"])) == (
+        2,
+        1,
+    )
+
+
+def test_dollo_pattern_cost_an_absence_outside_the_gains_own_clade_is_free():
+    # ((a,c),(b,d)): present={a,c} is EXACTLY one clade (its own LCA), so
+    # nothing else in the tree -- including d, confirmed absent -- needs any
+    # loss: d simply isn't under this mutation's gain at all.
+    topology = frozenset([frozenset(["a", "c"]), frozenset(["b", "d"])])
+    assert bt.dollo_pattern_cost(topology, frozenset(["a", "c"]), frozenset(["d"])) == (
+        1,
+        0,
+    )
+
+
+def test_dollo_pattern_cost_empty_present_costs_nothing():
+    topology = frozenset([frozenset(["a", "c"]), "b"])
+    assert bt.dollo_pattern_cost(topology, frozenset(), frozenset(["a"])) == (0, 0)
 
 
 def test_dollo_pattern_cost_singleton_and_full_set_are_topology_invariant():
     topologies = bt.enumerate_dollo_topologies(["a", "b", "c"])
     for t in topologies:
-        assert bt.dollo_pattern_cost(t, frozenset(["a"])) == (1, 0)
-        assert bt.dollo_pattern_cost(t, frozenset(["a", "b", "c"])) == (1, 0)
+        assert bt.dollo_pattern_cost(t, frozenset(["a"]), frozenset()) == (1, 0)
+        assert bt.dollo_pattern_cost(t, frozenset(["a", "b", "c"]), frozenset()) == (
+            1,
+            0,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Missing-data Dollo cost verified against the true brute-force minimum
+# --------------------------------------------------------------------------- #
+
+
+def _brute_force_missing_cost(topology, present, absent, unknown):
+    """The true minimum standard (no-missing-data) Dollo cost over every
+    possible 0/1 assignment of the unknown leaves: for each assignment,
+    every leaf not explicitly present is treated as absent (the ordinary,
+    no-missing-data Dollo rule -- passing the FULL complement as ``absent``
+    reproduces it, since then no leaf is ever free), and the topology's own
+    LCA is recomputed fresh (so an assignment is free to place a present
+    leaf outside the original present-set's subtree too, not just relabel
+    within it). This is the ground truth dollo_pattern_cost is checked
+    against; it is exponential in len(unknown) and only used here, never in
+    the pipeline itself."""
+    if not present:
+        return 0
+    all_leaves = bt._dollo_leaves_under(topology)
+    best = None
+    unknown = list(unknown)
+    for r in range(len(unknown) + 1):
+        for combo in itertools.combinations(unknown, r):
+            full_present = frozenset(present) | frozenset(combo)
+            cost, _ = bt.dollo_pattern_cost(
+                topology, full_present, all_leaves - full_present
+            )
+            if best is None or cost < best:
+                best = cost
+    return best
+
+
+@pytest.mark.parametrize("n_leaves", [5, 6])
+def test_dollo_pattern_cost_matches_brute_force_minimum_over_unknowns(n_leaves):
+    rng = random.Random(0)
+    leaves = [chr(ord("a") + i) for i in range(n_leaves)]
+    topologies = bt.enumerate_dollo_topologies(leaves)
+    checked = 0
+    for _ in range(300):
+        topology = rng.choice(topologies)
+        labels = {leaf: rng.choice(["P", "P", "A", "U", "U"]) for leaf in leaves}
+        present = frozenset(leaf for leaf, s in labels.items() if s == "P")
+        absent = frozenset(leaf for leaf, s in labels.items() if s == "A")
+        unknown = frozenset(leaf for leaf, s in labels.items() if s == "U")
+        if not present:
+            continue
+        checked += 1
+        expected = _brute_force_missing_cost(topology, present, absent, unknown)
+        cost, _ = bt.dollo_pattern_cost(topology, present, absent)
+        assert cost == expected, (topology, present, absent, unknown)
+    assert checked > 100  # the loop actually exercised a good number of cases
 
 
 def test_enumerate_dollo_topologies_count():
@@ -438,11 +735,24 @@ def test_enumerate_dollo_topologies_raises_on_no_clusters():
         bt.enumerate_dollo_topologies([])
 
 
+def _binary_patterns(patterns, leaves):
+    """Adapt a plain {present: count} dict (the old binary API, no missing
+    data) into the ternary (present, absent) form dollo_tree now takes,
+    with absent = everything not present -- reproduces the retired binary
+    behaviour exactly (verified: same costs, same optimum, same runner-up
+    as before this change)."""
+    full = frozenset(leaves)
+    return {(p, full - p): c for p, c in patterns.items()}
+
+
 # The real slice D pattern counts over columns [3, 7, 8, 9, 10] (see the
 # module docstring's real-run derivation): confirmed by hand and by
 # independent script, the unique optimum is (3,(10,(9,(7,8)))), cost 1996
 # above the topology-invariant baseline (10609 total), runner-up 2026 above
 # (10639 total) -- swapping whether 9 or 10 joins the {7,8} clade first.
+# These counts carry no per-site absent/unknown split (they are already
+# aggregated), so they are read as fully binary (absent = not present) --
+# _binary_patterns below.
 REAL_RUN_PATTERNS = {
     frozenset(["10"]): 3931,
     frozenset(["8"]): 1087,
@@ -464,16 +774,18 @@ REAL_RUN_LEAVES = ["3", "7", "8", "9", "10"]
 
 
 def test_dollo_best_topologies_matches_the_real_run_derivation():
+    patterns = _binary_patterns(REAL_RUN_PATTERNS, REAL_RUN_LEAVES)
     topologies = bt.enumerate_dollo_topologies(REAL_RUN_LEAVES)
-    table = bt.dollo_cost_table(topologies, REAL_RUN_PATTERNS.keys())
-    best_cost, best = bt.dollo_best_topologies(topologies, REAL_RUN_PATTERNS, table)
+    table = bt.dollo_cost_table(topologies, patterns.keys())
+    best_cost, best = bt.dollo_best_topologies(topologies, patterns, table)
     assert best_cost == 10609
     assert len(best) == 1
     assert bt.render_topology(best[0]) == "(3,(10,((7,8),9)))"
 
 
 def test_dollo_tree_real_run_fixture_emits_high_support_784_clade():
-    result = bt.dollo_tree(REAL_RUN_PATTERNS, REAL_RUN_LEAVES, n_bootstrap=200, seed=0)
+    patterns = _binary_patterns(REAL_RUN_PATTERNS, REAL_RUN_LEAVES)
+    result = bt.dollo_tree(patterns, REAL_RUN_LEAVES, n_bootstrap=200, seed=0)
     assert result.best_cost == 10609
     assert result.runner_up_cost == 10639
     assert result.n_ties == 1
@@ -497,7 +809,9 @@ def test_dollo_tree_ties_emit_the_strict_consensus_as_a_polytomy():
     # so no clade beyond the full set (the MRCA) is common to every optimal
     # topology: the consensus is a star under the MRCA, not one pairing
     # picked arbitrarily.
-    patterns = {frozenset(["a", "b"]): 10, frozenset(["b", "c"]): 10}
+    patterns = _binary_patterns(
+        {frozenset(["a", "b"]): 10, frozenset(["b", "c"]): 10}, ["a", "b", "c"]
+    )
     result = bt.dollo_tree(patterns, ["a", "b", "c"], n_bootstrap=0)
     assert result.n_ties > 1
     assert len(result.hidden_ids) == 1  # just the MRCA, no {a,b}/{b,c} split kept
@@ -509,13 +823,16 @@ def test_dollo_tree_ties_emit_the_strict_consensus_as_a_polytomy():
 
 
 def test_dollo_tree_all_private_data_gives_a_star():
-    patterns = {
-        frozenset(["a"]): 5,
-        frozenset(["b"]): 5,
-        frozenset(["c"]): 5,
-        frozenset(["d"]): 5,
-        frozenset(["a", "b", "c", "d"]): 5,
-    }
+    patterns = _binary_patterns(
+        {
+            frozenset(["a"]): 5,
+            frozenset(["b"]): 5,
+            frozenset(["c"]): 5,
+            frozenset(["d"]): 5,
+            frozenset(["a", "b", "c", "d"]): 5,
+        },
+        ["a", "b", "c", "d"],
+    )
     result = bt.dollo_tree(patterns, ["a", "b", "c", "d"], n_bootstrap=0)
     # exactly one hidden node (the MRCA), every leaf a direct child of it.
     assert len(result.hidden_ids) == 1
@@ -525,14 +842,16 @@ def test_dollo_tree_all_private_data_gives_a_star():
 
 
 def test_dollo_tree_single_cluster_is_trivial():
-    result = bt.dollo_tree({frozenset(["a"]): 3}, ["a"], n_bootstrap=0)
+    patterns = _binary_patterns({frozenset(["a"]): 3}, ["a"])
+    result = bt.dollo_tree(patterns, ["a"], n_bootstrap=0)
     assert set(result.tree.edges()) == {(bt.GERMLINE_ROOT_ID, "a")}
     assert result.hidden_ids == set()
 
 
 def test_dollo_bootstrap_is_deterministic_given_a_seed():
-    r1 = bt.dollo_tree(REAL_RUN_PATTERNS, REAL_RUN_LEAVES, n_bootstrap=50, seed=7)
-    r2 = bt.dollo_tree(REAL_RUN_PATTERNS, REAL_RUN_LEAVES, n_bootstrap=50, seed=7)
+    patterns = _binary_patterns(REAL_RUN_PATTERNS, REAL_RUN_LEAVES)
+    r1 = bt.dollo_tree(patterns, REAL_RUN_LEAVES, n_bootstrap=50, seed=7)
+    r2 = bt.dollo_tree(patterns, REAL_RUN_LEAVES, n_bootstrap=50, seed=7)
     assert r1.clade_support == r2.clade_support
     assert r1.top2_win_rate == r2.top2_win_rate
 
@@ -543,12 +862,15 @@ def test_dollo_low_support_clade_is_collapsed():
     # picks {a,b} as the optimal clade (cost 406, unique), but its bootstrap
     # support (confirmed deterministic at seed=0: 0.68) falls just under the
     # default 0.7 threshold, so it must not survive into the emitted tree.
-    patterns = {
-        frozenset(["a", "b"]): 1,
-        frozenset(["a"]): 200,
-        frozenset(["b"]): 200,
-        frozenset(["a", "b", "c"]): 5,
-    }
+    patterns = _binary_patterns(
+        {
+            frozenset(["a", "b"]): 1,
+            frozenset(["a"]): 200,
+            frozenset(["b"]): 200,
+            frozenset(["a", "b", "c"]): 5,
+        },
+        ["a", "b", "c"],
+    )
     result = bt.dollo_tree(
         patterns, ["a", "b", "c"], n_bootstrap=200, min_clade_support=0.7, seed=0
     )
@@ -562,38 +884,87 @@ def test_dollo_low_support_clade_is_collapsed():
     assert set(result.tree.successors(mrca)) == {"a", "b", "c"}
 
 
-def test_dollo_recovers_a_known_tree_under_dropout():
-    # Known tree: germline -> mrca -> {e, X}; X -> {d, Y}; Y -> {c, {a,b}}.
-    # Each clade gets its own defining mutations; a dropout rate removes some
-    # 1s (a present cluster read as absent), the realistic failure mode.
-    rng = np.random.default_rng(0)
+def _old_binary_classify(alt_reads, depth, min_alt_reads, min_vaf):
+    """The RETIRED >=2-ALT-read binary rule (present or absent, never
+    unknown) -- a TEST-LOCAL helper that exists only to show the comparison
+    the module docstring's WHY section describes; unreachable from main()."""
+    vaf = alt_reads / depth if depth > 0 else 0.0
+    return "present" if alt_reads >= min_alt_reads and vaf >= min_vaf else "absent"
+
+
+def test_dollo_recovers_a_known_tree_under_realistic_dropout_and_beats_the_old_rule():
+    """Known tree: germline -> mrca -> {e, X}; X -> {d, Y}; Y -> {c, {a,b}}.
+    Clusters a and b are simulated at systematically LOW depth (5-7, like
+    slice D's shallowest cluster), everyone else at 15-25; a true mutation
+    reads at VAF ~0.3, a true absence at ~0.02 (sequencing error) -- exactly
+    the regime the WHY section describes: at low depth, a real mutation
+    frequently produces 0-1 ALT reads by chance, which the retired >=2-read
+    rule silently calls "absent".
+
+    Recovery (new): every true clade's support >= 0.7. Comparison (old,
+    asserted only because it is verified deterministic at this seed): the
+    old rule's confidence in the low-depth clade {a,b} and its parent
+    {a,b,c} falls below 0.7 on the SAME underlying simulated reads -- the
+    exact loss of confidence the WHY section predicts.
+    """
+    rng = np.random.default_rng(9)
     leaves = ["a", "b", "c", "d", "e"]
-    clade_mutation_counts = {
-        frozenset(["a", "b"]): 40,
-        frozenset(["a", "b", "c"]): 40,
-        frozenset(["a", "b", "c", "d"]): 40,
-        frozenset(leaves): 40,
+    full = frozenset(leaves)
+    true_clades = {
+        frozenset(["a", "b"]): 30,
+        frozenset(["a", "b", "c"]): 30,
+        frozenset(["a", "b", "c", "d"]): 30,
+        full: 30,
     }
-    private_counts = {frozenset([leaf]): 40 for leaf in leaves}
+    private = {frozenset([leaf]): 30 for leaf in leaves}
+    depth_ranges = {
+        "a": (5, 7), "b": (5, 7), "c": (15, 25), "d": (15, 25), "e": (15, 25),
+    }  # fmt: skip
+    min_alt_reads, min_vaf = 2, 0.05
 
-    dropout_rate = 0.07
-    resampled_patterns = {}
-    for pattern, n in {**clade_mutation_counts, **private_counts}.items():
+    new_counts, old_counts = {}, {}
+    for present_set, n in {**true_clades, **private}.items():
         for _ in range(n):
-            observed = frozenset(
-                leaf for leaf in pattern if rng.random() >= dropout_rate
-            )
-            if observed:
-                resampled_patterns[observed] = resampled_patterns.get(observed, 0) + 1
+            new_present, new_absent, old_present = set(), set(), set()
+            for leaf in leaves:
+                lo, hi = depth_ranges[leaf]
+                depth = rng.integers(lo, hi + 1)
+                p_alt = 0.3 if leaf in present_set else 0.02
+                alt = rng.binomial(depth, p_alt)
+                state, _ = bt.classify_snv_state(alt, depth, min_alt_reads, min_vaf)
+                if state == "present":
+                    new_present.add(leaf)
+                elif state == "absent":
+                    new_absent.add(leaf)
+                if (
+                    _old_binary_classify(alt, depth, min_alt_reads, min_vaf)
+                    == "present"
+                ):
+                    old_present.add(leaf)
+            if new_present:
+                key = (frozenset(new_present), frozenset(new_absent))
+                new_counts[key] = new_counts.get(key, 0) + 1
+            if old_present:
+                key2 = (frozenset(old_present), full - frozenset(old_present))
+                old_counts[key2] = old_counts.get(key2, 0) + 1
 
-    result = bt.dollo_tree(resampled_patterns, leaves, n_bootstrap=200, seed=1)
-    support = {frozenset(k): v for k, v in result.clade_support.items()}
+    new_result = bt.dollo_tree(new_counts, leaves, n_bootstrap=200, seed=100)
+    old_result = bt.dollo_tree(old_counts, leaves, n_bootstrap=200, seed=100)
+    new_support = {frozenset(k): v for k, v in new_result.clade_support.items()}
+    old_support = {frozenset(k): v for k, v in old_result.clade_support.items()}
+
     for true_clade in [
         frozenset(["a", "b"]),
         frozenset(["a", "b", "c"]),
         frozenset(["a", "b", "c", "d"]),
     ]:
-        assert support.get(true_clade, 0.0) >= 0.7, (true_clade, support)
+        assert new_support.get(true_clade, 0.0) >= 0.7, (true_clade, new_support)
+
+    print("new clade support:", new_support)
+    print("old clade support:", old_support)
+
+    assert old_support[frozenset(["a", "b"])] < 0.7
+    assert old_support[frozenset(["a", "b", "c"])] < 0.7
 
 
 # --------------------------------------------------------------------------- #
@@ -655,9 +1026,14 @@ COLUMNS = ["germline", "c3", "c7", "c8", "c9", "c10"]  # the fixtures' input hea
 
 
 def test_write_lichee_input_format_and_germline_column(tmp_path):
+    # (alt_reads, depth) now, not Mutect2's own AF -- write_lichee_input
+    # computes each VAF itself as alt_reads / depth.
     cluster_to_calls = {
-        "7": {("1", 100, "C", "T"): (0.6, 12)},
-        "8": {("1", 100, "C", "T"): (0.3, 5), ("1", 200, "C", "A"): (0.4, 6)},
+        "7": {("1", 100, "C", "T"): (12, 20)},  # 12/20 = 0.6
+        "8": {
+            ("1", 100, "C", "T"): (6, 20),  # 6/20 = 0.3
+            ("1", 200, "C", "A"): (8, 20),  # 8/20 = 0.4
+        },
     }
     out = tmp_path / "lichee_in.txt"
     columns = bt.write_lichee_input(cluster_to_calls, out)
@@ -674,6 +1050,14 @@ def test_write_lichee_input_format_and_germline_column(tmp_path):
     row_200 = lines[2].split("\t")
     assert row_200[4] == "0.0000"  # cluster 7 has no call here
     assert row_200[5] == "0.4000"
+
+
+def test_write_lichee_input_treats_zero_depth_as_zero_vaf(tmp_path):
+    cluster_to_calls = {"7": {("1", 100, "C", "T"): (0, 0)}}
+    out = tmp_path / "lichee_in.txt"
+    bt.write_lichee_input(cluster_to_calls, out)
+    row = out.read_text().splitlines()[1].split("\t")
+    assert row[4] == "0.0000"
 
 
 def _fake_home(tmp_path):
@@ -1304,12 +1688,33 @@ def test_write_run_parse_build_verify_chain_as_main_runs_it(tmp_path, monkeypatc
     )
 
 
+def _empty_state_diagnostics():
+    return bt.StateDiagnostics(
+        per_cluster={},
+        detectability={},
+        top_patterns=[],
+        site_summary={"no_present": 0, "tree_eligible": 0, "informative": 0},
+        implied_min_depth_value=bt.implied_min_depth(0.25, 0.05),
+        absent_expected_vaf=0.25,
+        absent_alpha=0.05,
+        presence_min_alt_reads=2,
+        presence_min_vaf=0.05,
+    )
+
+
 def test_write_diagnostics_reports_lichee_as_comparison_only(tmp_path):
     r = _build("shared_nodes.trees.txt")
-    dollo = bt.dollo_tree({frozenset(["7", "8"]): 5}, ["7", "8"], n_bootstrap=0)
+    patterns = {(frozenset(["7", "8"]), frozenset()): 5}
+    dollo = bt.dollo_tree(patterns, ["7", "8"], n_bootstrap=0)
     out = tmp_path / "diag.txt"
     bt.write_diagnostics(
-        out, 0, {}, dollo, lichee_result=r, lichee_verdict="Found 3 valid trees"
+        out,
+        0,
+        {},
+        dollo,
+        _empty_state_diagnostics(),
+        lichee_result=r,
+        lichee_verdict="Found 3 valid trees",
     )
     text = out.read_text()
     assert "## Method used: dollo" in text

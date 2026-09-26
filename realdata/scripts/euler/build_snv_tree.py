@@ -176,9 +176,11 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -207,6 +209,16 @@ COMPLEMENT = {"A": "T", "C": "G", "G": "C", "T": "A"}
 GERMLINE_ROOT_ID = "germline"
 
 SNVKey = Tuple[str, int, str, str]  # chrom, 1-based pos, ref, alt
+SNVCall = Tuple[
+    int, int
+]  # (alt_reads, depth), both read from AD -- never AF (see below)
+
+# Reasons an (cluster, site) call classifies "unknown" rather than confidently
+# present or absent -- see classify_snv_state.
+UNKNOWN_NOT_GENOTYPED = "not_genotyped"
+UNKNOWN_LOW_DEPTH_ZERO = "low_depth_zero"
+UNKNOWN_ONE_ALT_READ = "one_alt_read"
+UNKNOWN_ALT_GE2_LOW_VAF = "alt_ge2_low_vaf"
 
 _FORCED_VCF_NAME_RE = re.compile(
     r"^clone(?P<cluster>[^_]+)_(?P<chrom>.+)\.forced\.vcf$"
@@ -260,13 +272,6 @@ def snv_channel(five: str, ref: str, alt: str, three: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _safe_float(x: str) -> float:
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _safe_int(x: str) -> int:
     try:
         return int(x)
@@ -280,12 +285,16 @@ def parse_format_values(format_str: str, sample_str: str) -> Dict[str, str]:
     return dict(zip(format_str.split(":"), sample_str.split(":")))
 
 
-def parse_forced_vcf_calls(
-    vcf_path: Path, cluster_id: str
-) -> Dict[SNVKey, Tuple[float, int]]:
-    """Parse one force-called VCF (stage 06b's pass 2) into ``{snv_key: (vaf,
-    alt_reads)}`` for every single-base-substitution ALT allele at every
-    record.
+def parse_forced_vcf_calls(vcf_path: Path, cluster_id: str) -> Dict[SNVKey, SNVCall]:
+    """Parse one force-called VCF (stage 06b's pass 2) into ``{snv_key:
+    (alt_reads, depth)}`` for every single-base-substitution ALT allele at
+    every record, read from AD -- ``depth`` is the sum of the WHOLE AD array
+    (ref plus every ALT allele's own depth), never Mutect2's own FORMAT AF:
+    confirmed on real slice D calls that AF is not alt/depth (sites with 0-1
+    ALT reads showed AF around 0.10-0.14, nowhere near 0 as alt/depth would
+    give), so presence, absence and LICHeE's VAF column are all computed
+    from AD directly by the caller (``classify_snv_state``,
+    ``write_lichee_input``).
 
     The forced VCFs come from tumour-vs-normal Mutect2 (stage 06's ``-normal``
     design) and so carry TWO sample columns, tumour ``clone<cluster_id>`` and
@@ -302,24 +311,24 @@ def parse_forced_vcf_calls(
 
     Every record, PASS or not: pass 2 force-calls every cluster at every
     union site regardless of whether that cluster independently supports it,
-    and presence is decided in Python directly off VAF/ALT-read depth (see
-    ``resolve_presence_calls``), not off the FILTER column. Mutect2 still
-    emits its own discovery calls alongside the forced ones, so this alone
-    is not enough to restrict to the union of candidate sites -- see
+    and presence/absence/unknown is decided in Python directly off AD (see
+    ``classify_snv_state``), not off the FILTER column. Mutect2 still emits
+    its own discovery calls alongside the forced ones, so this alone is not
+    enough to restrict to the union of candidate sites -- see
     ``restrict_calls_to_union``, applied by the caller.
 
-    SUB-DECISION: AF/AD extraction assumes GATK4 Mutect2's own FORMAT layout
-    -- AD is ``ref_depth,alt_depth_1[,alt_depth_2...]`` (one more entry than
-    ALT alleles, ref first) and AF is ``alt_af_1[,alt_af_2...]`` (one entry
-    per ALT allele, no ref entry) -- paired positionally with the record's own
-    (possibly multi-allelic) ALT list. A record whose AD or AF cannot be
-    parsed this way (wrong field count, non-numeric, "." for no coverage) is
-    treated as zero VAF / zero ALT reads rather than raising: force-calling a
-    site with no supporting reads at all is an expected "absent here"
-    outcome, not a malformed file.
+    SUB-DECISION: AD extraction assumes GATK4 Mutect2's own FORMAT layout --
+    ``ref_depth,alt_depth_1[,alt_depth_2...]``, one more entry than ALT
+    alleles, ref first -- paired positionally with the record's own
+    (possibly multi-allelic) ALT list. A record whose AD cannot be parsed
+    this way (wrong field count, non-numeric, "." for no coverage) is
+    treated as zero ALT reads and zero depth rather than raising:
+    force-calling a site with no supporting reads at all is an expected
+    outcome, not a malformed file (it classifies ``unknown``/
+    ``low_depth_zero`` downstream, never a confident ``absent``).
     """
     sample_name = f"clone{cluster_id}"
-    calls: Dict[SNVKey, Tuple[float, int]] = {}
+    calls: Dict[SNVKey, SNVCall] = {}
     sample_col: Optional[int] = None
     with open(vcf_path) as fh:
         for line in fh:
@@ -345,34 +354,118 @@ def parse_forced_vcf_calls(
             if len(ref) != 1 or ref not in "ACGT":
                 continue
             fmt = parse_format_values(format_str, sample_str)
-            ad_raw = fmt.get("AD", "").split(",")
-            af_raw = fmt.get("AF", "").split(",")
+            ad_raw = [_safe_int(x) for x in fmt.get("AD", "").split(",")]
+            depth = sum(ad_raw)
             for i, alt in enumerate(alt_field.split(",")):
                 alt = alt.upper()
                 if len(alt) != 1 or alt not in "ACGT":
                     continue
-                vaf = _safe_float(af_raw[i]) if i < len(af_raw) else 0.0
-                alt_reads = _safe_int(ad_raw[i + 1]) if i + 1 < len(ad_raw) else 0
-                calls[(chrom, int(pos), ref, alt)] = (vaf, alt_reads)
+                alt_reads = ad_raw[i + 1] if i + 1 < len(ad_raw) else 0
+                calls[(chrom, int(pos), ref, alt)] = (alt_reads, depth)
     return calls
 
 
-def resolve_presence_calls(
-    cluster_to_calls: Dict[str, Dict[SNVKey, Tuple[float, int]]],
-    min_vaf: float,
-    min_alt_reads: int,
-) -> Dict[str, Set[SNVKey]]:
-    """A force-called site is PRESENT in a cluster if its VAF >= ``min_vaf``
-    AND ALT read depth >= ``min_alt_reads``; ABSENT otherwise -- including
-    sites the cluster's own record never reached these thresholds at.
+def implied_min_depth(expected_vaf: float, alpha: float) -> int:
+    """The rounded depth at which zero ALT reads becomes trustworthy evidence
+    of absence for a true mutation at ``expected_vaf``: the smallest integer
+    depth for which ``(1 - expected_vaf) ** depth <= alpha`` holds. Reported
+    for readability only -- ``classify_snv_state``'s live per-site test uses
+    the exact inequality, not this rounded value, so the two can never
+    disagree at the boundary.
     """
+    if not 0 < expected_vaf < 1:
+        raise ValueError(f"expected_vaf must be in (0, 1), got {expected_vaf}")
+    if not 0 < alpha < 1:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    return math.ceil(math.log(alpha) / math.log(1 - expected_vaf))
+
+
+def classify_snv_state(
+    alt_reads: int,
+    depth: int,
+    min_alt_reads: int,
+    min_vaf: float,
+    absent_expected_vaf: float = 0.25,
+    absent_alpha: float = 0.05,
+) -> Tuple[str, Optional[str]]:
+    """``(state, reason)`` for one GENOTYPED (cluster, site) call: state in
+    ``{"present", "absent", "unknown"}``; reason set only for "unknown" (the
+    caller assigns ``UNKNOWN_NOT_GENOTYPED`` itself for a site with no
+    record at all -- this function only ever sees an actual call).
+
+    present: ``alt_reads >= min_alt_reads`` AND ``alt_reads / depth >=
+    min_vaf``.
+
+    absent: ``alt_reads == 0`` AND ``(1 - absent_expected_vaf) ** depth <=
+    absent_alpha`` -- a real mutation at the expected VAF would, at this
+    depth, very likely have produced at least one ALT read, so seeing none
+    is trusted (see ``implied_min_depth`` for the rounded threshold this
+    implies; the exact inequality is what actually gates each site).
+
+    unknown otherwise, with a reason confirmed on real slice D data (every
+    "absent" entry under the old >=2-ALT-read rule had 0 or 1 ALT reads,
+    never more; 48-63% had exactly 1, at typical depths where a true
+    mutation could easily miss by sequencing depth alone):
+    ``UNKNOWN_LOW_DEPTH_ZERO`` (``alt_reads == 0`` but depth too low to
+    trust the absence), ``UNKNOWN_ONE_ALT_READ`` (``alt_reads == 1``,
+    ambiguous regardless of depth), ``UNKNOWN_ALT_GE2_LOW_VAF`` (enough
+    reads to be non-trivial, but below the VAF presence threshold).
+    """
+    vaf = alt_reads / depth if depth > 0 else 0.0
+    if alt_reads >= min_alt_reads and vaf >= min_vaf:
+        return "present", None
+    if alt_reads == 0:
+        if (1 - absent_expected_vaf) ** depth <= absent_alpha:
+            return "absent", None
+        return "unknown", UNKNOWN_LOW_DEPTH_ZERO
+    if alt_reads == 1:
+        return "unknown", UNKNOWN_ONE_ALT_READ
+    return "unknown", UNKNOWN_ALT_GE2_LOW_VAF
+
+
+def classify_cluster_states(
+    calls: Dict[SNVKey, SNVCall],
+    union_sites: Set[SNVKey],
+    min_alt_reads: int,
+    min_vaf: float,
+    absent_expected_vaf: float = 0.25,
+    absent_alpha: float = 0.05,
+) -> Dict[SNVKey, Tuple[str, Optional[str]]]:
+    """Three-state classification for ONE cluster at EVERY union site, not
+    just the ones its own forced VCF happens to carry a record for -- a
+    union site missing entirely from ``calls`` classifies
+    ``UNKNOWN_NOT_GENOTYPED``, distinct from a genotyped record at zero
+    depth (``UNKNOWN_LOW_DEPTH_ZERO``).
+    """
+    out: Dict[SNVKey, Tuple[str, Optional[str]]] = {}
+    for site in union_sites:
+        call = calls.get(site)
+        if call is None:
+            out[site] = ("unknown", UNKNOWN_NOT_GENOTYPED)
+        else:
+            alt_reads, depth = call
+            out[site] = classify_snv_state(
+                alt_reads,
+                depth,
+                min_alt_reads,
+                min_vaf,
+                absent_expected_vaf,
+                absent_alpha,
+            )
+    return out
+
+
+def present_snvs_from_states(
+    cluster_states: Dict[str, Dict[SNVKey, Tuple[str, Optional[str]]]],
+) -> Dict[str, Set[SNVKey]]:
+    """Confident-present SNVs per cluster, read off ``classify_cluster_states``'
+    output -- ``clone_snv_matrix.csv``'s and ``spectra.csv``'s exact
+    continuity contract (unchanged meaning: confident present, else not),
+    now a view onto the three-state classification rather than a separate
+    threshold check."""
     return {
-        cluster: {
-            key
-            for key, (vaf, alt_reads) in calls.items()
-            if vaf >= min_vaf and alt_reads >= min_alt_reads
-        }
-        for cluster, calls in cluster_to_calls.items()
+        cluster: {site for site, (state, _) in states.items() if state == "present"}
+        for cluster, states in cluster_states.items()
     }
 
 
@@ -456,8 +549,8 @@ def build_union_sites(pass1_vcfs: Dict[str, List[Path]]) -> Set[SNVKey]:
 
 
 def restrict_calls_to_union(
-    calls: Dict[SNVKey, Tuple[float, int]], union_sites: Set[SNVKey]
-) -> Tuple[Dict[SNVKey, Tuple[float, int]], int]:
+    calls: Dict[SNVKey, SNVCall], union_sites: Set[SNVKey]
+) -> Tuple[Dict[SNVKey, SNVCall], int]:
     """Keep only the calls whose site key is in ``union_sites``. Force-calling
     adds the union alleles to Mutect2's own interval, but Mutect2 still emits
     its own discovery calls on top, and the forced VCF keeps non-PASS
@@ -523,36 +616,119 @@ def mutation_sets_from_matrix(matrix: pd.DataFrame) -> Dict[str, Set[str]]:
     return {col: set(matrix.index[matrix[col] == 1]) for col in matrix.columns}
 
 
-def three_gamete_violations(mutation_sets: Dict[str, Set[Hashable]]) -> int:
-    """Count SNV pairs violating the perfect-phylogeny (three-gamete) test.
+def three_gamete_violations(states: pd.DataFrame) -> int:
+    """Count SNV pairs violating the perfect-phylogeny (three-gamete) test,
+    restricted to clusters where BOTH SNVs are known (present or absent,
+    never an ``unknown``/NaN call) -- a cluster that could not be classified
+    at one of the pair must never manufacture or hide a violation.
 
-    Two SNVs are incompatible with a single mutation history if, among the
-    clusters, all three of "only i", "only j", and "both" occur (the fourth
+    ``states`` is the ternary presence matrix (``clone_snv_states.csv``):
+    rows SNVs, columns clusters, values ``1``/``0``/``NaN``. Two SNVs are
+    incompatible with a single mutation history if, among the clusters known
+    in both, all three of "only i", "only j", and "both" occur (the fourth
     gamete, "neither", is irrelevant to infinite-sites compatibility). Each
-    SNV's presence across clusters is bit-packed into one integer so a pair
-    check is O(1); overall cost is O(n_snvs^2), fine at the SNV counts this
-    pipeline expects (sparse tens-to-hundreds of mutations per cluster).
+    SNV's calls are bit-packed into a present-mask and a known-mask so a
+    pair check is O(1); overall cost is O(n_snvs^2), fine at the SNV counts
+    this pipeline expects (sparse tens-to-hundreds of mutations per cluster).
 
     A general presence-matrix compatibility diagnostic, independent of which
     tree method is used -- reported in snv_tree_diagnostics.txt regardless.
     """
-    clusters = sorted(mutation_sets)
-    cluster_bit = {c: i for i, c in enumerate(clusters)}
-    snv_masks: Dict[Hashable, int] = {}
-    for cluster, muts in mutation_sets.items():
-        bit = 1 << cluster_bit[cluster]
-        for m in muts:
-            snv_masks[m] = snv_masks.get(m, 0) | bit
+    clusters = list(states.columns)
+    present_masks: List[int] = []
+    known_masks: List[int] = []
+    for _, row in states.iterrows():
+        present = known = 0
+        for i, cluster in enumerate(clusters):
+            v = row[cluster]
+            if pd.isna(v):
+                continue
+            known |= 1 << i
+            if v == 1:
+                present |= 1 << i
+        present_masks.append(present)
+        known_masks.append(known)
 
-    masks = list(snv_masks.values())
     violations = 0
-    for i in range(len(masks)):
-        mi = masks[i]
-        for j in range(i + 1, len(masks)):
-            mj = masks[j]
-            if (mi & ~mj) and (mj & ~mi) and (mi & mj):
+    for i in range(len(present_masks)):
+        pi, ki = present_masks[i], known_masks[i]
+        for j in range(i + 1, len(present_masks)):
+            pj, kj = present_masks[j], known_masks[j]
+            known_both = ki & kj
+            if not known_both:
+                continue
+            only_i = pi & known_both & ~pj
+            only_j = pj & known_both & ~pi
+            both = pi & pj & known_both
+            if only_i and only_j and both:
                 violations += 1
     return violations
+
+
+def build_ternary_states_matrix(
+    cluster_states: Dict[str, Dict[SNVKey, Tuple[str, Optional[str]]]],
+    union_sites: Set[SNVKey],
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """``(states, reasons)``, both indexed by the FULL union (every site,
+    including ones with no present cluster at all -- a complete audit
+    trail, unlike ``clone_snv_matrix.csv``, whose rows are only sites at
+    least one cluster is confidently present at). ``states`` values are
+    ``1``/``0``/``NaN`` (present/absent/unknown); ``reasons`` values are the
+    ``UNKNOWN_*`` reason string where ``states`` is ``NaN``, else ``NaN``.
+    """
+    clusters = sorted(cluster_states, key=_sort_key)
+    rows = sorted(union_sites, key=lambda k: snv_key_str(k))
+    row_labels = [snv_key_str(k) for k in rows]
+    states = pd.DataFrame(index=row_labels, columns=clusters, dtype=float)
+    reasons = pd.DataFrame(index=row_labels, columns=clusters, dtype=object)
+    for cluster in clusters:
+        for row_label, site in zip(row_labels, rows):
+            state, reason = cluster_states[cluster][site]
+            states.loc[row_label, cluster] = (
+                1.0
+                if state == "present"
+                else 0.0
+                if state == "absent"
+                else float("nan")
+            )
+            reasons.loc[row_label, cluster] = reason
+    return states, reasons
+
+
+def site_ternary_patterns(
+    cluster_states: Dict[str, Dict[SNVKey, Tuple[str, Optional[str]]]],
+    union_sites: Set[SNVKey],
+) -> Dict[SNVKey, Tuple[frozenset, frozenset]]:
+    """``(present, absent)`` cluster-id frozensets at every union site
+    (unknown implied as the complement) -- every site gets an entry,
+    including ones with no present cluster at all (excluded from the tree,
+    but counted: see ``main``)."""
+    clusters = list(cluster_states)
+    out: Dict[SNVKey, Tuple[frozenset, frozenset]] = {}
+    for site in union_sites:
+        present = frozenset(
+            c for c in clusters if cluster_states[c][site][0] == "present"
+        )
+        absent = frozenset(
+            c for c in clusters if cluster_states[c][site][0] == "absent"
+        )
+        out[site] = (present, absent)
+    return out
+
+
+def dollo_pattern_counts(
+    site_patterns: Dict[SNVKey, Tuple[frozenset, frozenset]],
+) -> Dict[Tuple[frozenset, frozenset], int]:
+    """Counter of each distinct ``(present, absent)`` pattern among
+    TREE-ELIGIBLE sites (at least one confidently present cluster) -- Dollo's
+    own input. Sites with no present cluster are excluded (there is nothing
+    to explain), but counted separately in the diagnostics (see ``main``).
+    """
+    counts: Dict[Tuple[frozenset, frozenset], int] = defaultdict(int)
+    for present, absent in site_patterns.values():
+        if present:
+            counts[(present, absent)] += 1
+    return dict(counts)
 
 
 # --------------------------------------------------------------------------- #
@@ -757,19 +933,26 @@ def render_topology(node) -> str:
     return "(" + ",".join(render_topology(k) for k in kids) + ")"
 
 
-def _dollo_losses_below(node, S: frozenset) -> int:
-    """Loss events needed within ``node``'s own subtree so every leaf under
-    it that is NOT in ``S`` ends up absent: one loss per MAXIMAL fully-absent
-    clade (Dollo allows a single loss to cover an entire absent subtree at
-    once), found by recursing only into subtrees that still mix present and
-    absent leaves."""
-    if isinstance(node, str):
-        return 0 if node in S else 1
+def _dollo_losses_below(node, present: frozenset, absent: frozenset) -> int:
+    """Loss events needed within ``node``'s own subtree, given ``node`` is
+    already known to sit at or below the gain (the LCA of ``present``): a
+    MAXIMAL subtree with no present leaf needs exactly one loss if it
+    contains at least one CONFIRMED absent leaf (Dollo allows a single loss
+    to cover the whole subtree at once); if it contains only leaves of
+    unknown state, it costs nothing, since an unknown can always be
+    assigned present for free -- no loss is needed to explain it. Verified
+    against the true minimum over every 0/1 assignment of the unknowns by
+    brute force over random cases (see ``tests/test_build_snv_tree.py``).
+    """
     leaves = _dollo_leaves_under(node)
-    if leaves.isdisjoint(S):
-        return 1
+    if leaves.isdisjoint(present):
+        return 1 if not leaves.isdisjoint(absent) else 0
+    if isinstance(node, str):
+        return 0
     c1, c2 = tuple(node)
-    return _dollo_losses_below(c1, S) + _dollo_losses_below(c2, S)
+    return _dollo_losses_below(c1, present, absent) + _dollo_losses_below(
+        c2, present, absent
+    )
 
 
 def _dollo_lca_children(node, S: frozenset) -> Tuple[object, object]:
@@ -785,33 +968,50 @@ def _dollo_lca_children(node, S: frozenset) -> Tuple[object, object]:
     return c1, c2
 
 
-def dollo_pattern_cost(topology, pattern: frozenset) -> Tuple[int, int]:
-    """``(cost, losses)`` of one presence pattern on one topology: one gain
-    at the pattern's LCA plus one loss per maximal absent clade beneath it.
-    A singleton or the full leaf set costs 1 (one gain, no losses) on EVERY
-    topology -- structurally invariant, so it never affects which topology
-    is chosen, though it is still reported (a private mutation, or the
-    trunk)."""
-    if len(pattern) == 1 or pattern == _dollo_leaves_under(topology):
+def dollo_pattern_cost(
+    topology, present: frozenset, absent: frozenset
+) -> Tuple[int, int]:
+    """``(cost, losses)`` of one TERNARY presence pattern on one topology:
+    one gain at ``present``'s LCA plus one loss per maximal subtree beneath
+    it that has no present leaf but does have a confirmed-absent one
+    (unknown-only subtrees are free -- see ``_dollo_losses_below``). A
+    singleton or the full leaf set costs 1 (one gain, no losses) on EVERY
+    topology regardless of ``absent`` -- structurally invariant (nothing
+    outside a private or universal mutation's own leaf needs explaining),
+    so it never affects which topology is chosen, though it is still
+    reported (a private mutation, or the trunk). ``present`` empty (no
+    confident presence at all) costs 0: excluded from the tree by the
+    caller, never actually scored, but handled here rather than raising.
+    """
+    if not present:
+        return 0, 0
+    if len(present) == 1 or present == _dollo_leaves_under(topology):
         return 1, 0
-    c1, c2 = _dollo_lca_children(topology, pattern)
-    losses = _dollo_losses_below(c1, pattern) + _dollo_losses_below(c2, pattern)
+    c1, c2 = _dollo_lca_children(topology, present)
+    losses = _dollo_losses_below(c1, present, absent) + _dollo_losses_below(
+        c2, present, absent
+    )
     return 1 + losses, losses
 
 
-def dollo_cost_table(topologies: List, patterns: Iterable[frozenset]):
-    """``{topology: {pattern: cost}}`` for every topology and every one of
-    ``patterns``, computed once: a bootstrap replicate only ever reweights
-    this SAME fixed set of observed patterns (resampling changes counts,
-    never introduces a new distinct pattern), so scoring every replicate is
-    then a fast weighted sum against this table rather than a fresh tree
-    walk each time."""
+def dollo_cost_table(topologies: List, patterns: Iterable[Tuple[frozenset, frozenset]]):
+    """``{topology: {(present, absent): cost}}`` for every topology and
+    every one of ``patterns``, computed once: a bootstrap replicate only
+    ever reweights this SAME fixed set of observed patterns (resampling
+    changes counts, never introduces a new distinct pattern), so scoring
+    every replicate is then a fast weighted sum against this table rather
+    than a fresh tree walk each time."""
     patterns = list(patterns)
-    return {t: {p: dollo_pattern_cost(t, p)[0] for p in patterns} for t in topologies}
+    return {
+        t: {p: dollo_pattern_cost(t, p[0], p[1])[0] for p in patterns}
+        for t in topologies
+    }
 
 
 def dollo_best_topologies(
-    topologies: List, pattern_counts: Dict[frozenset, int], cost_table
+    topologies: List,
+    pattern_counts: Dict[Tuple[frozenset, frozenset], int],
+    cost_table,
 ) -> Tuple[int, List]:
     """``(min_cost, [topologies achieving it])``, cost summed over
     ``pattern_counts`` weighted against ``cost_table`` (a bootstrap
@@ -896,25 +1096,6 @@ def build_tree_from_clades(
     return tree, label_of_clade, hidden_ids
 
 
-def pattern_counts_from_matrix(matrix: pd.DataFrame) -> Dict[frozenset, int]:
-    """Counter of each distinct row's presence pattern (as a frozenset of
-    the clusters present), read off the clone x SNV binary matrix. This is
-    what Dollo scores against: which distinct pattern occurs how many
-    times, not each SNV individually -- the same information, far fewer
-    entries to weight-sum over."""
-    if matrix.shape[0] == 0:
-        return {}
-    clusters = list(matrix.columns)
-    weights = np.array([1 << i for i in range(len(clusters))], dtype=np.int64)
-    masks = matrix.to_numpy(dtype=np.int64) @ weights
-    counts = Counter(int(m) for m in masks)
-    return {
-        frozenset(c for i, c in enumerate(clusters) if mask & (1 << i)): n
-        for mask, n in counts.items()
-        if mask != 0
-    }
-
-
 def _all_leaves_under(tree: nx.DiGraph, root: str) -> Dict[str, frozenset]:
     """Post-order leaf-set cache for every node of an ACTUAL (possibly
     non-binary, post-consensus) emitted tree -- generalises
@@ -938,39 +1119,49 @@ def _all_leaves_under(tree: nx.DiGraph, root: str) -> Dict[str, frozenset]:
 
 
 def dollo_edge_report(
-    tree: nx.DiGraph, germline_id: str, pattern_counts: Dict[frozenset, int]
+    tree: nx.DiGraph,
+    germline_id: str,
+    pattern_counts: Dict[Tuple[frozenset, frozenset], int],
 ) -> Dict[Tuple[str, str], Dict[str, int]]:
     """Mutations gained and lost on every edge of the EMITTED tree (which,
     after consensus and low-support collapse, may have polytomies -- this
-    generalises the binary LCA/loss logic above to arbitrary branching). A
+    generalises the ternary LCA/loss logic above to arbitrary branching). A
     singleton pattern's gain lands on the edge into its own leaf; the full
-    leaf set's gain lands on the trunk (``germline`` -> the MRCA node).
+    leaf set's gain lands on the trunk (``germline`` -> the MRCA node). A
+    loss lands on the edge into a maximal no-present subtree only when that
+    subtree also has a confirmed-absent leaf -- an unknown-only subtree
+    needs none.
     """
     leaves_under = _all_leaves_under(tree, germline_id)
 
-    def find_lca(node: str, S: frozenset) -> str:
+    def find_lca(node: str, present: frozenset) -> str:
         for c in tree.successors(node):
-            if S <= leaves_under[c]:
-                return find_lca(c, S)
+            if present <= leaves_under[c]:
+                return find_lca(c, present)
         return node
 
-    def mark_losses(node: str, S: frozenset, count: int, report: dict) -> None:
+    def mark_losses(
+        node: str, present: frozenset, absent: frozenset, count: int, report: dict
+    ) -> None:
         parent = next(iter(tree.predecessors(node)))
-        if leaves_under[node].isdisjoint(S):
-            report[(parent, node)]["losses"] += count
+        if leaves_under[node].isdisjoint(present):
+            if not leaves_under[node].isdisjoint(absent):
+                report[(parent, node)]["losses"] += count
             return
         for c in tree.successors(node):
-            mark_losses(c, S, count, report)
+            mark_losses(c, present, absent, count, report)
 
     report: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(
         lambda: {"gains": 0, "losses": 0}
     )
-    for S, count in pattern_counts.items():
-        lca = find_lca(germline_id, S)
+    for (present, absent), count in pattern_counts.items():
+        if not present:
+            continue
+        lca = find_lca(germline_id, present)
         parent = next(iter(tree.predecessors(lca)))
         report[(parent, lca)]["gains"] += count
         for c in tree.successors(lca):
-            mark_losses(c, S, count, report)
+            mark_losses(c, present, absent, count, report)
     return dict(report)
 
 
@@ -994,7 +1185,7 @@ class DolloResult:
 
 
 def dollo_tree(
-    pattern_counts: Dict[frozenset, int],
+    pattern_counts: Dict[Tuple[frozenset, frozenset], int],
     leaves: List[str],
     max_clusters: int = 7,
     n_bootstrap: int = 1000,
@@ -1010,17 +1201,26 @@ def dollo_tree(
     the retired Camin-Sokal search, which could only place observed
     clusters as internal nodes and so could never represent one.
 
+    ``pattern_counts`` is keyed by ``(present, absent)`` cluster-id
+    frozenset pairs -- ternary: unknown is whatever is in neither, and never
+    charged (see ``dollo_pattern_cost``) -- one entry per distinct TREE-
+    ELIGIBLE site pattern (at least one confidently present cluster; see
+    ``dollo_pattern_counts``), weighted by how many sites share it.
+
     Ties at the minimum cost are never broken arbitrarily: their STRICT
     CONSENSUS is emitted (edges not common to every optimal topology
     collapse into polytomies). Support for each of that consensus's clades
-    is estimated by the bootstrap (resample SNVs with replacement,
-    ``n_bootstrap`` times, recompute the optimal consensus per replicate --
-    a multinomial draw over the fixed pattern universe is exactly equivalent
-    to resampling rows and much cheaper, and is what is actually done here);
-    any clade below ``min_clade_support`` is then dropped before the final
-    tree is built (a laminar family stays laminar with members removed, so
-    this needs no separate graph-collapse step). ``n_bootstrap=0`` skips
-    estimation entirely and emits the raw consensus, unfiltered.
+    is estimated by the bootstrap (resample SITES with replacement, over
+    the same tree-eligible universe ``pattern_counts`` already is, not just
+    the ones with a confirmed absence -- so the resample reflects the data
+    as observed -- ``n_bootstrap`` times, recompute the optimal consensus
+    per replicate; a multinomial draw over the fixed pattern universe is
+    exactly equivalent to resampling rows and much cheaper, and is what is
+    actually done here); any clade below ``min_clade_support`` is then
+    dropped before the final tree is built (a laminar family stays laminar
+    with members removed, so this needs no separate graph-collapse step).
+    ``n_bootstrap=0`` skips estimation entirely and emits the raw
+    consensus, unfiltered.
     """
     if len(leaves) == 1:
         tree = nx.DiGraph([(germline_id, leaves[0])])
@@ -1063,7 +1263,10 @@ def dollo_tree(
     top2_win_rate: Dict[str, float] = {}
     if n_bootstrap > 0:
         rng = np.random.default_rng(seed)
-        pattern_order = sorted(pattern_counts, key=lambda p: sorted(p, key=_sort_key))
+        pattern_order = sorted(
+            pattern_counts,
+            key=lambda p: (sorted(p[0], key=_sort_key), sorted(p[1], key=_sort_key)),
+        )
         counts_arr = np.array([pattern_counts[p] for p in pattern_order], dtype=float)
         total_n = int(counts_arr.sum())
         probs = counts_arr / counts_arr.sum()
@@ -1209,14 +1412,16 @@ def resolve_lichee_home(explicit: Optional[str] = None) -> Tuple[Path, Path]:
 
 
 def write_lichee_input(
-    cluster_to_calls: Dict[str, Dict[SNVKey, Tuple[float, int]]],
+    cluster_to_calls: Dict[str, Dict[SNVKey, SNVCall]],
     path: Path,
     germline_label: str = GERMLINE_ROOT_ID,
 ) -> List[str]:
     """Write LICHeE's tab-separated VAF input: ``#chr position description
     <samples...>``, one row per SNV present in at least one cluster's calls,
-    VAF from ``cluster_to_calls`` (0.0 for a cluster with no record at that
-    site).
+    VAF computed here as ``alt_reads / depth`` from ``cluster_to_calls``'
+    own AD-derived values (0.0 for a cluster with no record, or no depth, at
+    that site) -- NEVER Mutect2's FORMAT AF, confirmed not to equal
+    alt/depth on real slice D calls (see module docstring).
 
     Column order is this module's usual numeric-then-lexicographic cluster
     sort, headed ``c<cluster id>`` (LICHeE echoes a sample's header verbatim in
@@ -1237,9 +1442,10 @@ def write_lichee_input(
         description = f"{ref}>{alt}"
         row = [chrom, str(pos), description, "0.0"]  # germline VAF always 0
         for cluster in clusters:
-            vaf, _alt_reads = cluster_to_calls[cluster].get(
-                (chrom, pos, ref, alt), (0.0, 0)
+            alt_reads, depth = cluster_to_calls[cluster].get(
+                (chrom, pos, ref, alt), (0, 0)
             )
+            vaf = alt_reads / depth if depth > 0 else 0.0
             row.append(f"{vaf:.4f}")
         lines.append("\t".join(row))
 
@@ -1852,6 +2058,176 @@ def _lichee_lines(r: LicheeResult) -> List[str]:
     return lines
 
 
+def cluster_state_summary(
+    cluster_states: Dict[str, Dict[SNVKey, Tuple[str, Optional[str]]]],
+    cluster_to_calls: Dict[str, Dict[SNVKey, SNVCall]],
+) -> Dict[str, Dict[str, object]]:
+    """Per cluster: present/absent/unknown counts over union sites, the
+    unknown reason breakdown, and median depth over sites it was actually
+    genotyped at (``cluster_to_calls[cluster]``'s own keys -- a site missing
+    from it entirely is ``UNKNOWN_NOT_GENOTYPED`` and has no real depth to
+    contribute)."""
+    summary: Dict[str, Dict[str, object]] = {}
+    for cluster, states in cluster_states.items():
+        counts = Counter(state for state, _ in states.values())
+        reasons = Counter(reason for _, reason in states.values() if reason is not None)
+        depths = [depth for _alt, depth in cluster_to_calls[cluster].values()]
+        summary[cluster] = {
+            "present": counts.get("present", 0),
+            "absent": counts.get("absent", 0),
+            "unknown": counts.get("unknown", 0),
+            "reasons": dict(reasons),
+            "median_depth": statistics.median(depths) if depths else None,
+        }
+    return summary
+
+
+def detectability_table(
+    cluster_states: Dict[str, Dict[SNVKey, Tuple[str, Optional[str]]]],
+    cluster_to_calls: Dict[str, Dict[SNVKey, SNVCall]],
+) -> Dict[str, Dict[str, object]]:
+    """For each cluster X: among union sites where EVERY OTHER tumour
+    cluster is confidently present, X's own present/absent/unknown share
+    and median depth there -- the real evidence a shared mutation would
+    have left in X, as opposed to X's overall depth profile.
+    """
+    clusters = list(cluster_states)
+    result: Dict[str, Dict[str, object]] = {}
+    for x in clusters:
+        others = [c for c in clusters if c != x]
+        sites = [
+            site
+            for site in cluster_states[x]
+            if others and all(cluster_states[o][site][0] == "present" for o in others)
+        ]
+        counts = Counter(cluster_states[x][site][0] for site in sites)
+        depths = [
+            cluster_to_calls[x][site][1]
+            for site in sites
+            if site in cluster_to_calls[x]
+        ]
+        result[x] = {
+            "n_sites": len(sites),
+            "present": counts.get("present", 0),
+            "absent": counts.get("absent", 0),
+            "unknown": counts.get("unknown", 0),
+            "median_depth": statistics.median(depths) if depths else None,
+        }
+    return result
+
+
+def top_ternary_patterns(
+    site_patterns: Dict[SNVKey, Tuple[frozenset, frozenset]], n: int = 20
+) -> List[Tuple[Tuple[frozenset, frozenset], int, bool]]:
+    """The ``n`` most common ``(present, absent)`` patterns among ALL union
+    sites (not just tree-eligible ones, so an all-absent or all-unknown
+    signature is visible too), each tagged whether it is INFORMATIVE (at
+    least one present AND at least one confident absence -- the kind of
+    site the tree actually rests on, as opposed to one padded out by
+    unknowns)."""
+    counts = Counter(site_patterns.values())
+    ranked = counts.most_common(n)
+    return [
+        (pattern, count, bool(pattern[0]) and bool(pattern[1]))
+        for pattern, count in ranked
+    ]
+
+
+def site_pattern_summary(
+    site_patterns: Dict[SNVKey, Tuple[frozenset, frozenset]],
+) -> Dict[str, int]:
+    """Overall counts: how many union sites are excluded from the tree (no
+    present cluster), how many are tree-eligible, and how many are
+    INFORMATIVE (at least one present AND at least one confident absence).
+    With a high minimum depth for absence, many former "absences" become
+    unknown, so ``informative`` can be far smaller than ``tree_eligible`` --
+    the real amount of evidence the tree rests on, so a low-support tree
+    can be read as "not enough confident absences" rather than as
+    disagreement.
+    """
+    n_no_present = sum(1 for p, _ in site_patterns.values() if not p)
+    n_informative = sum(1 for p, a in site_patterns.values() if p and a)
+    return {
+        "no_present": n_no_present,
+        "tree_eligible": len(site_patterns) - n_no_present,
+        "informative": n_informative,
+    }
+
+
+@dataclass
+class StateDiagnostics:
+    """Everything ``write_diagnostics`` reports about the three-state
+    classification, bundled so ``main`` does not have to pass a growing list
+    of positional arguments."""
+
+    per_cluster: Dict[str, Dict[str, object]]
+    detectability: Dict[str, Dict[str, object]]
+    top_patterns: List[Tuple[Tuple[frozenset, frozenset], int, bool]]
+    site_summary: Dict[str, int]
+    implied_min_depth_value: int
+    absent_expected_vaf: float
+    absent_alpha: float
+    presence_min_alt_reads: int
+    presence_min_vaf: float
+
+
+def _state_lines(s: StateDiagnostics) -> List[str]:
+    """The classification section: how present/absent/unknown were decided,
+    per-cluster and detectability breakdowns, and the top 20 ternary
+    patterns."""
+    total_sites = s.site_summary["tree_eligible"] + s.site_summary["no_present"]
+    lines = [
+        "\n## Three-state classification\n",
+        f"present: alt >= {s.presence_min_alt_reads} and alt/depth >= "
+        f"{s.presence_min_vaf}. absent: alt == 0 and a real mutation at VAF "
+        f"{s.absent_expected_vaf} would very likely (>= "
+        f"{1 - s.absent_alpha:.0%}) have shown at least one ALT read at this "
+        f"depth (implied minimum depth {s.implied_min_depth_value}, for "
+        "readability only -- the live test is the exact inequality). "
+        "Otherwise unknown.\n",
+        f"Union sites: {total_sites} total, {s.site_summary['no_present']} "
+        "excluded from the tree (no present cluster), "
+        f"{s.site_summary['tree_eligible']} tree-eligible, "
+        f"{s.site_summary['informative']} INFORMATIVE (>= 1 present AND >= 1 "
+        "confident absence) -- the real amount of evidence the tree rests "
+        "on; a low-support tree can mean too few of these, not "
+        "disagreement.\n",
+        "\nPer cluster: present / absent / unknown (reasons), median depth, "
+        "sites excluded from its own spectrum:\n",
+    ]
+    for cluster in sorted(s.per_cluster, key=_sort_key):
+        c = s.per_cluster[cluster]
+        reasons = ", ".join(f"{k}={v}" for k, v in sorted(c["reasons"].items()))
+        depth = f"{c['median_depth']:.1f}" if c["median_depth"] is not None else "n/a"
+        excluded_one_alt = c["reasons"].get(UNKNOWN_ONE_ALT_READ, 0)
+        lines.append(
+            f"  clone{cluster}: present {c['present']}, absent {c['absent']}, "
+            f"unknown {c['unknown']} ({reasons}), median depth {depth}, "
+            f"excluded from spectrum by one-ALT-read: {excluded_one_alt}\n"
+        )
+
+    lines.append(
+        "\nDetectability: among sites present in every OTHER tumour cluster, "
+        "this cluster's own share and median depth there:\n"
+    )
+    for cluster in sorted(s.detectability, key=_sort_key):
+        d = s.detectability[cluster]
+        depth = f"{d['median_depth']:.1f}" if d["median_depth"] is not None else "n/a"
+        lines.append(
+            f"  clone{cluster}: {d['n_sites']} sites, present {d['present']}, "
+            f"absent {d['absent']}, unknown {d['unknown']}, median depth "
+            f"{depth}\n"
+        )
+
+    lines.append("\nTop 20 ternary patterns (present/absent, unknown implied):\n")
+    for (present, absent), count, informative in s.top_patterns:
+        tag = " (informative)" if informative else ""
+        p = ",".join(sorted(present, key=_sort_key)) or "-"
+        a = ",".join(sorted(absent, key=_sort_key)) or "-"
+        lines.append(f"  present={{{p}}} absent={{{a}}}: {count}{tag}\n")
+    return lines
+
+
 def _dollo_lines(r: DolloResult) -> List[str]:
     """Findings from the Dollo search: cost and runner-up, ties and
     consensus, per-clade bootstrap support (every clade, including ones
@@ -1923,6 +2299,7 @@ def write_diagnostics(
     n_violations: int,
     skip_counts: Dict[str, int],
     dollo_result: DolloResult,
+    state_diagnostics: StateDiagnostics,
     lichee_result: Optional[LicheeResult] = None,
     lichee_error: Optional[str] = None,
     lichee_verdict: Optional[str] = None,
@@ -1944,6 +2321,7 @@ def write_diagnostics(
         "# Stage 08 (SNV tree) diagnostics\n\n",
         "## Method used: dollo\n",
     ]
+    lines.extend(_state_lines(state_diagnostics))
     lines.extend(_dollo_lines(dollo_result))
 
     if (
@@ -2043,6 +2421,23 @@ def main() -> None:
         "enter the presence matrix or spectra",
     )
     p.add_argument(
+        "--absent-expected-vaf",
+        type=float,
+        default=0.25,
+        help="the VAF a true mutation is expected at, for the 'absent' "
+        "test: alt==0 trusted as absent only if a mutation at this VAF "
+        "would very likely have shown a read at the site's depth (see "
+        "config.sh's ABSENT_EXPECTED_VAF)",
+    )
+    p.add_argument(
+        "--absent-alpha",
+        type=float,
+        default=0.05,
+        help="the 'absent' test's tolerance: alt==0 is trusted as absent "
+        "only if the chance of that happening by chance for a true "
+        "mutation is at most this (see config.sh's ABSENT_ALPHA)",
+    )
+    p.add_argument(
         "--dollo-max-clusters",
         type=int,
         default=7,
@@ -2140,10 +2535,10 @@ def main() -> None:
         for cluster, files in pass1_vcfs.items()
     }
 
-    cluster_to_calls: Dict[str, Dict[SNVKey, Tuple[float, int]]] = {}
+    cluster_to_calls: Dict[str, Dict[SNVKey, SNVCall]] = {}
     cluster_union_stats: Dict[str, Dict[str, int]] = {}
     for cluster, files in cluster_vcfs.items():
-        raw_calls: Dict[SNVKey, Tuple[float, int]] = {}
+        raw_calls: Dict[SNVKey, SNVCall] = {}
         for f in files:
             raw_calls.update(parse_forced_vcf_calls(f, cluster))
         calls, n_dropped = restrict_calls_to_union(raw_calls, union_sites)
@@ -2154,12 +2549,24 @@ def main() -> None:
             "pass1_pass": pass1_counts.get(cluster, 0),
         }
 
-    # Presence, per cluster: VAF and ALT-read thresholds applied directly to the
-    # force-called genotype, not the FILTER column. This same call set backs
-    # the presence matrix and the 96-channel spectra below.
-    cluster_to_snvs = resolve_presence_calls(
-        cluster_to_calls, args.presence_min_vaf, args.presence_min_alt_reads
-    )
+    # Three states per cluster per union site (present/absent/unknown, with a
+    # reason for unknown) -- see module docstring for why alt==1 or a
+    # too-shallow zero-ALT-read call is unknown, not absent.
+    cluster_states = {
+        cluster: classify_cluster_states(
+            calls,
+            union_sites,
+            args.presence_min_alt_reads,
+            args.presence_min_vaf,
+            args.absent_expected_vaf,
+            args.absent_alpha,
+        )
+        for cluster, calls in cluster_to_calls.items()
+    }
+
+    # Confident-present SNVs per cluster: clone_snv_matrix.csv/spectra.csv's exact
+    # continuity contract, unchanged in meaning, now read off the classification.
+    cluster_to_snvs = present_snvs_from_states(cluster_states)
     assert_presence_within_union(cluster_to_snvs, union_sites)
     for cluster, snvs in cluster_to_snvs.items():
         cluster_union_stats[cluster]["present"] = len(snvs)
@@ -2167,13 +2574,19 @@ def main() -> None:
     snv_matrix = build_snv_presence_matrix(cluster_to_snvs)
     snv_matrix.to_csv(args.out_dir / "clone_snv_matrix.csv")
 
-    mutation_sets = mutation_sets_from_matrix(snv_matrix)
-    n_violations = three_gamete_violations(mutation_sets)
+    # Full ternary audit trail, every union site x every tumour cluster.
+    states_df, reasons_df = build_ternary_states_matrix(cluster_states, union_sites)
+    states_df.to_csv(args.out_dir / "clone_snv_states.csv")
+    reasons_df.to_csv(args.out_dir / "clone_snv_unknown_reason.csv")
+
+    n_violations = three_gamete_violations(states_df)
 
     # Dollo parsimony over trees with hidden internal nodes: the sole source of
     # snv_tree.nwk (see module docstring for why LICHeE and Camin-Sokal do not fit
     # this data). Clusters are leaves; every internal node is a hidden ancestor.
-    pattern_counts = pattern_counts_from_matrix(snv_matrix)
+    # Ternary: unknown is missing data, never charged (see dollo_pattern_cost).
+    site_patterns = site_ternary_patterns(cluster_states, union_sites)
+    pattern_counts = dollo_pattern_counts(site_patterns)
     dollo_result = dollo_tree(
         pattern_counts,
         sorted(cluster_to_snvs, key=_sort_key),
@@ -2181,6 +2594,20 @@ def main() -> None:
         n_bootstrap=args.dollo_bootstrap,
         min_clade_support=args.dollo_min_clade_support,
         seed=args.seed,
+    )
+
+    state_diagnostics = StateDiagnostics(
+        per_cluster=cluster_state_summary(cluster_states, cluster_to_calls),
+        detectability=detectability_table(cluster_states, cluster_to_calls),
+        top_patterns=top_ternary_patterns(site_patterns),
+        site_summary=site_pattern_summary(site_patterns),
+        implied_min_depth_value=implied_min_depth(
+            args.absent_expected_vaf, args.absent_alpha
+        ),
+        absent_expected_vaf=args.absent_expected_vaf,
+        absent_alpha=args.absent_alpha,
+        presence_min_alt_reads=args.presence_min_alt_reads,
+        presence_min_vaf=args.presence_min_vaf,
     )
 
     lichee_result: Optional[LicheeResult] = None
@@ -2237,6 +2664,7 @@ def main() -> None:
         n_violations,
         skip_counts,
         dollo_result,
+        state_diagnostics,
         lichee_result,
         lichee_error,
         lichee_verdict,
