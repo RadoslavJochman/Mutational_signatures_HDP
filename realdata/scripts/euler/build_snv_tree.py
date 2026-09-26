@@ -66,10 +66,43 @@ qualifications confirmed on a real run:
     then checks no cluster's present count exceeds the union size, as a sign
     the restriction actually took.
 
-A site counts as PRESENT in a cluster if its force-called record has VAF >=
-``--presence-min-vaf`` and ALT read depth >= ``--presence-min-alt-reads``
-(defaults from config.sh's PRESENCE_MIN_VAF/PRESENCE_MIN_ALT_READS); ABSENT
-otherwise.
+Three states per (cluster, site), not two: PRESENT, ABSENT, or UNKNOWN
+(``classify_snv_state``). Real slice D data showed the old binary rule (VAF
+and ALT-read thresholds, present or absent, nothing else) was wrong about
+what a zero- or one-ALT-read call means: every "absent" call under it had 0
+or 1 ALT reads, never more, and 48-63% had exactly 1 -- at depths where a
+true mutation would rarely produce even one read by sequencing error alone,
+and where the miss rate tracked each cluster's own depth (the lowest-depth
+cluster missed 31% of otherwise-shared sites, the highest-depth 9%). Mutect2's
+own FORMAT AF is not a fix: confirmed on real calls that AF is not alt/depth
+(0-1-ALT-read sites showed AF around 0.10-0.14, nowhere near the 0 that
+alt/depth would give). So AF is never used for presence, absence, or
+LICHeE's VAF column -- everything is computed from AD (``ref_depth,
+alt_depth...``) directly.
+
+    PRESENT: ``alt_reads >= --presence-min-alt-reads`` (2) AND
+    ``alt_reads / depth >= --presence-min-vaf`` (0.05).
+
+    ABSENT: ``alt_reads == 0`` AND ``(1 - v) ** depth <= alpha``, i.e. a
+    real mutation at the expected VAF ``v`` (``--absent-expected-vaf``,
+    0.25) would, at this depth, have been this unlikely (``alpha``,
+    ``--absent-alpha``, 0.05) to produce zero reads by chance -- so seeing
+    none is trusted as a real absence. ``implied_min_depth`` reports the
+    rounded depth this implies (11 at the defaults) for readability; the
+    live test is the exact inequality, not the rounded value.
+
+    UNKNOWN otherwise, with a reason: not genotyped at all (a union site
+    missing from the cluster's own forced VCF), a zero-ALT-read call too
+    shallow to trust as absent, exactly one ALT read (always ambiguous,
+    regardless of depth), or enough reads to be non-trivial but below the
+    presence VAF threshold.
+
+A site with no confidently PRESENT cluster at all is excluded from the
+tree (there is nothing to explain), but counted in the diagnostics.
+``clone_snv_matrix.csv`` and ``spectra.csv`` keep their original
+present-only meaning (confident PRESENT, else not); the full three-state
+picture is ``clone_snv_states.csv`` (1/0/NA over the whole union) and
+``clone_snv_unknown_reason.csv`` (the reason string wherever it is NA).
 
 Tree construction: Dollo parsimony over trees with hidden internal nodes
 (``dollo_tree``) is the SOLE source of ``snv_tree.nwk``. Neither SCITE nor the
@@ -119,14 +152,26 @@ ancestral to another, each is a sampled population -- and every internal
 node is a hidden ancestor, found by exhaustive search over every rooted
 BINARY topology (``enumerate_dollo_topologies``, ``(2n-3)!!`` of them, 105
 at n=5, capped at ``--dollo-max-clusters`` (7) rather than hang). A
-mutation's Dollo cost on one topology is one gain at its presence pattern's
-LCA, plus one loss per maximal fully-absent clade beneath that LCA
-(``dollo_pattern_cost``) -- Dollo, unlike Camin-Sokal, allows a mutation to
-be lost, exactly the dropout this data shows. Costs are precomputed once per
-topology per distinct pattern (``dollo_cost_table``): a bootstrap replicate
-only ever reweights this same fixed pattern universe, never introduces a
-new one, so scoring 1000 replicates is a fast weighted sum, not 1000 fresh
-tree walks.
+mutation's pattern is now ternary, ``(present, absent)`` cluster-id sets
+with unknown implied as whatever is in neither: its Dollo cost on one
+topology is one gain at ``present``'s LCA, plus one loss per maximal
+subtree beneath that LCA which has no PRESENT leaf but does have a
+CONFIRMED-ABSENT one (``dollo_pattern_cost``) -- a subtree with only
+unknown leaves costs nothing, since every unknown can be assigned present
+for free. Dollo, unlike Camin-Sokal, allows a mutation to be lost, exactly
+the dropout this data shows; the ternary generalisation additionally
+treats unknown calls as genuinely missing rather than forcing them to
+either state. This is proven, not just asserted, to equal the minimum
+loss count over every possible 0/1 assignment of the unknown leaves: a
+permanent regression test (``tests/test_build_snv_tree.py``) brute-forces
+that minimum over several hundred random small cases (5 and 6 leaves) and
+checks it against ``dollo_pattern_cost``'s formula. Costs are precomputed
+once per topology per distinct pattern (``dollo_cost_table``): a bootstrap
+replicate only ever reweights this same fixed pattern universe, never
+introduces a new one, so scoring 1000 replicates is a fast weighted sum,
+not 1000 fresh tree walks. The bootstrap resamples over every tree-eligible
+site (at least one confident PRESENT), not only the ones with a confirmed
+absence, so the resample reflects the data as observed.
 
 Ties at the minimum cost are never broken arbitrarily: their STRICT
 CONSENSUS is emitted (``strict_consensus_clades`` -- clades not common to
@@ -148,14 +193,19 @@ topologies -- and a per-edge gain/loss breakdown on the emitted tree
 (``dollo_edge_report``, generalised to the polytomies consensus/collapse
 can produce), trunk mutations landing on ``germline`` -> the MRCA.
 
-Verified against the real slice D pattern counts (5 tumour clusters, 15
-distinct presence patterns): the unique optimum is
+Verified against the real slice D pattern counts under the old binary rule
+(5 tumour clusters, 15 distinct presence patterns, absent read as the
+complement of present -- the ternary generalisation above reduces to this
+exactly when there are no unknowns): the unique optimum is
 ``render_topology``'s ``(3,(10,((7,8),9)))``, cost 1996 above the baseline
 every topology shares (singleton and full-set patterns cost 1 -- one gain,
 no losses -- on every topology, so they never affect which one wins); the
 runner-up, 30 more, swaps whether 9 or 10 joins the ``{7,8}`` clade first.
 Confirmed independently by hand and by script before trusting the
-implementation.
+implementation. The three-state rule changes which sites are tree-eligible
+and what their absent sets look like, so a real run's costs shift from
+these numbers -- see the diagnostics' informative-site count for the
+actual amount of evidence a given run rests on.
 
 ``--compare-tree <path>`` (e.g. stage 9's ``cna_tree.nwk``) reports
 clade-level agreement against another tree over the same clusters

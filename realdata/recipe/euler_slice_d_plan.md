@@ -200,6 +200,39 @@ bootstrap resampling gives each consensus clade a support value, and any clade b
 mechanics and the real-run result. LICHeE is kept as an optional comparison only
 (`RUN_LICHEE=1`); Camin-Sokal's code is removed (git history keeps it).
 
+## Correction: three-state classification replaces the binary presence rule (2026-09-26)
+
+The binary presence rule above (VAF and ALT-read thresholds, present or absent, nothing
+else) turned out to be the wrong model for what a low-ALT-read call means. Checked
+against real slice D AD-field evidence: every "absent" call under the binary rule had 0
+or 1 ALT reads, never more, and 48-63% had exactly 1 -- at depths where a true mutation
+would rarely produce even one read by sequencing error alone. The miss rate tracked each
+cluster's own depth (the lowest-depth tumour cluster missed 31% of sites otherwise
+shared by every other cluster; the highest-depth one missed 9%). Mutect2's own FORMAT
+AF was checked as a possible fix and rejected: it is not alt/depth (0-1-ALT-read sites
+showed AF around 0.10-0.14, nowhere near the 0 that alt/depth would give), so it is
+never used for presence, absence, or LICHeE's VAF column.
+
+Replaced with three states, all computed from AD directly (`classify_snv_state`):
+**present** (`alt_reads >= PRESENCE_MIN_ALT_READS` and `alt_reads/depth >=
+PRESENCE_MIN_VAF`), **absent** (`alt_reads == 0` and a real mutation at
+`ABSENT_EXPECTED_VAF` would, at this depth, have been this unlikely
+(`ABSENT_ALPHA`) to produce zero reads by chance -- so seeing none is trusted), and
+**unknown** otherwise (not genotyped, a zero-ALT-read call too shallow to trust, exactly
+one ALT read, or enough reads but below the presence VAF). Dollo now treats unknown as
+missing data rather than forcing it to present or absent: for a pattern with present set
+`P` and absent set `A`, the cost is one gain at `P`'s LCA plus one loss per maximal
+subtree beneath it that has no present leaf but does have a confirmed-absent one;
+unknown-only subtrees are free. This is proven, not just asserted, to equal the minimum
+loss count over every 0/1 assignment of the unknowns -- a permanent test brute-forces
+that minimum over several hundred random small cases and checks it against the formula.
+Bootstrap resampling now draws over every tree-eligible site (at least one present),
+not only ones with a confirmed absence, so the resample reflects the data as observed.
+`clone_snv_matrix.csv` and `spectra.csv` keep their original present-only meaning; the
+full three-state picture is two new files, `clone_snv_states.csv` and
+`clone_snv_unknown_reason.csv`. See "Stage 8" below and `build_snv_tree.py`'s module
+docstring for the mechanics.
+
 ## SECEDO build flags on modern GCC
 
 Undocumented until now: building `secedo` (stage 06's upstream dependency, not part of
@@ -327,21 +360,31 @@ into `submit_all.sh`'s dependency block -- run by hand once 07 has copied the VC
 - **Inputs**: `${PERSIST_DIR}/mutect_vcfs/clone<c>_<chrom>.forced.vcf` (stage 06b's
   force-called output, every tumour cluster genotyped at the same union of candidate
   sites), `REF_FASTA` (trinucleotide context), `COSMIC_sig/cosmic_signatures.csv`
-  (channel-order check only), `PRESENCE_MIN_VAF`/`PRESENCE_MIN_ALT_READS` (from
-  `config.sh`).
+  (channel-order check only), `PRESENCE_MIN_VAF`/`PRESENCE_MIN_ALT_READS` and
+  `ABSENT_EXPECTED_VAF`/`ABSENT_ALPHA` (from `config.sh`).
 - **Outputs**, written to `${PERSIST_DIR}/tree_input/`:
   - `snv_tree.nwk` -- one rooted, labelled-internal-node Newick tree.
   - `spectra.csv` -- per-cluster 96-channel spectra, ready to load as `TreeHDP`'s
     `data_matrix` via `pd.read_csv(index_col=0)`.
-  - `clone_snv_matrix.csv` -- the clone x SNV binary presence matrix Dollo was scored
-    against (provenance, and LICHeE's input when `--run-lichee` is on).
-  - `snv_tree_diagnostics.txt` -- the Dollo search (topology count, best and runner-up
-    cost, the optimal and runner-up topologies, tie count), bootstrap results (per-clade
-    support including any collapsed for low support, and how often the optimal and
-    runner-up topologies each win a replicate), a per-edge gain/loss breakdown, the
-    perfect-phylogeny (three-gamete) violation count, SNVs skipped in binning, the
-    resulting topology (branching or a linear chain), LICHeE's comparison result when
-    `--run-lichee` is on, and the `--compare-tree` clade agreement when given.
+  - `clone_snv_matrix.csv` -- the clone x SNV binary presence matrix (confident present
+    only) Dollo was scored against (provenance, and LICHeE's input when `--run-lichee`
+    is on).
+  - `clone_snv_states.csv` -- the full three-state picture, every union site x every
+    tumour cluster, values 1/0/NA for present/absent/unknown.
+  - `clone_snv_unknown_reason.csv` -- same shape, the reason string wherever
+    `clone_snv_states.csv` is NA (not genotyped, one ALT read, a too-shallow zero-ALT-
+    read call, or enough reads but low VAF).
+  - `snv_tree_diagnostics.txt` -- the three-state classification (per-cluster
+    present/absent/unknown counts and reasons, median depth, detectability among sites
+    present in every other cluster, the top 20 ternary patterns, and site counts --
+    excluded, tree-eligible, informative), the Dollo search (topology count, best and
+    runner-up cost, the optimal and runner-up topologies, tie count), bootstrap results
+    (per-clade support including any collapsed for low support, and how often the
+    optimal and runner-up topologies each win a replicate), a per-edge gain/loss
+    breakdown, the perfect-phylogeny (three-gamete) violation count, SNVs skipped in
+    binning, the resulting topology (branching or a linear chain), LICHeE's comparison
+    result when `--run-lichee` is on, and the `--compare-tree` clade agreement when
+    given.
   - `lichee_input.txt`, `lichee_out.trees.txt`, `lichee_run.log` -- LICHeE's input, its
     output and its captured stdout and stderr, written only when `--run-lichee` is on.
 
@@ -381,19 +424,22 @@ LICHeE and Camin-Sokal were tried and rejected on real slice D data first). SECE
 clusters are leaves -- no cluster is ancestral to another, each is a sampled
 population -- and every internal node is a hidden ancestor, found by exhaustive search
 over every rooted binary topology (`(2n-3)!!` of them, 105 at slice D's 5 tumour
-clusters, capped at `--dollo-max-clusters` (7) rather than hang). A mutation's cost on
-one topology is one gain at its presence pattern's LCA plus one loss per maximal
-fully-absent clade beneath it -- Dollo, unlike Camin-Sokal, allows losses, which is
-exactly the dropout this data shows. Costs are precomputed once per topology per
-distinct pattern, so scoring `--dollo-bootstrap` (1000) replicates is a fast weighted
-sum, not a fresh tree walk each time.
+clusters, capped at `--dollo-max-clusters` (7) rather than hang). A mutation's pattern
+is three-state (present/absent/unknown, see the correction above); its cost on one
+topology is one gain at the present set's LCA plus one loss per maximal subtree
+beneath it that has no present leaf but does have a confirmed-absent one -- a subtree
+with only unknown leaves is free, so unknown is genuine missing data, never forced to
+either state. Dollo, unlike Camin-Sokal, allows losses, which is exactly the dropout
+this data shows. Costs are precomputed once per topology per distinct pattern, so
+scoring `--dollo-bootstrap` (1000) replicates is a fast weighted sum, not a fresh tree
+walk each time.
 
 Ties at the minimum cost emit their strict consensus, never an arbitrary pick: clades
 not common to every optimal topology collapse into a polytomy. Each consensus clade's
-support comes from the bootstrap (resample SNVs with replacement, recompute that
-replicate's own optimal consensus, per-clade support is the fraction of replicates it
-survives in); any clade below `--dollo-min-clade-support` (0.7) is dropped before the
-final tree is built. The diagnostics also report, per bootstrap replicate, how often
+support comes from the bootstrap (resample tree-eligible sites with replacement,
+recompute that replicate's own optimal consensus, per-clade support is the fraction of
+replicates it survives in); any clade below `--dollo-min-clade-support` (0.7) is
+dropped before the final tree is built. The diagnostics also report, per bootstrap replicate, how often
 the optimal topology and the runner-up each win outright -- the direct instability
 signal between the two closest topologies -- and a per-edge gain/loss breakdown on the
 emitted tree, trunk mutations landing on `germline` -> the MRCA (a hidden node,
@@ -402,12 +448,16 @@ germline's only child). Hidden nodes are labelled `g<k>` and carry no row in
 the clusters below it. `spectra.csv` is unaffected regardless: one row per cluster
 from its own SNVs.
 
-Verified against the real slice D pattern counts (5 tumour clusters, 15 distinct
-presence patterns): the unique optimum nests `{7,8}` inside `{7,8,9}` inside
-`{7,8,9,10}`, with cluster 3 basal (cost 1996 above the baseline every topology
-shares); the runner-up, 30 more, swaps whether 9 or 10 joins the `{7,8}` clade first.
-This matches the independent CNA tree (SCICoNE), which separately puts cluster 3
-apart from `{7,8,9,10}` and 7 with 8.
+Verified against the real slice D pattern counts under the old binary rule (5 tumour
+clusters, 15 distinct presence patterns, absent read as the complement of present --
+the three-state rule above reduces to exactly this when there are no unknowns): the
+unique optimum nests `{7,8}` inside `{7,8,9}` inside `{7,8,9,10}`, with cluster 3 basal
+(cost 1996 above the baseline every topology shares); the runner-up, 30 more, swaps
+whether 9 or 10 joins the `{7,8}` clade first. This matches the independent CNA tree
+(SCICoNE), which separately puts cluster 3 apart from `{7,8,9,10}` and 7 with 8. The
+three-state rule changes which sites are tree-eligible and what their absent sets look
+like, so a real run's costs shift from these numbers -- see the diagnostics'
+informative-site count for the actual amount of evidence a given run rests on.
 
 `--run-lichee` (off by default) runs LICHeE purely as a comparison, never as the
 source of `snv_tree.nwk`: fed the per-cluster VAF table directly (a synthetic all-zero
@@ -490,15 +540,20 @@ Both trees are independent `TreeHDP` inputs for comparison, not merged into one 
 - Building SCICoNE (stage 9) into `realdata/external/` -- not cloned or built yet.
   LICHeE is built and runs on Euler (via `java -cp`, JDK 11), needed only for
   `RUN_LICHEE=1`'s optional comparison; Dollo needs neither LICHeE nor a JDK.
-- **Stage 8 on slice D's own presence matrix.** The Dollo search, consensus and
-  bootstrap are verified against the real slice D pattern counts (see the correction
-  above) and against hand-checked synthetic cases (see `tests/test_build_snv_tree.py`),
-  not yet against a fresh end-to-end run of this stage. Read `snv_tree_diagnostics.txt`:
-  the best and runner-up cost and topologies, the tie count, per-clade bootstrap
-  support (including anything collapsed for low support), and the top-two win rate.
-  LICHeE's `.trees.txt` format and the `java -cp` invocation are separately confirmed
-  on Euler probe runs (two kept verbatim as `tests/fixtures/lichee/`), relevant only
-  when `RUN_LICHEE=1`.
+- **Stage 8 on slice D's own presence matrix, under the three-state rule.** The Dollo
+  search, consensus and bootstrap are verified against the real slice D pattern counts
+  under the old binary rule (see the correction above) and against hand-checked and
+  brute-force-checked synthetic cases (see `tests/test_build_snv_tree.py`), not yet
+  against a fresh end-to-end run of this stage with the three-state classification and
+  its missing-data Dollo cost. Read `snv_tree_diagnostics.txt`: the classification
+  section first (per-cluster present/absent/unknown counts and reasons, the
+  informative-site count -- with a minimum depth of 11 and much of slice D's own depth
+  in the 8-10 range, expect a real drop in confident absences relative to the old rule),
+  then the Dollo search (best and runner-up cost and topologies, the tie count),
+  per-clade bootstrap support (including anything collapsed for low support), and the
+  top-two win rate. LICHeE's `.trees.txt` format and the `java -cp` invocation are
+  separately confirmed on Euler probe runs (two kept verbatim as
+  `tests/fixtures/lichee/`), relevant only when `RUN_LICHEE=1`.
 - **Stage 9 first real run**: `pip install realdata/external/SCICoNE/pyscicone/` into the
   Euler `.venv`, confirm `import scicone` works headless on a compute node, and pin
   PhenoGraph and pybiomart in `requirements.txt` (they are listed there unpinned; check
