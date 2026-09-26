@@ -90,6 +90,8 @@ fi
     --vcf-dir "${PERSIST_DIR}/mutect_vcfs" \
     --presence-min-vaf "${PRESENCE_MIN_VAF}" \
     --presence-min-alt-reads "${PRESENCE_MIN_ALT_READS}" \
+    --absent-expected-vaf "${ABSENT_EXPECTED_VAF}" \
+    --absent-alpha "${ABSENT_ALPHA}" \
     --ref-fasta "${REF_FASTA}" \
     --cosmic-signatures "${REPO_ROOT}/COSMIC_sig/cosmic_signatures.csv" \
     --out-dir "${TREE_OUT_DIR}" \
@@ -97,5 +99,5 @@ fi
     ${DOLLO_ARGS[@]+"${DOLLO_ARGS[@]}"} \
     ${LICHEE_ARGS[@]+"${LICHEE_ARGS[@]}"}
 
-echo "Wrote snv_tree.nwk, spectra.csv, clone_snv_matrix.csv, snv_tree_diagnostics.txt" \
-     "to ${TREE_OUT_DIR}."
+echo "Wrote snv_tree.nwk, spectra.csv, clone_snv_matrix.csv, clone_snv_states.csv," \
+     "clone_snv_unknown_reason.csv, snv_tree_diagnostics.txt to ${TREE_OUT_DIR}."

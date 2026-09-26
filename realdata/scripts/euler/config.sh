@@ -80,6 +80,14 @@ COSMIC_VCF="${COSMIC_VCF:-${REF_DIR}/cosmic_v94_hg37_coding_and_noncoding.vcf}"
 PRESENCE_MIN_VAF="${PRESENCE_MIN_VAF:-0.05}"
 PRESENCE_MIN_ALT_READS="${PRESENCE_MIN_ALT_READS:-2}"
 
+# --- force-call absence thresholds (same stage): a zero-ALT-read call counts as
+# confidently absent only if a real mutation at ABSENT_EXPECTED_VAF would, at the
+# site's depth, have been this unlikely (ABSENT_ALPHA) to show zero reads by chance.
+# Everything else at a genotyped site is unknown, never absent -- see
+# build_snv_tree.py's module docstring. ---
+ABSENT_EXPECTED_VAF="${ABSENT_EXPECTED_VAF:-0.25}"
+ABSENT_ALPHA="${ABSENT_ALPHA:-0.05}"
+
 # --- GATK4 (Mutect2 + FilterMutectCalls + SelectVariants): runs on modern Java, so unlike
 # MuTect1 it needs no special JDK fetch. Confirmed interactively on an Euler login node:
 # gatk lives under the stack/2024-06 software stack, not the default one, so a bare
