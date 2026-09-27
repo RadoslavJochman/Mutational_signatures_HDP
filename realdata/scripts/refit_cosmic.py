@@ -9,51 +9,69 @@ stdout, the CSV stays clean).
 
 Method
 ------
-Two fits per cluster, both by non-negative least squares (`scipy.optimize.
-nnls`: exposures x >= 0 minimising ||spectrum - x @ signatures||):
+Two fits per cluster:
 
-    candidate   the triple-negative breast repertoire named in the plan
-                (SBS1, SBS2, SBS3, SBS5, SBS8, SBS13, SBS17a, SBS17b, SBS18,
-                SBS40a), restricted to whichever of these actually exist in
-                cosmic_signatures.csv -- report the rest as missing, do not
-                fail on them.
-    full        every signature in cosmic_signatures.csv, to catch anything
-                the candidate set misses (including sequencing-artefact
-                signatures COSMIC also catalogues).
+    candidate         non-negative least squares (`scipy.optimize.nnls`:
+                       exposures x >= 0 minimising ||spectrum - x @
+                       signatures||) against the triple-negative breast
+                       repertoire named in the plan (SBS1, SBS2, SBS3, SBS5,
+                       SBS8, SBS13, SBS17a, SBS17b, SBS18, SBS40a),
+                       restricted to whichever of these actually exist in
+                       the catalogue in use -- report the rest as missing,
+                       do not fail on them.
+    full (forward     against the full catalogue (`--catalogue`, the
+    selection)         converted COSMIC v3.4 SBS GRCh37 file by default --
+                       see COSMIC_sig/README_full_catalogue.md), NOT plain
+                       NNLS over all ~85 signatures at once (an
+                       underdetermined fit against 96 channels): starting
+                       from SBS1 and SBS5, greedily add whichever remaining
+                       signature most improves NNLS cosine similarity,
+                       stopping once the best available gain falls below
+                       `--min-gain` (0.01). Reported in
+                       refit_selection_order.csv: which signature entered
+                       at which step, its gain, and the cosine after adding
+                       it -- the direct evidence for whether a signature is
+                       load-bearing or marginal.
 
 Exposures are reported as fractions of the fitted total (zero if the fit is
-degenerate), alongside the cosine similarity between the observed spectrum
-and the fit's reconstruction. Per-signature stability comes from a
-multinomial bootstrap: resample the observed spectrum's total mutation
-count from its own channel proportions `--n-bootstrap` times (200), refit
-each replicate, and report the fraction of replicates in which that
-signature's exposure exceeds `--stability-threshold` (5%) -- a signature
-that is only sometimes needed to explain sampling noise is unstable, not
-load-bearing.
+degenerate, or if a full-catalogue signature was never selected), alongside
+the cosine similarity between the observed spectrum and the fit's
+reconstruction. Per-signature stability comes from a multinomial bootstrap:
+resample the observed spectrum's total mutation count from its own channel
+proportions `--n-bootstrap` times (200), refit each replicate against the
+SAME signature set the cluster's own fit landed on (the candidate set, or
+the full fit's own selected subset -- forward selection itself is not
+rerun per replicate), and report the fraction of replicates in which that
+signature's exposure exceeds `--stability-threshold` (5%).
 
 Two flags follow directly from these fits, printed, never chosen here:
 a signature above the stability threshold in the full fit but absent from
-the candidate set (the candidate repertoire may be missing something real),
-and a candidate-set signature that never clears the threshold in any
-cluster's candidate fit (the candidate repertoire may be carrying dead
-weight). Cluster 10 (the largest private SNV count in the plan) gets a
-direct comparison against the other clusters' spectra, since a real
-biological difference there would need its own signature rather than
-forcing it onto the shared repertoire.
+the candidate set (the candidate repertoire may be missing something
+real), and a candidate-set signature that never clears the threshold in
+any cluster's candidate fit (the candidate repertoire may be carrying dead
+weight). Any selected full-fit signature that is a known COSMIC sequencing
+artefact (`KNOWN_ARTEFACT_SIGNATURES`) is reported separately, per cluster
+-- selection does not mean acceptance. Cluster 10 (the largest private SNV
+count in the plan) gets a direct comparison against the other clusters'
+spectra, since a real biological difference there would need its own
+signature rather than forcing it onto the shared repertoire.
 
 Outputs (to --outdir)
-    refit_exposures.csv   long format: cluster, fit_set, signature,
-                           exposure_fraction, bootstrap_stability,
-                           cosine_similarity (repeated per row of its
-                           cluster/fit_set group, for a self-contained row)
-    refit_summary.csv     per cluster/fit_set: cosine_similarity,
-                           n_signatures_above_threshold
+    refit_exposures.csv       long format: cluster, fit_set, signature,
+                               exposure_fraction, bootstrap_stability,
+                               cosine_similarity (repeated per row of its
+                               cluster/fit_set group, for a self-contained
+                               row)
+    refit_summary.csv         per cluster/fit_set: cosine_similarity,
+                               n_signatures_above_threshold
+    refit_selection_order.csv full-fit forward selection only: cluster,
+                               step, signature, gain, cosine_after
 
 Usage
 -----
     python realdata/scripts/refit_cosmic.py \\
         --spectra realdata/local_tree_input/spectra.csv \\
-        --cosmic-signatures COSMIC_sig/cosmic_signatures.csv \\
+        --catalogue COSMIC_sig/cosmic_v3.4_sbs96_grch37_full.csv \\
         --outdir realdata/local_tree_input/refit
 """
 
@@ -84,8 +102,37 @@ BREAST_CANDIDATE_SET = [
     "SBS18",
     "SBS40a",
 ]
+
+# COSMIC's own "Proposed aetiology: Possible sequencing artefact" signatures
+# (cancer.sanger.ac.uk/signatures/sbs/, checked 2026-09-27). Not a control
+# value here -- reported alongside a selected signature, never used to
+# exclude it; COSMIC's own list may grow with later releases.
+KNOWN_ARTEFACT_SIGNATURES = [
+    "SBS27",
+    "SBS43",
+    "SBS45",
+    "SBS46",
+    "SBS47",
+    "SBS48",
+    "SBS49",
+    "SBS50",
+    "SBS51",
+    "SBS52",
+    "SBS53",
+    "SBS54",
+    "SBS55",
+    "SBS56",
+    "SBS57",
+    "SBS58",
+    "SBS59",
+    "SBS60",
+    "SBS95",
+]
+
+FORWARD_SELECTION_START = ["SBS1", "SBS5"]
 N_BOOTSTRAP = 200
 STABILITY_THRESHOLD = 0.05
+MIN_GAIN = 0.01
 
 
 def split_available(
@@ -155,6 +202,49 @@ def fit_cluster(
     return fractions, similarity, stability
 
 
+def forward_selection(
+    spectrum: np.ndarray,
+    signatures: pd.DataFrame,
+    start: List[str] = FORWARD_SELECTION_START,
+    min_gain: float = MIN_GAIN,
+) -> Tuple[List[str], List[dict]]:
+    """Greedily grow a signature subset for ``spectrum`` against the full
+    ``signatures`` catalogue: always start from ``start`` (SBS1, SBS5), then
+    repeatedly add whichever remaining signature most improves NNLS cosine
+    similarity, stopping once the best available gain is below
+    ``min_gain``. Plain NNLS over the whole catalogue at once is
+    underdetermined against 96 channels; this is the fix.
+
+    Returns ``(selected, order)``: ``selected`` is ``start`` plus every
+    signature added, in entry order; ``order`` is one dict per addition
+    (``signature``, ``gain``, ``cosine_after``), NOT including ``start``
+    itself (there is nothing to compare its addition against).
+    """
+    selected = list(start)
+    remaining = [name for name in signatures.index if name not in selected]
+    _, cosine_so_far = nnls_fit(spectrum, signatures.loc[selected])
+    order: List[dict] = []
+    while remaining:
+        best_signature, best_cosine = None, cosine_so_far
+        for candidate in remaining:
+            _, trial_cosine = nnls_fit(spectrum, signatures.loc[selected + [candidate]])
+            if trial_cosine > best_cosine:
+                best_signature, best_cosine = candidate, trial_cosine
+        if best_signature is None or best_cosine - cosine_so_far < min_gain:
+            break
+        selected.append(best_signature)
+        remaining.remove(best_signature)
+        order.append(
+            {
+                "signature": best_signature,
+                "gain": best_cosine - cosine_so_far,
+                "cosine_after": best_cosine,
+            }
+        )
+        cosine_so_far = best_cosine
+    return selected, order
+
+
 def flag_missing_from_candidate(
     exposures: pd.DataFrame,
     candidate_names: List[str],
@@ -216,73 +306,118 @@ def main() -> None:
         "--spectra", type=Path, default=Path("realdata/local_tree_input/spectra.csv")
     )
     p.add_argument(
-        "--cosmic-signatures",
+        "--catalogue",
         type=Path,
-        default=Path("COSMIC_sig/cosmic_signatures.csv"),
+        default=Path("COSMIC_sig/cosmic_v3.4_sbs96_grch37_full.csv"),
+        help="the full signature catalogue for the candidate-availability "
+        "check and the forward-selection full fit",
     )
     p.add_argument(
         "--outdir", type=Path, default=Path("realdata/local_tree_input/refit")
     )
     p.add_argument("--n-bootstrap", type=int, default=N_BOOTSTRAP)
     p.add_argument("--stability-threshold", type=float, default=STABILITY_THRESHOLD)
+    p.add_argument("--min-gain", type=float, default=MIN_GAIN)
     p.add_argument("--focus-cluster", default="10")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     spectra = read_data_matrix(args.spectra)
-    cosmic = pd.read_csv(args.cosmic_signatures, index_col=0)
+    catalogue = pd.read_csv(args.catalogue, index_col=0)
 
     present_candidates, missing_candidates = split_available(
-        cosmic, BREAST_CANDIDATE_SET
+        catalogue, BREAST_CANDIDATE_SET
     )
     print("## Candidate set availability")
-    print(f"present in cosmic_signatures.csv: {present_candidates}")
+    print(f"present in {args.catalogue.name}: {present_candidates}")
     if missing_candidates:
-        print(f"MISSING from cosmic_signatures.csv: {missing_candidates}")
-    candidate_signatures = cosmic.loc[present_candidates]
+        print(f"MISSING from {args.catalogue.name}: {missing_candidates}")
+    candidate_signatures = catalogue.loc[present_candidates]
 
     rows = []
     summary_rows = []
+    selection_rows = []
     for cluster in spectra.index:
         spectrum = spectra.loc[cluster].to_numpy()
-        for fit_name, signatures in (
-            ("candidate", candidate_signatures),
-            ("full", cosmic),
-        ):
-            fractions, similarity, stability = fit_cluster(
-                spectrum,
-                signatures,
-                n_bootstrap=args.n_bootstrap,
-                threshold=args.stability_threshold,
-                seed=args.seed,
-            )
-            n_above = int((fractions > args.stability_threshold).sum())
-            summary_rows.append(
+
+        # candidate: plain NNLS over the (small) restricted repertoire.
+        fractions, similarity, stability = fit_cluster(
+            spectrum,
+            candidate_signatures,
+            n_bootstrap=args.n_bootstrap,
+            threshold=args.stability_threshold,
+            seed=args.seed,
+        )
+        summary_rows.append(
+            {
+                "cluster": cluster,
+                "fit_set": "candidate",
+                "cosine_similarity": similarity,
+                "n_signatures_above_threshold": int(
+                    (fractions > args.stability_threshold).sum()
+                ),
+            }
+        )
+        for signature in candidate_signatures.index:
+            rows.append(
                 {
                     "cluster": cluster,
-                    "fit_set": fit_name,
+                    "fit_set": "candidate",
+                    "signature": signature,
+                    "exposure_fraction": float(fractions[signature]),
+                    "bootstrap_stability": float(stability[signature]),
                     "cosine_similarity": similarity,
-                    "n_signatures_above_threshold": n_above,
                 }
             )
-            for signature in signatures.index:
-                rows.append(
-                    {
-                        "cluster": cluster,
-                        "fit_set": fit_name,
-                        "signature": signature,
-                        "exposure_fraction": float(fractions[signature]),
-                        "bootstrap_stability": float(stability[signature]),
-                        "cosine_similarity": similarity,
-                    }
-                )
+
+        # full: forward selection over the whole catalogue (plain NNLS over
+        # ~85 signatures against 96 channels is underdetermined), then the
+        # bootstrap over the resulting fixed subset only.
+        selected, order = forward_selection(
+            spectrum, catalogue, FORWARD_SELECTION_START, args.min_gain
+        )
+        for step, entry in enumerate(order, start=1):
+            selection_rows.append({"cluster": cluster, "step": step, **entry})
+        full_fractions, full_similarity = nnls_fit(spectrum, catalogue.loc[selected])
+        full_stability = bootstrap_stability(
+            spectrum,
+            catalogue.loc[selected],
+            n_bootstrap=args.n_bootstrap,
+            threshold=args.stability_threshold,
+            seed=args.seed,
+        )
+        full_fractions = full_fractions.reindex(catalogue.index, fill_value=0.0)
+        full_stability = full_stability.reindex(catalogue.index, fill_value=0.0)
+        summary_rows.append(
+            {
+                "cluster": cluster,
+                "fit_set": "full",
+                "cosine_similarity": full_similarity,
+                "n_signatures_above_threshold": int(
+                    (full_fractions > args.stability_threshold).sum()
+                ),
+            }
+        )
+        for signature in catalogue.index:
+            rows.append(
+                {
+                    "cluster": cluster,
+                    "fit_set": "full",
+                    "signature": signature,
+                    "exposure_fraction": float(full_fractions[signature]),
+                    "bootstrap_stability": float(full_stability[signature]),
+                    "cosine_similarity": full_similarity,
+                }
+            )
 
     exposures = pd.DataFrame(rows)
     summary = pd.DataFrame(summary_rows)
+    selection_order = pd.DataFrame(selection_rows)
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     exposures.to_csv(args.outdir / "refit_exposures.csv", index=False)
     summary.to_csv(args.outdir / "refit_summary.csv", index=False)
+    selection_order.to_csv(args.outdir / "refit_selection_order.csv", index=False)
 
     print("\n## Per-cluster fit summary")
     print(summary.to_string(index=False))
@@ -298,6 +433,40 @@ def main() -> None:
             for r in above.itertuples()
         )
         print(f"  clone{cluster}: {parts or '(none above threshold)'}")
+
+    print(
+        f"\n## Full-fit forward selection (start {FORWARD_SELECTION_START}, "
+        f"min gain {args.min_gain})"
+    )
+    all_selected: set = set()
+    for cluster in spectra.index:
+        cluster_order = selection_order[selection_order["cluster"] == cluster]
+        entered = ", ".join(
+            f"{r.signature} (+{r.gain:.3f} -> {r.cosine_after:.4f})"
+            for r in cluster_order.itertuples()
+        )
+        print(
+            f"  clone{cluster}: {FORWARD_SELECTION_START} then "
+            f"{entered or '(nothing else)'}"
+        )
+        all_selected.update(FORWARD_SELECTION_START)
+        all_selected.update(cluster_order["signature"])
+
+    print(f"\nselected in at least one cluster: {sorted(all_selected)}")
+
+    artefacts_selected = sorted(all_selected & set(KNOWN_ARTEFACT_SIGNATURES))
+    print("\n## Flag: known sequencing-artefact signature selected in the full fit")
+    print(f"  {artefacts_selected or '(none)'}")
+
+    for name in ("SBS4", "SBS105"):
+        if name not in catalogue.index:
+            print(
+                f"\n{name}: absent from the full v3.4 catalogue -- cannot be selected"
+            )
+        elif name in all_selected:
+            print(f"\n{name}: SURVIVES -- selected in at least one cluster's full fit")
+        else:
+            print(f"\n{name}: does not survive -- never selected in any cluster")
 
     missing_flags = flag_missing_from_candidate(
         exposures, present_candidates, args.stability_threshold

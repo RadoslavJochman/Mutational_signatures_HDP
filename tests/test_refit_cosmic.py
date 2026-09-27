@@ -51,6 +51,49 @@ class TestNnlsFit:
         assert similarity == 0.0
 
 
+THREE_SIGNATURES = pd.DataFrame(
+    {
+        "ch0": [0.9, 0.05, 0.05],
+        "ch1": [0.05, 0.9, 0.05],
+        "ch2": [0.05, 0.05, 0.9],
+    },
+    index=["SIGA", "SIGB", "SIGC"],
+)
+
+
+class TestForwardSelection:
+    def test_adds_a_signature_that_explains_extra_structure(self):
+        # spectrum is purely SIGC-shaped: SIGA+SIGB alone cannot explain
+        # ch2 at all, so SIGC should be added.
+        spectrum = THREE_SIGNATURES.loc["SIGC"].to_numpy() * 100
+        selected, order = rc.forward_selection(
+            spectrum, THREE_SIGNATURES, start=["SIGA", "SIGB"], min_gain=0.01
+        )
+        assert selected == ["SIGA", "SIGB", "SIGC"]
+        assert len(order) == 1
+        assert order[0]["signature"] == "SIGC"
+        assert order[0]["gain"] > 0.01
+        assert order[0]["cosine_after"] == pytest.approx(1.0, abs=1e-6)
+
+    def test_stops_when_the_start_already_explains_the_spectrum(self):
+        spectrum = (
+            THREE_SIGNATURES.loc["SIGA"] + THREE_SIGNATURES.loc["SIGB"]
+        ).to_numpy() * 100
+        selected, order = rc.forward_selection(
+            spectrum, THREE_SIGNATURES, start=["SIGA", "SIGB"], min_gain=0.01
+        )
+        assert selected == ["SIGA", "SIGB"]
+        assert order == []
+
+    def test_a_high_min_gain_stops_selection_before_a_real_gain_clears_it(self):
+        spectrum = THREE_SIGNATURES.loc["SIGC"].to_numpy() * 100
+        selected, order = rc.forward_selection(
+            spectrum, THREE_SIGNATURES, start=["SIGA", "SIGB"], min_gain=0.99
+        )
+        assert selected == ["SIGA", "SIGB"]
+        assert order == []
+
+
 class TestBootstrapStability:
     def test_a_clean_single_signature_spectrum_is_fully_stable(self):
         spectrum = TWO_SIGNATURES.loc["SIGA"].to_numpy() * 2000
