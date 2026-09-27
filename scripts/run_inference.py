@@ -45,7 +45,7 @@ import pymc as pm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.analysis.analysis import align
+from src.analysis.analysis import align, read_data_matrix
 from src.config import load_config, make_output_dir
 from src.models.hdp_inference import TreeHDP
 
@@ -230,9 +230,11 @@ def run_inference(cfg: dict, model_name: str | None = None) -> None:
     )
     print(f"Output directory: {out_dir}")
 
-    # Load data
+    # Load data. read_data_matrix (not a bare pd.read_csv) so a numeric
+    # cluster-ID index (real data) is cast to str before it can fail to
+    # match a Newick label -- see src/analysis/analysis.py's docstring.
     print("Loading data...")
-    count_matrix = pd.read_csv(data_cfg["count_matrix"], index_col=0)
+    count_matrix = read_data_matrix(data_cfg["count_matrix"])
     with open(data_cfg["newick_string"]) as f:
         newick_string = f.read().strip()
 

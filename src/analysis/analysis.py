@@ -33,7 +33,10 @@ Camp detection
 
 Model construction
     build_model and DEFAULT_PRIORS build a TreeHDP (S latent) from file paths
-    with the shared prior configuration.
+    with the shared prior configuration. read_data_matrix is the one place a
+    count/spectra CSV's index is loaded, so a numeric row index (e.g. real
+    SECEDO cluster IDs) is always cast to str before it can fail to match a
+    Newick label, which is always str.
 """
 
 from __future__ import annotations
@@ -457,6 +460,28 @@ DEFAULT_PRIORS = {
 }
 
 
+def read_data_matrix(path):
+    """Read a count/spectra CSV the way every model-loading caller must:
+    with its row index forced to ``str``.
+
+    A Newick node label is always ``str`` (phylox parses every leaf and
+    internal label as text), but a plain ``pd.read_csv(path,
+    index_col=0)`` infers ``int64`` for an all-numeric index -- real
+    SECEDO cluster IDs (``3``, ``7``, ...), unlike the simulator's own node
+    names (``T1_1``, ...), are exactly this case. An int64 row then matches
+    no Newick label at all. ``TreeHDP`` itself now raises loudly on any
+    unmatched row rather than silently sampling from the prior (see
+    ``_BaseTreeHDP._validate_data_matrix``), but this is the fix that stops
+    the mismatch from happening in the first place: call this, not a bare
+    ``pd.read_csv``, wherever a count matrix is loaded for a model.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path, index_col=0)
+    df.index = df.index.astype(str)
+    return df
+
+
 def build_model(
     newick_path: str,
     counts_path: str,
@@ -466,11 +491,9 @@ def build_model(
     """Construct a TreeHDP (S latent) from file paths with the shared prior
     config the scripts had all hard-coded. Returns (model, counts). Pass
     `priors` to override DEFAULT_PRIORS."""
-    import pandas as pd
-
     from src.models.hdp_inference import TreeHDP
 
-    counts = pd.read_csv(counts_path, index_col=0)
+    counts = read_data_matrix(counts_path)
     newick = Path(newick_path).read_text().strip()
     model = TreeHDP(
         newick, counts, priors or DEFAULT_PRIORS, num_signatures=num_signatures

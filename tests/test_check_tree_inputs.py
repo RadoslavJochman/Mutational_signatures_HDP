@@ -1,6 +1,10 @@
 """Tests for realdata/scripts/check_tree_inputs.py, on tiny synthetic trees
 and data -- never the real slice D files under realdata/local_tree_input/
-(not committed, and not something a test should depend on existing)."""
+(not committed, and not something a test should depend on existing).
+
+read_data_matrix and TreeHDP's own data-matrix validation are shared code
+now (src/analysis/analysis.py, src/models/hdp_inference.py) and are tested
+there (tests/test_analysis.py, tests/test_hdp_inference.py), not here."""
 
 import sys
 from pathlib import Path
@@ -23,17 +27,6 @@ TINY_NEWICK = "((a,b)g1,c)germline;"
 
 def _tiny_spectra() -> pd.DataFrame:
     return pd.DataFrame({"ch0": [5, 3, 4], "ch1": [1, 2, 0]}, index=["a", "b", "c"])
-
-
-class TestReadDataMatrix:
-    def test_casts_a_numeric_index_to_str(self, tmp_path):
-        path = tmp_path / "spectra.csv"
-        pd.DataFrame({"ch0": [1, 2]}, index=[3, 7]).to_csv(path)
-        # confirm the pitfall exists before checking the fix
-        assert pd.read_csv(path, index_col=0).index.dtype == np.int64
-        df = cti.read_data_matrix(path)
-        assert list(df.index) == ["3", "7"]
-        assert df.index.dtype == object
 
 
 class TestDescribeTree:

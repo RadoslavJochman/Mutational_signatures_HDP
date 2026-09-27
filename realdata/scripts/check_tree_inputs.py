@@ -13,24 +13,22 @@ code path a real inference run takes), then this script only INSPECTS
 the resulting ``model.graph`` and re-runs the same "is this node
 observed" test ``_build_pymc_model`` uses internally.
 
-DATA-LOADING CONTRACT this script exists to check, and enforces on its own
-input (crossing the realdata/src import boundary CLAUDE.md otherwise keeps
-strict -- see the module's own note below): a data-matrix CSV's index must
-be read as ``str``. Newick node labels are always Python ``str`` (phylox
-parses every leaf/internal label as text), but SECEDO cluster IDs are
-small integers, so a plain ``pd.read_csv(path, index_col=0)`` infers an
-``int64`` index from a file like ``spectra.csv`` -- pandas has no way to
-know the column is meant to line up with string tree labels. The mismatch
-raises nothing: ``label in data_matrix.index`` is simply ``False`` for
-every node, ``_build_pymc_model`` finds no observed nodes at all, skips
-building the ``Multinomial`` likelihood entirely, and the model happily
-samples from the prior alone. ``read_data_matrix`` below is the fix
-(``index.astype(str)`` after loading); ``run_inference.py``'s own
-``pd.read_csv(data_cfg["count_matrix"], index_col=0)`` does not have this
-problem today only because the simulator's own node names
-(``T1_1``, ...) are never all-digit strings, so pandas never infers a
-numeric index for them. A real-data run over SECEDO's numeric cluster IDs
-needs this fix wherever a count matrix is loaded, not just here.
+DATA-LOADING CONTRACT this script checks against (crossing the realdata/src
+import boundary CLAUDE.md otherwise keeps one-way -- realdata/ may read
+from src/, never the reverse): a data-matrix CSV's index must be read as
+``str``. Newick node labels are always Python ``str`` (phylox parses every
+leaf/internal label as text), but SECEDO cluster IDs are small integers, so
+a plain ``pd.read_csv(path, index_col=0)`` infers an ``int64`` index from a
+file like ``spectra.csv`` -- pandas has no way to know the column is meant
+to line up with string tree labels. ``src.analysis.analysis.read_data_matrix``
+(imported below, not reimplemented) is the fix, applied wherever a count
+matrix is loaded, including by ``run_inference.py``. As a second, load-
+bearing line of defence, ``TreeHDP`` itself now raises loudly in
+``_validate_data_matrix`` if any row matches no tree node or if nothing
+ends up observed at all -- sampling from the prior because nothing matched
+must be impossible, not a silent outcome. The "Known pitfall" section
+below demonstrates this raise directly against the unfixed, raw-read
+index, before applying the fix for every other check in this script.
 
 Usage
 -----
@@ -52,7 +50,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.analysis.analysis import DEFAULT_PRIORS  # noqa: E402
+from src.analysis.analysis import DEFAULT_PRIORS, read_data_matrix  # noqa: E402
 from src.models.hdp_inference import TreeHDP  # noqa: E402
 
 GERMLINE_ROOT_ID = "germline"
@@ -65,40 +63,22 @@ HIDDEN_PATTERN = re.compile(r"^g\d+$")
 CONSENSUS_NEWICK = "(3,(7,8,9,10)g0)germline;"
 
 
-def read_data_matrix(path: Path) -> pd.DataFrame:
-    """Read a count/spectra CSV with its index forced to ``str``.
-
-    See the module docstring: a plain ``pd.read_csv(index_col=0)`` infers
-    ``int64`` for an all-numeric index like SECEDO's cluster IDs, which
-    then matches no Newick label (always ``str``) and silently drops every
-    node from the likelihood. This is the fix, applied once here rather
-    than left to each caller to remember.
-    """
-    df = pd.read_csv(path, index_col=0)
-    df.index = df.index.astype(str)
-    return df
-
-
 def describe_tree(model: TreeHDP) -> pd.DataFrame:
     """One row per node in ``model.graph``: its parent (``None`` for the
-    root), whether ``_build_pymc_model`` would treat it as observed (in
-    ``data_matrix.index`` AND its row sums to more than zero -- the exact
-    test the model itself runs), and whether it is the root.
+    root), whether it is observed (``model.observed_labels``, computed and
+    validated once by ``_BaseTreeHDP.__init__`` -- reused here rather than
+    recomputed, so this can never disagree with what the model itself
+    conditioned on), and whether it is the root.
     """
-    data_index = set(model.data_matrix.index.astype(str))
     rows = []
     for node in model.graph.nodes():
         parents = list(model.graph.predecessors(node))
         parent = parents[0] if parents else None
-        observed = (
-            node in data_index
-            and float(model.data_matrix.loc[node].to_numpy().sum()) > 0
-        )
         rows.append(
             {
                 "node": node,
                 "parent": parent,
-                "observed": observed,
+                "observed": node in model.observed_labels,
                 "is_root": parent is None,
             }
         )
@@ -244,21 +224,16 @@ def main() -> None:
     raw_spectra = pd.read_csv(args.tree_dir / "spectra.csv", index_col=0)
     print(f"plain pd.read_csv index dtype: {raw_spectra.index.dtype}")
     demo_newick = (args.tree_dir / "snv_tree.nwk").read_text().strip()
-    demo_model = TreeHDP(
-        newick_string=demo_newick,
-        data_matrix=raw_spectra,
-        priors=DEFAULT_PRIORS,
-        fixed_signatures=fixed_signatures,
-    )
-    n_obs = len(demo_model.model.observed_RVs)
-    print(f"likelihood terms built from the RAW (unfixed) data matrix: {n_obs}")
-    if n_obs == 0:
-        print(
-            "  CONFIRMED: every node is silently dropped from the likelihood, no "
-            "error raised -- see read_data_matrix / the module docstring."
+    try:
+        TreeHDP(
+            newick_string=demo_newick,
+            data_matrix=raw_spectra,
+            priors=DEFAULT_PRIORS,
+            fixed_signatures=fixed_signatures,
         )
-    else:
         print("  unexpected: the raw index did not reproduce the pitfall; investigate.")
+    except ValueError as exc:
+        print(f"  CONFIRMED: TreeHDP raises loudly on the raw (unfixed) index: {exc}")
 
     spectra = read_data_matrix(args.tree_dir / "spectra.csv")
     print("\n## Channel order and counts")

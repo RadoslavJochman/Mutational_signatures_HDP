@@ -57,6 +57,11 @@ class _BaseTreeHDP(ABC):
     Responsibilities
     ----------------
     - Parse one or more Newick trees and compose them into a single DiGraph.
+    - Validate ``data_matrix`` against the parsed graph before building
+      anything: every row must match a tree node, and at least one matched
+      row must carry a nonzero count, or ``__init__`` raises (see
+      ``_validate_data_matrix``). Sampling from the prior because nothing
+      matched must never happen silently.
     - Compute depth for every node (BFS from each root).
     - Group nodes by depth for vectorised PyMC variable construction.
     - Provide ``get_node_activity_posterior`` so analysis code can query any
@@ -91,9 +96,55 @@ class _BaseTreeHDP(ABC):
             relabeled = nx.relabel_nodes(tree, mapping)
             self.graph = nx.compose(self.graph, relabeled)
 
+        self.observed_labels = self._validate_data_matrix()
+
         self.model: Optional[pm.Model] = None
         self.trace = None
         self._build_pymc_model()
+
+    def _validate_data_matrix(self) -> set:
+        """Raise loudly, before building anything, if ``data_matrix`` cannot
+        actually condition the model: sampling from the prior because
+        nothing matched must be impossible, not a silent outcome.
+
+        Two failure modes, both fatal:
+
+        - A row label matches no tree node at all. The most common real
+          cause is an unconverted numeric index (see
+          ``src.analysis.analysis.read_data_matrix``): a Newick label is
+          always ``str``, so an ``int64`` row index (real SECEDO cluster
+          IDs, unlike the simulator's own ``T1_1``-style names) matches
+          nothing, silently, unless this check catches it.
+        - Every matched row sums to zero counts, leaving no node to
+          observe at all.
+
+        Returns the set of node labels that DO carry a nonzero-count row --
+        reused by ``TreeHDP._build_pymc_model`` so the two never disagree
+        about which nodes are observed.
+        """
+        graph_labels = set(self.graph.nodes())
+        data_labels = list(self.data_matrix.index)
+        unmatched = [label for label in data_labels if label not in graph_labels]
+        if unmatched:
+            raise ValueError(
+                f"data_matrix row label(s) match no tree node: "
+                f"{sorted(map(str, unmatched))}. Tree node labels are: "
+                f"{sorted(graph_labels)}. A numeric cluster-ID index not "
+                "cast to str is the usual cause -- see "
+                "src.analysis.analysis.read_data_matrix."
+            )
+        observed = {
+            label
+            for label in data_labels
+            if float(self.data_matrix.loc[label].to_numpy().sum()) > 0
+        }
+        if not observed:
+            raise ValueError(
+                "no observed nodes: every data_matrix row matched a tree "
+                f"node but summed to zero counts. Tree node labels are: "
+                f"{sorted(graph_labels)}."
+            )
+        return observed
 
     @abstractmethod
     def _build_pymc_model(self) -> None:
@@ -387,15 +438,16 @@ class TreeHDP(_BaseTreeHDP):
                     node_es[node] = e_level[i]
                     self.node_index_map[node] = (e_name, i)
 
-            # Likelihood
+            # Likelihood. self.observed_labels (set in __init__'s
+            # _validate_data_matrix) is already the exact node set with a
+            # matched, nonzero-count row -- reuse it rather than
+            # recomputing the same test here, where it could silently
+            # drift out of sync with the loud-failure check.
             observed_es, obs_counts = [], []
             for node in self.graph.nodes():
-                label = self.graph.nodes[node].get("label", str(node))
-                if label in self.data_matrix.index:
-                    counts = self.data_matrix.loc[label].values
-                    if counts.sum() > 0:
-                        observed_es.append(node_es[node])
-                        obs_counts.append(counts)
+                if node in self.observed_labels:
+                    observed_es.append(node_es[node])
+                    obs_counts.append(self.data_matrix.loc[node].values)
 
             if observed_es:
                 obs_counts_matrix = np.array(obs_counts, dtype=np.int32)
