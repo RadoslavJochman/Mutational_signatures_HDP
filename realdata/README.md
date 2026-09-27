@@ -2,10 +2,11 @@
 
 Upstream tooling that turns real single-cell sequencing data into the per-node mutation
 count matrix Tree-HDP consumes. This is separate from the model and simulator work in
-`src/`/`scripts/`/`experiments/`: it does not import from or get imported by them, and its
-output is a `mutation_count_matrix.csv`-shaped file (nodes/subclones x 96 trinucleotide
-channels) that plugs into the existing `run_inference.py` pipeline the same way a
-simulated dataset does.
+`src/`/`scripts/`/`experiments/`: it may import from `src/` as a read-only consumer (e.g.
+building a model to check it loads real inputs correctly), but `src/`/`scripts/` never
+import from here. Its output is a `mutation_count_matrix.csv`-shaped file (nodes/subclones
+x 96 trinucleotide channels) that plugs into the existing `run_inference.py` pipeline the
+same way a simulated dataset does.
 
 ## What this does
 
