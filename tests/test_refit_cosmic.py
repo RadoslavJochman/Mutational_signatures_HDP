@@ -36,6 +36,40 @@ class TestSplitAvailable:
         assert missing == ["SBS99"]
 
 
+class TestPairwiseSignatureCosine:
+    def test_diagonal_is_one_and_matrix_is_symmetric(self):
+        catalogue = pd.DataFrame(
+            {"ch0": [1.0, 0.0, 0.6], "ch1": [0.0, 1.0, 0.8]},
+            index=["SIGA", "SIGB", "SIGC"],
+        )
+        matrix = rc.pairwise_signature_cosine(catalogue, ["SIGA", "SIGB", "SIGC"])
+        assert np.allclose(np.diag(matrix.to_numpy()), 1.0)
+        assert matrix.loc["SIGA", "SIGB"] == pytest.approx(matrix.loc["SIGB", "SIGA"])
+        assert matrix.loc["SIGA", "SIGB"] == pytest.approx(0.0, abs=1e-9)
+
+    def test_drops_a_missing_name_rather_than_raising(self):
+        catalogue = pd.DataFrame({"ch0": [1.0], "ch1": [0.0]}, index=["SIGA"])
+        matrix = rc.pairwise_signature_cosine(catalogue, ["SIGA", "NOT_THERE"])
+        assert list(matrix.index) == ["SIGA"]
+
+
+class TestFlagCollinearPairs:
+    def test_flags_only_pairs_above_threshold_once_each(self):
+        matrix = pd.DataFrame(
+            [[1.0, 0.9, 0.1], [0.9, 1.0, 0.2], [0.1, 0.2, 1.0]],
+            index=["A", "B", "C"],
+            columns=["A", "B", "C"],
+        )
+        flagged = rc.flag_collinear_pairs(matrix, threshold=0.8)
+        assert flagged == [("A", "B", pytest.approx(0.9))]
+
+    def test_nothing_flagged_below_threshold(self):
+        matrix = pd.DataFrame(
+            [[1.0, 0.3], [0.3, 1.0]], index=["A", "B"], columns=["A", "B"]
+        )
+        assert rc.flag_collinear_pairs(matrix, threshold=0.8) == []
+
+
 class TestNnlsFit:
     def test_recovers_known_exposures_on_a_pure_mixture(self):
         true_fractions = np.array([0.3, 0.7])

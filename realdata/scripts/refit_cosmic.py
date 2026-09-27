@@ -56,7 +56,15 @@ count in the plan) gets a direct comparison against the other clusters'
 spectra, since a real biological difference there would need its own
 signature rather than forcing it onto the shared repertoire.
 
+Also reports pairwise cosine similarity among `--collinearity-signatures`
+(default SBS1, SBS3, SBS5, SBS18, SBS40a, SBS95, SBS2, SBS13, from
+`--catalogue`), flagging pairs above `--collinearity-threshold` (0.8) --
+a check on whether the candidate/full fits' components could be
+substituting for each other rather than each explaining something real.
+
 Outputs (to --outdir)
+    refit_collinearity.csv    the pairwise cosine matrix among
+                               --collinearity-signatures
     refit_exposures.csv       long format: cluster, fit_set, signature,
                                exposure_fraction, bootstrap_stability,
                                cosine_similarity (repeated per row of its
@@ -133,6 +141,17 @@ FORWARD_SELECTION_START = ["SBS1", "SBS5"]
 N_BOOTSTRAP = 200
 STABILITY_THRESHOLD = 0.05
 MIN_GAIN = 0.01
+COLLINEARITY_THRESHOLD = 0.8
+COLLINEARITY_SIGNATURES = [
+    "SBS1",
+    "SBS3",
+    "SBS5",
+    "SBS18",
+    "SBS40a",
+    "SBS95",
+    "SBS2",
+    "SBS13",
+]
 
 
 def split_available(
@@ -143,6 +162,36 @@ def split_available(
     present = [n for n in names if n in cosmic.index]
     missing = [n for n in names if n not in cosmic.index]
     return present, missing
+
+
+def pairwise_signature_cosine(
+    catalogue: pd.DataFrame, names: List[str]
+) -> pd.DataFrame:
+    """Symmetric cosine-similarity matrix among ``names``' rows in
+    ``catalogue`` (whichever of them are actually present -- missing names
+    are dropped, not raised on). Diagonal is 1.0 by construction."""
+    present = [n for n in names if n in catalogue.index]
+    matrix = pd.DataFrame(index=present, columns=present, dtype=float)
+    for a in present:
+        for b in present:
+            matrix.loc[a, b] = cosine(
+                catalogue.loc[a].to_numpy(), catalogue.loc[b].to_numpy()
+            )
+    return matrix
+
+
+def flag_collinear_pairs(
+    matrix: pd.DataFrame, threshold: float = COLLINEARITY_THRESHOLD
+) -> List[Tuple[str, str, float]]:
+    """``(signature_a, signature_b, cosine)`` for every off-diagonal pair
+    whose similarity exceeds ``threshold``, each pair reported once."""
+    names = list(matrix.index)
+    return [
+        (names[i], names[j], float(matrix.iloc[i, j]))
+        for i in range(len(names))
+        for j in range(i + 1, len(names))
+        if matrix.iloc[i, j] > threshold
+    ]
 
 
 def nnls_fit(spectrum: np.ndarray, signatures: pd.DataFrame) -> Tuple[pd.Series, float]:
@@ -320,15 +369,36 @@ def main() -> None:
     p.add_argument("--min-gain", type=float, default=MIN_GAIN)
     p.add_argument("--focus-cluster", default="10")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--collinearity-signatures",
+        nargs="+",
+        default=COLLINEARITY_SIGNATURES,
+        help="signatures to report a pairwise cosine matrix for, from "
+        "--catalogue, before fitting anything",
+    )
+    p.add_argument(
+        "--collinearity-threshold", type=float, default=COLLINEARITY_THRESHOLD
+    )
     args = p.parse_args()
 
     spectra = read_data_matrix(args.spectra)
     catalogue = pd.read_csv(args.catalogue, index_col=0)
 
+    collinearity = pairwise_signature_cosine(catalogue, args.collinearity_signatures)
+    print("## Pairwise signature cosine similarity (collinearity check)")
+    print(collinearity.round(3).to_string())
+    collinear_pairs = flag_collinear_pairs(collinearity, args.collinearity_threshold)
+    print(f"\nFlag: pairs above {args.collinearity_threshold}")
+    if collinear_pairs:
+        for a, b, sim in collinear_pairs:
+            print(f"  {a} / {b}: {sim:.3f}")
+    else:
+        print("  none")
+
     present_candidates, missing_candidates = split_available(
         catalogue, BREAST_CANDIDATE_SET
     )
-    print("## Candidate set availability")
+    print("\n## Candidate set availability")
     print(f"present in {args.catalogue.name}: {present_candidates}")
     if missing_candidates:
         print(f"MISSING from {args.catalogue.name}: {missing_candidates}")
@@ -415,6 +485,7 @@ def main() -> None:
     selection_order = pd.DataFrame(selection_rows)
 
     args.outdir.mkdir(parents=True, exist_ok=True)
+    collinearity.to_csv(args.outdir / "refit_collinearity.csv")
     exposures.to_csv(args.outdir / "refit_exposures.csv", index=False)
     summary.to_csv(args.outdir / "refit_summary.csv", index=False)
     selection_order.to_csv(args.outdir / "refit_selection_order.csv", index=False)
