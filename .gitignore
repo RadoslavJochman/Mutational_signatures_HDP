@@ -24,3 +24,8 @@ realdata/external/
 # real tree/spectra inputs copied down from Euler for local checks -- real
 # data, never committed (see check_tree_inputs.py)
 realdata/local_tree_input/
+
+# full COSMIC v3.4 SBS GRCh37 catalogue (raw and converted) -- licence for
+# redistribution not yet confirmed, see COSMIC_sig/README_full_catalogue.md
+COSMIC_sig/COSMIC_v3.4_SBS_GRCh37.txt
+COSMIC_sig/cosmic_v3.4_sbs96_grch37_full.csv
