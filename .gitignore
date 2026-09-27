@@ -20,3 +20,7 @@ scripts/throw_away/
 
 # cloned external tool repos (their own git history, not ours)
 realdata/external/
+
+# real tree/spectra inputs copied down from Euler for local checks -- real
+# data, never committed (see check_tree_inputs.py)
+realdata/local_tree_input/
