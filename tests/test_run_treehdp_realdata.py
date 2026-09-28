@@ -18,6 +18,23 @@ sys.path.insert(0, str(REPO_ROOT / "realdata" / "scripts"))
 import run_treehdp_realdata as rtr  # noqa: E402
 
 
+class TestFullRepertoire:
+    def test_has_the_ten_named_signatures_and_excludes_sbs95(self):
+        assert set(rtr.FULL_REPERTOIRE) == {
+            "SBS1",
+            "SBS2",
+            "SBS3",
+            "SBS5",
+            "SBS8",
+            "SBS13",
+            "SBS17a",
+            "SBS17b",
+            "SBS18",
+            "SBS40a",
+        }
+        assert "SBS95" not in rtr.FULL_REPERTOIRE
+
+
 class TestSelectSignatures:
     def test_returns_rows_in_exactly_the_requested_order(self):
         catalogue = pd.DataFrame(
@@ -152,6 +169,28 @@ class TestSpectraSensitivityTable:
         }
         table = rtr.spectra_sensitivity_table(runs, "snv")
         assert len(table) == 0
+
+
+class TestActiveSignatureSummary:
+    def test_counts_clusters_whose_lower_bound_clears_the_threshold(self):
+        activity = _activity_df(
+            [
+                ("3", "observed", "SBS2", 0.05, 0.03, 0.08),
+                ("7", "observed", "SBS2", 0.01, 0.00, 0.02),
+                ("8", "observed", "SBS2", 0.10, 0.025, 0.15),
+                ("germline", "latent", "SBS2", 0.5, 0.4, 0.6),
+            ]
+        )
+        table = rtr.active_signature_summary(activity, threshold=0.02)
+        row = table[table["signature"] == "SBS2"].iloc[0]
+        assert row["n_clusters_active"] == 2
+        assert row["n_clusters_total"] == 3
+        assert row["max_mean"] == pytest.approx(0.10)
+
+    def test_a_signature_with_no_clusters_above_threshold_reports_zero(self):
+        activity = _activity_df([("3", "observed", "SBS13", 0.01, 0.0, 0.02)])
+        table = rtr.active_signature_summary(activity, threshold=0.02)
+        assert table.iloc[0]["n_clusters_active"] == 0
 
 
 class TestBaselineComparisonTable:

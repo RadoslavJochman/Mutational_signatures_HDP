@@ -35,6 +35,12 @@ Settings
                   report).
     sensitivity   spectra (c) (VAF >= 0.15 and alt reads >= 3, the
                   stricter confidence subset), signatures SBS1, SBS5 only.
+    full          the full triple-negative breast repertoire
+                  (FULL_REPERTOIRE: SBS1, SBS2, SBS3, SBS5, SBS8, SBS13,
+                  SBS17a, SBS17b, SBS18, SBS40a), on both spectra (a) and
+                  (c). No SBS95: it is near-identical to SBS18 (cosine
+                  0.900, refit_cosmic.py's collinearity report), and the
+                  two together would be unidentifiable.
     baseline      the independent/no-tree comparator used in the
                   tree-vs-pooling ablation -- checked for at import time
                   (BASELINE_AVAILABLE); as of this run the codebase does
@@ -106,6 +112,22 @@ MAX_TREEDEPTH = 10
 SEED = 20260927
 
 TREE_NAMES = ("snv", "cna", "consensus")
+
+# The full triple-negative breast repertoire (the "full" setting). No
+# SBS95: collinear with SBS18 at cosine 0.900 (refit_cosmic.py's
+# collinearity report), so the two together would be unidentifiable.
+FULL_REPERTOIRE = [
+    "SBS1",
+    "SBS2",
+    "SBS3",
+    "SBS5",
+    "SBS8",
+    "SBS13",
+    "SBS17a",
+    "SBS17b",
+    "SBS18",
+    "SBS40a",
+]
 
 # The tree-free/independent-node ablation used in the tree-vs-pooling
 # comparison (CLAUDE.md's "Direction of travel", item 2) does not exist in
@@ -474,6 +496,29 @@ def spectra_sensitivity_table(
                 "main_sbs5_renorm": m5 / total if total > 0 else float("nan"),
                 "sensitivity_sbs5": s5,
                 "main_sbs95_share": m95,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def active_signature_summary(
+    activity: pd.DataFrame, threshold: float = 0.02
+) -> pd.DataFrame:
+    """Per signature, over one run's activity_summary.csv: how many
+    observed clusters have their 90% interval's lower bound (``p5``)
+    above ``threshold`` (clearly active, not just consistent with zero),
+    and the largest posterior mean among those clusters."""
+    observed = activity[activity["kind"] == "observed"]
+    rows = []
+    for signature in observed["signature"].unique():
+        rows_for_sig = observed[observed["signature"] == signature]
+        active = rows_for_sig[rows_for_sig["p5"] > threshold]
+        rows.append(
+            {
+                "signature": signature,
+                "n_clusters_active": len(active),
+                "n_clusters_total": len(rows_for_sig),
+                "max_mean": float(rows_for_sig["mean"].max()),
             }
         )
     return pd.DataFrame(rows)
